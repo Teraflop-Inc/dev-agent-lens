@@ -1,0 +1,25 @@
+services:
+  litellm-proxy:
+    image: ghcr.io/berriai/litellm:main-latest
+    container_name: litellm-proxy
+    ports:
+      - "8082:4000" # LiteLLM runs on port 4000 inside container
+    volumes:
+      - ./litellm_config.yaml:/app/config.yaml
+    environment:
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - ARIZE_SPACE_KEY=${ARIZE_SPACE_KEY}
+      - ARIZE_API_KEY=${ARIZE_API_KEY}
+      - ARIZE_MODEL_ID=${ARIZE_MODEL_ID}
+      - ARIZE_MODEL_VERSION=${ARIZE_MODEL_VERSION}
+      - LITELLM_LOG=${LITELLM_LOG}
+      - OTEL_EXPORTER_OTLP_ENDPOINT="https://otlp.arize.com"
+      - OTEL_EXPORTER_OTLP_HEADERS="api_key=${ARIZE_API_KEY},space_key=${ARIZE_SPACE_KEY}"
+    command:
+      ["--config", "/app/config.yaml", "--port", "4000", "--num_workers", "1"]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:4000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
