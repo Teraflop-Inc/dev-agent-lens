@@ -1,0 +1,21 @@
+receivers:
+  otlp:
+    protocols:
+      grpc:
+
+processors:
+  batch:
+
+exporters:
+  otlp/arize:
+    endpoint: otlp.arize.com:4317
+    headers:
+      api_key: "${ARIZE_API_KEY}"
+      space_key: "${ARIZE_SPACE_KEY}"
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlp/arize]

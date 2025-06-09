@@ -1,8 +1,7 @@
 model_list:
-  # Map Claude Code's expected models to Anthropic
   - model_name: claude-sonnet-4-20250514
     litellm_params:
-      model: anthropic/claude-3-5-sonnet-20241022
+      model: anthropic/claude-sonnet-4-20250514
       api_key: os.environ/ANTHROPIC_API_KEY
 
   - model_name: claude-3-5-sonnet-20241022
@@ -20,15 +19,14 @@ model_list:
       model: anthropic/claude-3-sonnet-20240229
       api_key: os.environ/ANTHROPIC_API_KEY
 
-  # Map the generic names Claude Code might use
-  - model_name: sonnet
+  - model_name: claude-3-5-sonnet-20241022
     litellm_params:
       model: anthropic/claude-3-5-sonnet-20241022
       api_key: os.environ/ANTHROPIC_API_KEY
 
   - model_name: claude-3-5-haiku-20241022
     litellm_params:
-      model: anthropic/
+      model: anthropic/claude-3-5-haiku-20241022
       api_key: os.environ/ANTHROPIC_API_KEY
 
   - model_name: haiku
@@ -38,9 +36,21 @@ model_list:
 
 litellm_settings:
   # Enable Arize logging
-  success_callback: ["arize"]
-  failure_callback: ["arize"]
+  callbacks: ["arize"]
+  callback_settings:
+    arize:
+      space_key: "${ARIZE_SPACE_KEY}"
+      api_key: "${ARIZE_API_KEY}"
+      model_id: "claude-code-proxy"
+      model_version: "1.0"
 
   # Optional: Enable other callbacks for debugging
   # success_callback: ["arize", "langfuse"]
   # failure_callback: ["arize", "langfuse"]
+#
+#general_settings:
+#  master_key: "sk-1234" # Optional: Add authentication to your proxy
+
+environment_variables:
+  ARIZE_SPACE_KEY: "U3BhY2U6MjE3Nzk6ZVJkMQ=="
+  ARIZE_API_KEY: "ak-e4abdbe6-aeb1-487a-a77e-45bc05df2c18-BKkFQBSMC8xEGZ7jh-YlSqDtu3Ds9FIS"

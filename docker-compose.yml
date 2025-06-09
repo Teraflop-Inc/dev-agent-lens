@@ -1,25 +1,24 @@
 services:
-  litellm-proxy:
-    image: ghcr.io/berriai/litellm:main-latest
-    container_name: litellm-proxy
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:latest
     ports:
-      - "8082:4000" # LiteLLM runs on port 4000 inside container
+      - "4317:4317"
     volumes:
-      - ./litellm_config.yaml:/app/config.yaml
+      - ./collector-config.yaml:/etc/otel-collector-config.yaml:ro
+    command: ["--config", "/etc/otel-collector-config.yaml"]
+
+  portkey-gateway:
+    image: portkeyai/gateway:latest
+    container_name: portkey-gateway
+    ports:
+      - "8787:8787"
+
     environment:
-      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
-      - ARIZE_SPACE_KEY=${ARIZE_SPACE_KEY}
-      - ARIZE_API_KEY=${ARIZE_API_KEY}
-      - ARIZE_MODEL_ID=${ARIZE_MODEL_ID}
-      - ARIZE_MODEL_VERSION=${ARIZE_MODEL_VERSION}
-      - LITELLM_LOG=${LITELLM_LOG}
-      - OTEL_EXPORTER_OTLP_ENDPOINT="https://otlp.arize.com"
-      - OTEL_EXPORTER_OTLP_HEADERS="api_key=${ARIZE_API_KEY},space_key=${ARIZE_SPACE_KEY}"
-    command:
-      ["--config", "/app/config.yaml", "--port", "4000", "--num_workers", "1"]
+      - OTEL_PUSH_ENABLED=true
+      - OTEL_ENDPOINT=http://otel-collector:4317
+
+      # — Your Portkey credentials —
+      - PORTKEY_API_KEY=${PORTKEY_API_KEY}
+      - PORTKEY_VIRTUAL_KEY=${PORTKEY_VIRTUAL_KEY}
+
     restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:4000/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
