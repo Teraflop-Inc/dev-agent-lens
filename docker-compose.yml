@@ -7,14 +7,12 @@ services:
     volumes:
       - ./litellm_config.yaml:/app/config.yaml
     environment:
+      - LITELLM_LOG=${LITELLM_LOG}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
       - ARIZE_SPACE_KEY=${ARIZE_SPACE_KEY}
       - ARIZE_API_KEY=${ARIZE_API_KEY}
       - ARIZE_MODEL_ID=${ARIZE_MODEL_ID}
       - ARIZE_MODEL_VERSION=${ARIZE_MODEL_VERSION}
-      - LITELLM_LOG=${LITELLM_LOG}
-      - OTEL_EXPORTER_OTLP_ENDPOINT="https://otlp.arize.com"
-      - OTEL_EXPORTER_OTLP_HEADERS="api_key=${ARIZE_API_KEY},space_key=${ARIZE_SPACE_KEY}"
     command:
       ["--config", "/app/config.yaml", "--port", "4000", "--num_workers", "1"]
     restart: unless-stopped

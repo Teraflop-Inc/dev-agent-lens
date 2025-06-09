@@ -2,7 +2,7 @@ model_list:
   # Map Claude Code's expected models to Anthropic
   - model_name: claude-sonnet-4-20250514
     litellm_params:
-      model: anthropic/claude-3-5-sonnet-20241022
+      model: anthropic/claude-sonnet-4-20250514
       api_key: os.environ/ANTHROPIC_API_KEY
 
   - model_name: claude-3-5-sonnet-20241022
@@ -37,10 +37,4 @@ model_list:
       api_key: os.environ/ANTHROPIC_API_KEY
 
 litellm_settings:
-  # Enable Arize logging
-  success_callback: ["arize"]
-  failure_callback: ["arize"]
-
-  # Optional: Enable other callbacks for debugging
-  # success_callback: ["arize", "langfuse"]
-  # failure_callback: ["arize", "langfuse"]
+  callbacks: ["arize"]
