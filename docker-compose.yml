@@ -3,16 +3,22 @@ services:
     image: ghcr.io/berriai/litellm:main-latest
     container_name: litellm-proxy
     ports:
-      - "8082:4000" # LiteLLM runs on port 4000 inside container
+      - "8082:4000"
     volumes:
       - ./litellm_config.yaml:/app/config.yaml
     environment:
+      # your existing keys
       - LITELLM_LOG=${LITELLM_LOG}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
       - ARIZE_SPACE_KEY=${ARIZE_SPACE_KEY}
       - ARIZE_API_KEY=${ARIZE_API_KEY}
       - ARIZE_MODEL_ID=${ARIZE_MODEL_ID}
       - ARIZE_MODEL_VERSION=${ARIZE_MODEL_VERSION}
+
+      # configure OTLP gRPC exporter for Arize
+      - OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=https://otlp.arize.com/v1/traces
+      - OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
+      - OTEL_EXPORTER_OTLP_HEADERS=api_key=${ARIZE_API_KEY},space_key=${ARIZE_SPACE_KEY}
     command:
       ["--config", "/app/config.yaml", "--port", "4000", "--num_workers", "1"]
     restart: unless-stopped
