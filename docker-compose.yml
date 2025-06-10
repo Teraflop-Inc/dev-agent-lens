@@ -1,24 +1,31 @@
 services:
   litellm-proxy:
-    image: ghcr.io/berriai/litellm:main-latest
-    container_name: litellm-proxy
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: litellm-proxy:with-arize
     ports:
       - "8082:4000"
     volumes:
       - ./litellm_config.yaml:/app/config.yaml
     environment:
-      # your existing keys
-      - LITELLM_LOG=${LITELLM_LOG}
+      # Anthropic + runtime
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
-      - ARIZE_SPACE_KEY=${ARIZE_SPACE_KEY}
-      - ARIZE_API_KEY=${ARIZE_API_KEY}
-      - ARIZE_MODEL_ID=${ARIZE_MODEL_ID}
-      - ARIZE_MODEL_VERSION=${ARIZE_MODEL_VERSION}
+      - LITELLM_LOG=${LITELLM_LOG}
 
-      # configure OTLP gRPC exporter for Arize
-      - OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=https://otlp.arize.com/v1/traces
-      - OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
-      - OTEL_EXPORTER_OTLP_HEADERS=api_key=${ARIZE_API_KEY},space_key=${ARIZE_SPACE_KEY}
+      # Arize auth
+      - ARIZE_API_KEY=${ARIZE_API_KEY}
+      - ARIZE_SPACE_KEY=${ARIZE_SPACE_KEY}
+
+      # “Project” info that shows up in the Arize UI
+      - ARIZE_MODEL_ID=${ARIZE_MODEL_ID:-litellm-proxy}
+      - ARIZE_MODEL_VERSION=${ARIZE_MODEL_VERSION:-local-dev}
+
+      # Optional but recommended – explicit endpoint
+      - ARIZE_ENDPOINT=https://otlp.arize.com/v1
+
+      # Give the resource a name so you can filter by service
+      - OTEL_RESOURCE_ATTRIBUTES=service.name=litellm-proxy
     command:
       ["--config", "/app/config.yaml", "--port", "4000", "--num_workers", "1"]
     restart: unless-stopped
