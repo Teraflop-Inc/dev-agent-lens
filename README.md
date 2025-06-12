@@ -14,8 +14,8 @@ This repository provides a transparent proxy layer for Claude Code that:
 ## Architecture
 
 ```
-Claude Code CLI ’ LiteLLM Proxy (localhost:8082) ’ Anthropic API
-                       “
+Claude Code CLI ï¿½ LiteLLM Proxy (localhost:8082) ï¿½ Anthropic API
+                       ï¿½
                    Arize AI (Observability)
 ```
 
@@ -66,14 +66,14 @@ The proxy will transparently handle all Claude Code interactions while providing
 
 The proxy maps Claude Code model names to Anthropic API models via `litellm_config.yaml`:
 
-- `claude-sonnet-4-20250514` ’ `anthropic/claude-sonnet-4-20250514`
-- `claude-3-5-sonnet-20241022` ’ `anthropic/claude-3-5-sonnet-20241022`
-- `claude-3-haiku-20240307` ’ `anthropic/claude-3-haiku-20240307`
+- `claude-sonnet-4-20250514` ï¿½ `anthropic/claude-sonnet-4-20250514`
+- `claude-3-5-sonnet-20241022` ï¿½ `anthropic/claude-3-5-sonnet-20241022`
+- `claude-3-haiku-20240307` ï¿½ `anthropic/claude-3-haiku-20240307`
 - Aliases: `sonnet`, `haiku`
 
 ### Services
 
-- **Proxy Port**: 8082 (external) ’ 4000 (internal)
+- **Proxy Port**: 8082 (external) ï¿½ 4000 (internal)
 - **Health Check**: <http://localhost:8082/health>
 - **OpenTelemetry**: Configured for Arize endpoint
 
@@ -93,6 +93,14 @@ All Claude Code interactions are automatically:
 - Monitored for performance and usage patterns
 - Available for cost analysis and optimization
 - Tracked with OpenTelemetry standards
+
+### Viewing Traces in Arize
+
+To filter traces in Arize for relevant tool-related interactions, use this filter:
+
+```
+status_code = 'OK' and attributes.llm.token_count.total > 0 and attributes.input.value contains "tool" or attributes.input.value contains "text"
+```
 
 ## Development
 
