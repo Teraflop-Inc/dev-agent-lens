@@ -5,6 +5,7 @@ A proxy setup for Claude Code that adds observability, monitoring, and tracing c
 ## Overview
 
 This repository provides a transparent proxy layer for Claude Code that:
+
 - Intercepts Claude Code API calls and routes them through LiteLLM
 - Adds AI observability and monitoring via Arize AI
 - Maintains full compatibility with the standard Claude Code CLI
@@ -28,6 +29,7 @@ Claude Code CLI ’ LiteLLM Proxy (localhost:8082) ’ Anthropic API
 ## Quick Start
 
 1. **Set up environment variables:**
+
 ```bash
 export ANTHROPIC_API_KEY="your-anthropic-key"
 export ARIZE_API_KEY="your-arize-key"
@@ -39,13 +41,21 @@ export ARIZE_MODEL_VERSION="local-dev"
 ```
 
 2. **Start the proxy:**
+
 ```bash
 docker-compose up -d
 ```
 
 3. **Use Claude Code with the proxy:**
+
 ```bash
-./claude-proxy [your-claude-code-arguments]
+./claude-lens [your-claude-code-arguments]
+```
+
+4. Optionally copy Claude Lens to `/usr/local/bin`
+
+```bash
+sudo cp claude-lens /usr/local/bin
 ```
 
 The proxy will transparently handle all Claude Code interactions while providing full observability.
@@ -64,7 +74,7 @@ The proxy maps Claude Code model names to Anthropic API models via `litellm_conf
 ### Services
 
 - **Proxy Port**: 8082 (external) ’ 4000 (internal)
-- **Health Check**: http://localhost:8082/health
+- **Health Check**: <http://localhost:8082/health>
 - **OpenTelemetry**: Configured for Arize endpoint
 
 ## Key Files
@@ -78,6 +88,7 @@ The proxy maps Claude Code model names to Anthropic API models via `litellm_conf
 ## Monitoring & Observability
 
 All Claude Code interactions are automatically:
+
 - Logged and traced in Arize AI
 - Monitored for performance and usage patterns
 - Available for cost analysis and optimization
@@ -101,3 +112,4 @@ The setup includes a custom LiteLLM build located in the `./litellm` directory, 
 - **Enterprise Ready**: Built-in monitoring and cost tracking
 - **Model Management**: Centralized configuration for all Claude models
 - **Extensible**: Based on LiteLLM's robust proxy framework
+
