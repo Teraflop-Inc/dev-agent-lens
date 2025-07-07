@@ -1,9 +1,10 @@
 services:
   litellm-proxy:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    image: litellm-proxy:with-arize
+    image: ghcr.io/berriai/litellm:main-latest
+    #build:
+    #  context: .
+    #  dockerfile: Dockerfile
+    #image: litellm-proxy:with-arize
     ports:
       - "8082:4000"
     volumes:
