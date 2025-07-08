@@ -26,33 +26,56 @@ Claude Code CLI � LiteLLM Proxy (localhost:8082) � Anthropic API
 - Anthropic API key
 - Arize AI account (for observability)
 
+## Environment Variables
+
+The following environment variables are required:
+
+- `ANTHROPIC_API_KEY` - Your Anthropic API key for Claude models
+- `ARIZE_API_KEY` - Your Arize AI API key for observability
+- `ARIZE_SPACE_KEY` - Your Arize AI space key
+
+Optional environment variables:
+
+- `ARIZE_MODEL_ID` - Model ID shown in Arize UI (default: `litellm-proxy`)
+- `ARIZE_MODEL_VERSION` - Model version shown in Arize UI (default: `local-dev`)
+- `LITELLM_MASTER_KEY` - Master key for LiteLLM proxy authentication (optional)
+
 ## Quick Start
 
-1. **Set up environment variables:**
+1. **Create a `.env` file from the example:**
 
 ```bash
-export ANTHROPIC_API_KEY="your-anthropic-key"
-export ARIZE_API_KEY="your-arize-key"
-export ARIZE_SPACE_KEY="your-arize-space-key"
-
-# Optional: Custom Arize model configuration
-export ARIZE_MODEL_ID="litellm-proxy"
-export ARIZE_MODEL_VERSION="local-dev"
+cp .env.example .env
 ```
 
-2. **Start the proxy:**
+2. **Edit the `.env` file and add your API keys:**
+
+```bash
+LITELLM_MASTER_KEY=your-optional-master-key
+ANTHROPIC_API_KEY=your-anthropic-api-key
+ARIZE_SPACE_KEY=your-arize-space-key
+ARIZE_API_KEY=your-arize-api-key
+```
+
+3. **Start the proxy using Docker Compose:**
 
 ```bash
 docker-compose up -d
 ```
 
-3. **Use Claude Code with the proxy:**
+4. **Verify the proxy is running:**
+
+```bash
+curl http://localhost:8082/health
+```
+
+5. **Use Claude Code with the proxy:**
 
 ```bash
 ./claude-lens [your-claude-code-arguments]
 ```
 
-4. Optionally copy Claude Lens to `/usr/local/bin`
+6. **Optionally, install Claude Lens globally:**
 
 ```bash
 sudo cp claude-lens /usr/local/bin
@@ -79,11 +102,11 @@ The proxy maps Claude Code model names to Anthropic API models via `litellm_conf
 
 ## Key Files
 
-- `claude-proxy` - Wrapper script that starts Claude Code with proxy configuration
+- `claude-lens` - Wrapper script that starts Claude Code with proxy configuration
 - `docker-compose.yml` - Service definition and environment setup
 - `litellm_config.yaml` - Model routing and callback configuration
-- `Dockerfile` - Custom LiteLLM build with modifications
-- `litellm/` - Custom fork of LiteLLM with project-specific enhancements
+- `.env.example` - Example environment variables file
+- `.env` - Your local environment configuration (not tracked in git)
 
 ## Monitoring & Observability
 
@@ -102,16 +125,54 @@ To filter traces in Arize for relevant tool-related interactions, use this filte
 status_code = 'OK' and attributes.llm.token_count.total > 0 and attributes.input.value contains "tool" or attributes.input.value contains "text"
 ```
 
+## Docker Compose Configuration
+
+The `docker-compose.yml` file sets up the LiteLLM proxy service with:
+
+- **Image**: Uses the official LiteLLM image (`ghcr.io/berriai/litellm:main-latest`)
+- **Port mapping**: 8082 (host) → 4000 (container)
+- **Configuration**: Mounts `litellm_config.yaml` for model routing
+- **Environment**: Passes through all required API keys and Arize configuration
+- **Health checks**: Automatic health monitoring every 30 seconds
+- **Restart policy**: Automatically restarts unless manually stopped
+
 ## Development
 
-The setup includes a custom LiteLLM build located in the `./litellm` directory, which contains modifications specific to this proxy implementation.
+To modify the proxy configuration:
+
+1. Edit `litellm_config.yaml` to change model mappings or callbacks
+2. Update `.env` with your API credentials
+3. Restart the proxy: `docker-compose restart`
+
+## Managing the Proxy
+
+### Starting the proxy
+```bash
+docker-compose up -d
+```
+
+### Stopping the proxy
+```bash
+docker-compose down
+```
+
+### Viewing logs
+```bash
+docker-compose logs -f
+```
+
+### Restarting after configuration changes
+```bash
+docker-compose restart
+```
 
 ## Troubleshooting
 
-- Ensure the proxy is running: `docker-compose ps`
-- Check proxy health: `curl http://localhost:8082/health`
-- View logs: `docker-compose logs -f`
-- Verify environment variables are set correctly
+- **Check if proxy is running**: `docker-compose ps`
+- **Verify proxy health**: `curl http://localhost:8082/health`
+- **View real-time logs**: `docker-compose logs -f`
+- **Verify environment variables**: Ensure all required variables are set in `.env`
+- **Claude Lens errors**: The wrapper script will check if the proxy is running before starting Claude Code
 
 ## Benefits
 
