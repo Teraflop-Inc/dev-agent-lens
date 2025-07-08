@@ -14,8 +14,8 @@ This repository provides a transparent proxy layer for Claude Code that:
 ## Architecture
 
 ```
-Claude Code CLI � LiteLLM Proxy (localhost:8082) � Anthropic API
-                       �
+Claude Code CLI → LiteLLM Proxy (localhost:8082) → Anthropic API
+                       ↓
                    Arize AI (Observability)
 ```
 
@@ -89,14 +89,14 @@ The proxy will transparently handle all Claude Code interactions while providing
 
 The proxy maps Claude Code model names to Anthropic API models via `litellm_config.yaml`:
 
-- `claude-sonnet-4-20250514` � `anthropic/claude-sonnet-4-20250514`
-- `claude-3-5-sonnet-20241022` � `anthropic/claude-3-5-sonnet-20241022`
-- `claude-3-haiku-20240307` � `anthropic/claude-3-haiku-20240307`
+- `claude-sonnet-4-20250514` → `anthropic/claude-sonnet-4-20250514`
+- `claude-3-5-sonnet-20241022` → `anthropic/claude-3-5-sonnet-20241022`
+- `claude-3-haiku-20240307` → `anthropic/claude-3-haiku-20240307`
 - Aliases: `sonnet`, `haiku`
 
 ### Services
 
-- **Proxy Port**: 8082 (external) � 4000 (internal)
+- **Proxy Port**: 8082 (external) → 4000 (internal)
 - **Health Check**: <http://localhost:8082/health>
 - **OpenTelemetry**: Configured for Arize endpoint
 
