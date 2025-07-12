@@ -43,22 +43,25 @@ Optional environment variables:
 ## Quick Start
 
 ### 1. Prerequisites Check
+
 - Docker and Docker Compose installed
 - Claude Code CLI installed (`curl -fsSL https://claude.ai/install.sh | sh`)
 - API keys ready (see Environment Variables section)
 
 ### 2. Setup Environment
+
 ```bash
 # Copy the example environment file
 cp .env.example .env
 
 # Edit .env and add your API keys
 # ANTHROPIC_API_KEY=sk-ant-api03-your-key-here
-# ARIZE_SPACE_KEY=your-space-key-here  
+# ARIZE_SPACE_KEY=your-space-key-here
 # ARIZE_API_KEY=your-api-key-here
 ```
 
 ### 3. Start the Service
+
 ```bash
 # Start the proxy (runs in background)
 docker-compose up -d
@@ -68,6 +71,7 @@ curl http://localhost:8082/health
 ```
 
 ### 4. Use Claude Code with Observability
+
 ```bash
 # Use the wrapper script (recommended)
 ./claude-lens
@@ -78,6 +82,7 @@ claude-lens
 ```
 
 ### 5. View Traces in Arize
+
 - Open [Arize AI Dashboard](https://app.arize.com)
 - Navigate to your project
 - Filter traces with: `status_code = 'OK' and attributes.llm.token_count.total > 0`
@@ -148,21 +153,25 @@ To modify the proxy configuration:
 ## Managing the Proxy
 
 ### Starting the proxy
+
 ```bash
 docker-compose up -d
 ```
 
 ### Stopping the proxy
+
 ```bash
 docker-compose down
 ```
 
 ### Viewing logs
+
 ```bash
 docker-compose logs -f
 ```
 
 ### Restarting after configuration changes
+
 ```bash
 docker-compose restart
 ```
@@ -182,4 +191,3 @@ docker-compose restart
 - **Enterprise Ready**: Built-in monitoring and cost tracking
 - **Model Management**: Centralized configuration for all Claude models
 - **Extensible**: Based on LiteLLM's robust proxy framework
-
