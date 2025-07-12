@@ -42,46 +42,47 @@ Optional environment variables:
 
 ## Quick Start
 
-1. **Create a `.env` file from the example:**
+### 1. Prerequisites Check
+- Docker and Docker Compose installed
+- Claude Code CLI installed (`curl -fsSL https://claude.ai/install.sh | sh`)
+- API keys ready (see Environment Variables section)
 
+### 2. Setup Environment
 ```bash
+# Copy the example environment file
 cp .env.example .env
+
+# Edit .env and add your API keys
+# ANTHROPIC_API_KEY=sk-ant-api03-your-key-here
+# ARIZE_SPACE_KEY=your-space-key-here  
+# ARIZE_API_KEY=your-api-key-here
 ```
 
-2. **Edit the `.env` file and add your API keys:**
-
+### 3. Start the Service
 ```bash
-LITELLM_MASTER_KEY=your-optional-master-key
-ANTHROPIC_API_KEY=your-anthropic-api-key
-ARIZE_SPACE_KEY=your-arize-space-key
-ARIZE_API_KEY=your-arize-api-key
-```
-
-3. **Start the proxy using Docker Compose:**
-
-```bash
+# Start the proxy (runs in background)
 docker-compose up -d
-```
 
-4. **Verify the proxy is running:**
-
-```bash
+# Verify it's running (should return healthy endpoints)
 curl http://localhost:8082/health
 ```
 
-5. **Use Claude Code with the proxy:**
-
+### 4. Use Claude Code with Observability
 ```bash
-./claude-lens [your-claude-code-arguments]
-```
+# Use the wrapper script (recommended)
+./claude-lens
 
-6. **Optionally, install Claude Lens globally:**
-
-```bash
+# Or install globally for convenience
 sudo cp claude-lens /usr/local/bin
+claude-lens
 ```
 
-The proxy will transparently handle all Claude Code interactions while providing full observability.
+### 5. View Traces in Arize
+- Open [Arize AI Dashboard](https://app.arize.com)
+- Navigate to your project
+- Filter traces with: `status_code = 'OK' and attributes.llm.token_count.total > 0`
+
+**That's it!** All Claude Code interactions now include full observability and tracing.
 
 ## Configuration
 
