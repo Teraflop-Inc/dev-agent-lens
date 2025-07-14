@@ -1,6 +1,6 @@
-# Claude Code Proxy with LiteLLM and Arize Integration
+# Dev-Agent-Lens with LiteLLM and Arize Integration
 
-A proxy setup for Claude Code that adds observability, monitoring, and tracing capabilities through LiteLLM and Arize AI integration.
+A proxy setup for Open Source, Open Telemetry Compliant, or proxyable Developer Agents to add observability, monitoring, and tracing capabilities. The first developer agent is Claude Code.
 
 ## Overview
 
