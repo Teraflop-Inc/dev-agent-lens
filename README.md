@@ -132,6 +132,20 @@ Phoenix provides a comprehensive UI for viewing:
 
 Access the Phoenix dashboard at <http://localhost:6006>
 
+### Exporting Traces
+
+To export Phoenix traces for analysis:
+
+```bash
+# Install dependencies
+pip install -r requirements.txt
+
+# Export traces to CSV
+python extract_phoenix_traces.py
+```
+
+The script exports all traces from your project (defined by `OTEL_SERVICE_NAME`) to timestamped CSV files in the `trace_exports/` directory.
+
 ## Docker Compose Configuration
 
 The `docker-compose.yml` file sets up the LiteLLM proxy service with:

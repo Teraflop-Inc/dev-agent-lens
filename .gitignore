@@ -1,3 +1,11 @@
 .env
 
 .idea/
+
+.claude/
+.CLAUDE.md
+
+.venv/
+.mypy_cache/
+
+trace_exports/
