@@ -14,6 +14,7 @@ services:
 
       # Phoenix OTLP endpoint
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://phoenix:4317
+      - OTEL_EXPORTER_OTLP_PROTOCOL=grpc
 
       # Give the resource a name so you can filter by service
       - OTEL_RESOURCE_ATTRIBUTES=service.name=litellm-proxy
