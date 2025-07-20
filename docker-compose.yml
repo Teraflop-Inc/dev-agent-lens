@@ -9,19 +9,11 @@ services:
       # Anthropic + runtime
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
 
-      # Arize auth
-      - ARIZE_API_KEY=${ARIZE_API_KEY}
-      - ARIZE_SPACE_KEY=${ARIZE_SPACE_KEY}
+      # OTEL service name for Phoenix tracing
+      - OTEL_SERVICE_NAME=${OTEL_SERVICE_NAME:-litellm-proxy}
 
-      # “Project” info that shows up in the Arize UI
-      - ARIZE_MODEL_ID=${ARIZE_MODEL_ID:-litellm-proxy}
-      - ARIZE_MODEL_VERSION=${ARIZE_MODEL_VERSION:-local-dev}
-
-      # Optional but recommended – explicit endpoint
-      - ARIZE_ENDPOINT=https://otlp.arize.com/v1
-
-      # OTEL service name for Arize tracing
-      - OTEL_SERVICE_NAME=${OTEL_SERVICE_NAME}
+      # Phoenix OTLP endpoint
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://phoenix:4317
 
       # Give the resource a name so you can filter by service
       - OTEL_RESOURCE_ATTRIBUTES=service.name=litellm-proxy
@@ -33,3 +25,25 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
+    depends_on:
+      - phoenix
+
+  phoenix:
+    image: arizephoenix/phoenix:latest
+    ports:
+      - "6006:6006"  # Phoenix UI
+      - "4317:4317"  # OTLP gRPC endpoint
+    environment:
+      - PHOENIX_PORT=6006
+      - PHOENIX_HOST=0.0.0.0
+    volumes:
+      - phoenix_data:/mnt/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:6006"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+volumes:
+  phoenix_data:
