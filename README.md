@@ -1,13 +1,13 @@
-# Dev-Agent-Lens with LiteLLM and Arize Integration
+# Dev-Agent-Lens with LiteLLM and Phoenix Integration
 
-A proxy setup for Open Source, Open Telemetry Compliant, or proxyable Developer Agents to add observability, monitoring, and tracing capabilities. The first developer agent is Claude Code.
+A proxy setup for Open Source, Open Telemetry Compliant, or proxyable Developer Agents to add observability, monitoring, and tracing capabilities using Phoenix. The first developer agent is Claude Code.
 
 ## Overview
 
 This repository provides a transparent proxy layer for Claude Code that:
 
 - Intercepts Claude Code API calls and routes them through LiteLLM
-- Adds AI observability and monitoring via Arize AI
+- Adds AI observability and monitoring via Phoenix
 - Maintains full compatibility with the standard Claude Code CLI
 - Provides centralized model configuration and management
 
@@ -16,7 +16,7 @@ This repository provides a transparent proxy layer for Claude Code that:
 ```
 Claude Code CLI → LiteLLM Proxy (localhost:8082) → Anthropic API
                        ↓
-                   Arize AI (Observability)
+                   Phoenix (Observability)
 ```
 
 ## Prerequisites
@@ -24,20 +24,16 @@ Claude Code CLI → LiteLLM Proxy (localhost:8082) → Anthropic API
 - Docker and Docker Compose
 - Claude Code CLI installed
 - Anthropic API key
-- Arize AI account (for observability)
 
 ## Environment Variables
 
 The following environment variables are required:
 
 - `ANTHROPIC_API_KEY` - Your Anthropic API key for Claude models
-- `ARIZE_API_KEY` - Your Arize AI API key for observability
-- `ARIZE_SPACE_KEY` - Your Arize AI space key
 
 Optional environment variables:
 
-- `ARIZE_MODEL_ID` - Model ID shown in Arize UI (default: `litellm-proxy`)
-- `ARIZE_MODEL_VERSION` - Model version shown in Arize UI (default: `local-dev`)
+- `OTEL_SERVICE_NAME` - Service name for OpenTelemetry traces, determines Phoenix project name (default: `litellm-proxy`)
 - `LITELLM_MASTER_KEY` - Master key for LiteLLM proxy authentication (optional)
 
 ## Quick Start
@@ -46,7 +42,7 @@ Optional environment variables:
 
 - Docker and Docker Compose installed
 - Claude Code CLI installed (`curl -fsSL https://claude.ai/install.sh | sh`)
-- API keys ready (see Environment Variables section)
+- Anthropic API key ready (see Environment Variables section)
 
 ### 2. Setup Environment
 
@@ -54,10 +50,9 @@ Optional environment variables:
 # Copy the example environment file
 cp .env.example .env
 
-# Edit .env and add your API keys
+# Edit .env and add your API key
 # ANTHROPIC_API_KEY=sk-ant-api03-your-key-here
-# ARIZE_SPACE_KEY=your-space-key-here
-# ARIZE_API_KEY=your-api-key-here
+# OTEL_SERVICE_NAME=your-project-name-here
 ```
 
 ### 3. Start the Service
@@ -81,13 +76,13 @@ sudo cp claude-lens /usr/local/bin
 claude-lens
 ```
 
-### 5. View Traces in Arize
+### 5. View Traces in Phoenix
 
-- Open [Arize AI Dashboard](https://app.arize.com)
-- Navigate to your project
-- Filter traces with: `status_code = 'OK' and attributes.llm.token_count.total > 0`
+- Open Phoenix UI at [http://localhost:6006](http://localhost:6006)
+- Navigate to your project (named after OTEL_SERVICE_NAME)
+- View traces, spans, and LLM interactions with full observability
 
-**That's it!** All Claude Code interactions now include full observability and tracing.
+**That's it!** All Claude Code interactions now include full observability and tracing in Phoenix.
 
 ## Configuration
 
@@ -103,8 +98,10 @@ The proxy maps Claude Code model names to Anthropic API models via `litellm_conf
 ### Services
 
 - **Proxy Port**: 8082 (external) → 4000 (internal)
+- **Phoenix UI**: <http://localhost:6006>
+- **Phoenix OTLP**: 4317 (gRPC)
 - **Health Check**: <http://localhost:8082/health>
-- **OpenTelemetry**: Configured for Arize endpoint
+- **OpenTelemetry**: Configured for Phoenix endpoint
 
 ## Key Files
 
@@ -118,18 +115,22 @@ The proxy maps Claude Code model names to Anthropic API models via `litellm_conf
 
 All Claude Code interactions are automatically:
 
-- Logged and traced in Arize AI
+- Logged and traced in Phoenix
 - Monitored for performance and usage patterns
 - Available for cost analysis and optimization
 - Tracked with OpenTelemetry standards
 
-### Viewing Traces in Arize
+### Viewing Traces in Phoenix
 
-To filter traces in Arize for relevant tool-related interactions, use this filter:
+Phoenix provides a comprehensive UI for viewing:
 
-```
-status_code = 'OK' and attributes.llm.token_count.total > 0 and attributes.input.value contains "tool" or attributes.input.value contains "text"
-```
+- Individual traces and spans
+- LLM token usage and costs
+- Performance metrics and latency
+- Request/response payloads
+- Error tracking and debugging
+
+Access the Phoenix dashboard at <http://localhost:6006>
 
 ## Docker Compose Configuration
 
@@ -138,9 +139,10 @@ The `docker-compose.yml` file sets up the LiteLLM proxy service with:
 - **Image**: Uses the official LiteLLM image (`ghcr.io/berriai/litellm:main-latest`)
 - **Port mapping**: 8082 (host) → 4000 (container)
 - **Configuration**: Mounts `litellm_config.yaml` for model routing
-- **Environment**: Passes through all required API keys and Arize configuration
+- **Environment**: Passes through API keys and OpenTelemetry configuration
 - **Health checks**: Automatic health monitoring every 30 seconds
 - **Restart policy**: Automatically restarts unless manually stopped
+- **Phoenix service**: Runs on port 6006 with OTLP endpoint on 4317
 
 ## Development
 
@@ -186,8 +188,9 @@ docker-compose restart
 
 ## Benefits
 
-- **Complete Observability**: Full visibility into Claude Code usage
+- **Complete Observability**: Full visibility into Claude Code usage via Phoenix
 - **Zero Configuration**: Works transparently with existing Claude Code workflows
-- **Enterprise Ready**: Built-in monitoring and cost tracking
+- **Local Deployment**: All data stays local with Phoenix running in Docker
+- **Real-time Monitoring**: Live trace viewing and performance metrics
 - **Model Management**: Centralized configuration for all Claude models
 - **Extensible**: Based on LiteLLM's robust proxy framework

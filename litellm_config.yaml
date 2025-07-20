@@ -42,11 +42,6 @@ model_list:
       api_key: os.environ/ANTHROPIC_API_KEY
 
 litellm_settings:
-  callbacks: ["arize"]
+  callbacks: ["otel"] # Enable OpenTelemetry tracing for Phoenix
   drop_params: false # Don't drop any parameters
   set_verbose: true # Enable verbose logging to debug API calls
-
-environment:
-  - ARIZE_API_KEY=${ARIZE_API_KEY}
-  - ARIZE_SPACE_KEY=${ARIZE_SPACE_KEY} # LiteLLM still reads this name
-  - ARIZE_ENDPOINT=https://otlp.arize.com/v1
