@@ -8,7 +8,7 @@ if ! curl -s http://localhost:8082/health >/dev/null; then
 fi
 
 echo "✅ LiteLLM proxy is running"
-echo "🚀 Starting Claude Code with Arize tracing..."
+echo "🚀 Starting Claude Code with Phoenix tracing..."
 
 # Set the environment variable and run Claude Code
 export ANTHROPIC_BASE_URL=http://localhost:8082
