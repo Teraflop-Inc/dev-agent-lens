@@ -17,7 +17,7 @@ services:
       - OTEL_EXPORTER_OTLP_PROTOCOL=grpc
 
       # Give the resource a name so you can filter by service
-      - OTEL_RESOURCE_ATTRIBUTES=service.name=litellm-proxy
+      - OTEL_RESOURCE_ATTRIBUTES=service.name=${OTEL_SERVICE_NAME:-litellm-proxy},openinference.project.name=${OTEL_SERVICE_NAME:-litellm-proxy}
     command:
       ["--config", "/app/config.yaml", "--port", "4000", "--num_workers", "1"]
     restart: unless-stopped
