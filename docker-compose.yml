@@ -1,6 +1,8 @@
 services:
   litellm-proxy:
-    image: ghcr.io/berriai/litellm:main-latest
+    build:
+      context: ../litellm  # Update this path
+      dockerfile: Dockerfile
     ports:
       - "8082:4000"
     volumes:
@@ -15,6 +17,7 @@ services:
       # Phoenix OTLP endpoint
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://phoenix:4317
       - OTEL_EXPORTER_OTLP_PROTOCOL=grpc
+      - PHOENIX_COLLECTOR_ENDPOINT=http://phoenix:4317
 
       # Give the resource a name so you can filter by service
       - OTEL_RESOURCE_ATTRIBUTES=service.name=${OTEL_SERVICE_NAME:-litellm-proxy},openinference.project.name=${OTEL_SERVICE_NAME:-litellm-proxy}

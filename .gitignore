@@ -9,3 +9,8 @@
 .mypy_cache/
 
 trace_exports/
+
+/demo
+/litellm
+
+.DS_STORE
