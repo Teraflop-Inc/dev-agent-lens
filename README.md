@@ -24,6 +24,7 @@ Claude Code CLI → LiteLLM Proxy (localhost:8082) → Anthropic API
 - Docker and Docker Compose
 - Claude Code CLI installed
 - Anthropic API key
+- Custom LiteLLM installation (see Installation section below)
 
 ## Environment Variables
 
@@ -35,6 +36,21 @@ Optional environment variables:
 
 - `OTEL_SERVICE_NAME` - Service name for OpenTelemetry traces, determines Phoenix project name (default: `litellm-proxy`)
 - `LITELLM_MASTER_KEY` - Master key for LiteLLM proxy authentication (optional)
+
+## Installation
+
+### Custom LiteLLM Setup
+
+This project requires a custom build of LiteLLM with Claude Code support. Clone it as a sibling directory to this repo:
+
+```bash
+# Clone alongside this repo (both should be in the same parent directory)
+$ git clone https://github.com/ialisaleh/litellm.git
+$ cd litellm
+$ git checkout feat/anthropic-claude-code
+```
+
+The docker-compose.yml expects the LiteLLM repo at `../litellm` relative to this project.
 
 ## Quick Start
 
@@ -150,7 +166,7 @@ The script exports all traces from your project (defined by `OTEL_SERVICE_NAME`)
 
 The `docker-compose.yml` file sets up the LiteLLM proxy service with:
 
-- **Image**: Uses the official LiteLLM image (`ghcr.io/berriai/litellm:main-latest`)
+- **Build**: Builds from the custom LiteLLM source at `../litellm` (requires cloning the custom repo first)
 - **Port mapping**: 8082 (host) → 4000 (container)
 - **Configuration**: Mounts `litellm_config.yaml` for model routing
 - **Environment**: Passes through API keys and OpenTelemetry configuration
