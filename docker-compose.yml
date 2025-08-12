@@ -1,10 +1,15 @@
 services:
   litellm-proxy:
     image: ghcr.io/berriai/litellm:main-latest
+    #build:
+    #  context: ./litellm # Update this path
+    #  dockerfile: Dockerfile
     ports:
       - "8082:4000"
     volumes:
       - ./litellm_config.yaml:/app/config.yaml
+    env_file:
+      - .env
     environment:
       # Anthropic + runtime
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
