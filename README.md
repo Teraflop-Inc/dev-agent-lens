@@ -89,16 +89,59 @@ claude-lens
 
 **That's it!** All Claude Code interactions now include full observability and tracing.
 
+## Claude Code SDK Examples
+
+This repository includes comprehensive examples for integrating the Claude Code SDK with Dev-Agent-Lens observability in both **TypeScript** and **Python**. These examples demonstrate advanced usage patterns, specialized agents, and full observability integration.
+
+### Available Examples
+
+**TypeScript Examples** (`examples/typescript/`):
+- **Basic Usage**: Simple SDK setup with proxy observability
+- **Code Review Agent**: Automated code analysis with structured feedback  
+- **Custom Tools**: Advanced tool integration and execution tracing
+- **Documentation Generator**: Automatic API documentation generation
+
+**Python Examples** (`examples/python/`):
+- **Basic Usage**: Core SDK functionality with streaming responses
+- **Observable Agent**: Advanced agent framework with:
+  - Security Analysis Agent (vulnerability detection)
+  - Incident Response Agent (automated incident handling)
+  - Session management and history tracking
+
+### Quick Start with Examples
+Our examples contain code samples to leverage the Claude Code SDKs for python and typescript, while maintaining the proxy and observability features from Dev-Agent-Lens.
+
+```bash
+# 1. Ensure the proxy is running
+docker-compose up -d
+
+# 2. Try TypeScript examples
+cd examples/typescript
+npm install
+npm run basic                    # Basic usage
+npm run review basic-usage.ts    # Code review
+
+# 3. Try Python examples  
+cd examples/python
+uv pip install -e .
+uv run python basic_usage.py     # Basic usage
+uv run python observable_agent.py # Advanced agents
+```
+
+All examples automatically route through the LiteLLM proxy for full observability without requiring command-line exports.
+
+📖 **[View Complete Examples Guide →](examples/README.md)**
+
 ## Configuration
 
-### Model Mapping
+### Model Routing
 
-The proxy maps Claude Code model names to Anthropic API models via `litellm_config.yaml`:
+The proxy uses wildcard routing in `litellm_config.yaml` to allow Claude Code to select any model:
 
-- `claude-sonnet-4-20250514` → `anthropic/claude-sonnet-4-20250514`
-- `claude-3-5-sonnet-20241022` → `anthropic/claude-3-5-sonnet-20241022`
-- `claude-3-haiku-20240307` → `anthropic/claude-3-haiku-20240307`
-- Aliases: `sonnet`, `haiku`
+- **Automatic Pass-through**: Any model Claude Code selects is automatically routed to Anthropic
+- **Wildcard Support**: Supports patterns like `claude-*`, `anthropic/*`, and `claude-opus-*`
+- **No Model Override**: The proxy doesn't force a specific model - Claude Code decides
+- **Optional Aliases**: `sonnet` and `haiku` shortcuts are available but not required
 
 ### Services
 
