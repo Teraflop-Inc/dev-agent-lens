@@ -50,3 +50,4 @@ environment:
   - ARIZE_API_KEY=${ARIZE_API_KEY}
   - ARIZE_SPACE_KEY=${ARIZE_SPACE_KEY} # LiteLLM still reads this name
   - ARIZE_ENDPOINT=https://otlp.arize.com/v1
+  - OTEL_SERVICE_NAME: ${OTEL_SERVICE_NAME}

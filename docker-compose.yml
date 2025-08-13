@@ -48,6 +48,9 @@ services:
       # Optional but recommended – explicit endpoint
       - ARIZE_ENDPOINT=https://otlp.arize.com/v1
 
+      # OTEL service name for Arize tracing
+      - OTEL_SERVICE_NAME=${OTEL_SERVICE_NAME}
+
       # Give the resource a name so you can filter by service
       - OTEL_RESOURCE_ATTRIBUTES=service.name=litellm-proxy
     env_file:
