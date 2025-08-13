@@ -1,19 +1,47 @@
 services:
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      - POSTGRES_USER=litellm
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-litellm123}
+      - POSTGRES_DB=litellm
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U litellm"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   litellm-proxy:
     image: ghcr.io/berriai/litellm:main-latest
+    depends_on:
+      postgres:
+        condition: service_healthy
     ports:
-      - "8082:4000"
+      - "4000:4000"
     volumes:
       - ./litellm_config.yaml:/app/config.yaml
     environment:
       # Anthropic + runtime
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
 
+      # LiteLLM configuration
+      - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY}
+      - LITELLM_SALT_KEY=${LITELLM_SALT_KEY}
+      - DATABASE_URL=postgresql://litellm:${POSTGRES_PASSWORD:-litellm123}@postgres:5432/litellm
+      - STORE_MODEL_IN_DB=True
+
+      # Optional UI authentication
+      - UI_USERNAME=${UI_USERNAME:-}
+      - UI_PASSWORD=${UI_PASSWORD:-}
+
       # Arize auth
       - ARIZE_API_KEY=${ARIZE_API_KEY}
       - ARIZE_SPACE_KEY=${ARIZE_SPACE_KEY}
 
-      # “Project” info that shows up in the Arize UI
+      # "Project" info that shows up in the Arize UI
       - ARIZE_MODEL_ID=${ARIZE_MODEL_ID:-litellm-proxy}
       - ARIZE_MODEL_VERSION=${ARIZE_MODEL_VERSION:-local-dev}
 
@@ -22,6 +50,8 @@ services:
 
       # Give the resource a name so you can filter by service
       - OTEL_RESOURCE_ATTRIBUTES=service.name=litellm-proxy
+    env_file:
+      - .env
     command:
       ["--config", "/app/config.yaml", "--port", "4000", "--num_workers", "1"]
     restart: unless-stopped
@@ -30,3 +60,6 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
+
+volumes:
+  postgres_data:
