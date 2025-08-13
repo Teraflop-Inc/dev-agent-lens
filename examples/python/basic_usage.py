@@ -27,8 +27,6 @@ async def run_with_observability():
     
     async with ClaudeSDKClient(options) as client:
         print('✅ Claude SDK client started with observability')
-
-        print(dict(os.environ))
         
         # Send query
         print('📤 Sending query to Claude...')
