@@ -1,1 +1,12 @@
 .env
+
+# Node.js dependencies
+node_modules/
+examples/typescript/node_modules/
+
+# Python virtual environments and caches
+__pycache__/
+*.pyc
+.venv/
+venv/
+examples/python/__pycache__/
