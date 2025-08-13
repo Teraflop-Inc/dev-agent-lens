@@ -1,0 +1,24 @@
+{
+  "name": "claude-code-sdk-typescript-examples",
+  "version": "1.0.0",
+  "description": "TypeScript examples for Claude Code SDK with Dev-Agent-Lens observability",
+  "scripts": {
+    "basic": "ts-node basic-usage.ts",
+    "tools": "ts-node custom-tools.ts",
+    "review": "ts-node code-review.ts",
+    "docs": "ts-node doc-generator.ts",
+    "dev": "ts-node"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-code": "latest",
+    "dotenv": "^16.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "ts-node": "^10.9.0",
+    "typescript": "^5.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
