@@ -46,9 +46,6 @@ cp .env.example .env
 ```bash
 # Start the no-auth proxy (no database, no UI) - this is now the default!
 docker compose up -d
-
-# Verify proxy is running
-curl http://localhost:4000/health
 ```
 
 ### 3. Use Claude Code
@@ -91,9 +88,6 @@ docker compose --profile advanced up -d
 
 # Wait for database initialization
 sleep 15
-
-# Verify all services are running
-curl http://localhost:4001/health  # Advanced proxy runs on port 4001
 
 # Access the web UI (requires LITELLM_MASTER_KEY)
 open http://localhost:4001/ui
