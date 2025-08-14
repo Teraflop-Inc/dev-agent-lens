@@ -5,32 +5,36 @@ Demonstrates how to use Claude Code SDK with Dev-Agent-Lens observability
 """
 
 import asyncio
-import os
 from claude_code_sdk import ClaudeSDKClient, ClaudeCodeOptions
 from dotenv import load_dotenv
 
 # Load environment variables
 load_dotenv()
 
+
 async def run_with_observability():
     """Basic example of using Claude Code SDK with observability."""
-    
+
     # Configure SDK with proxy (using default model)
     options = ClaudeCodeOptions(
-        #api_key=os.getenv('ANTHROPIC_API_KEY'),
-        #base_url=os.getenv('ANTHROPIC_BASE_URL', 'http://localhost:8082'),
-        # model is optional - Claude Code will use its default model if not specified
+        # API Configuration for LiteLLM proxy
+        base_url="http://localhost:4000",  # LiteLLM proxy endpoint
+        # Authentication (only needed if LITELLM_MASTER_KEY is set in your .env)
+        # If you have enabled authentication, uncomment the line below:
+        # api_key=os.getenv('LITELLM_MASTER_KEY'),  # Use LiteLLM master key as API key
+        # For no-auth setup (default), Claude Code will use your ANTHROPIC_API_KEY automatically
+        # Model is optional - Claude Code will use its default model if not specified
         # model='claude-3-5-sonnet-20241022',  # Uncomment to override default
-        system_prompt='You are a Python development assistant with full observability',
-        max_turns=5
+        system_prompt="You are a Python development assistant with full observability",
+        max_turns=5,
     )
-    
+
     async with ClaudeSDKClient(options) as client:
-        print('✅ Claude SDK client started with observability')
-        
+        print("✅ Claude SDK client started with observability")
+
         # Send query
-        print('📤 Sending query to Claude...')
-        await client.query('''Review this Python code for best practices and suggest improvements:
+        print("📤 Sending query to Claude...")
+        await client.query("""Review this Python code for best practices and suggest improvements:
 
 ```python
 import requests
@@ -56,25 +60,28 @@ users = process_users([1, 2, 3, 4, 5])
 print(f"Found {len(users)} active users")
 ```
 
-Please identify potential issues and suggest improvements for error handling, performance, and code quality.''')
-        
+Please identify potential issues and suggest improvements for error handling, performance, and code quality.""")
+
         # Process streaming response
-        print('📥 Receiving response:')
+        print("📥 Receiving response:")
         async for message in client.receive_response():
-            print(message, end='', flush=True)
+            print(message, end="", flush=True)
             # Each message is traced in Arize
-        
-        print('\n')
-        print('✅ Session completed successfully')
-        print('📊 Check Arize dashboard for traces: https://app.arize.com')
+
+        print("\n")
+        print("✅ Session completed successfully")
+        print("📊 Check Arize dashboard for traces: https://app.arize.com")
+
 
 async def main():
     """Main entry point."""
     try:
         await run_with_observability()
     except Exception as e:
-        print(f'❌ Error: {e}')
+        print(f"❌ Error: {e}")
         # Errors are also tracked in Arize
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     asyncio.run(main())
+
