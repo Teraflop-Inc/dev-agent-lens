@@ -1,24 +1,9 @@
+# Default: Simple no-auth setup (just run `docker compose up`)
+# Advanced: Full features with `docker compose --profile advanced up`
 services:
-  postgres:
-    image: postgres:15-alpine
-    environment:
-      - POSTGRES_USER=litellm
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-litellm123}
-      - POSTGRES_DB=litellm
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U litellm"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
+  # Simple LiteLLM proxy (runs by default)
   litellm-proxy:
     image: ghcr.io/berriai/litellm:main-latest
-    depends_on:
-      postgres:
-        condition: service_healthy
     ports:
       - "4000:4000"
     volumes:
@@ -27,21 +12,14 @@ services:
       # Anthropic + runtime
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
 
-      # LiteLLM configuration
-      - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY}
-      - LITELLM_SALT_KEY=${LITELLM_SALT_KEY}
-      - DATABASE_URL=postgresql://litellm:${POSTGRES_PASSWORD:-litellm123}@postgres:5432/litellm
-      - STORE_MODEL_IN_DB=True
+      # Disable authentication for simple setup
+      - LITELLM_DISABLE_AUTH=true
+      
+      # Optional Arize observability (can be left blank)
+      - ARIZE_API_KEY=${ARIZE_API_KEY:-}
+      - ARIZE_SPACE_KEY=${ARIZE_SPACE_KEY:-}
 
-      # Optional UI authentication
-      - UI_USERNAME=${UI_USERNAME:-}
-      - UI_PASSWORD=${UI_PASSWORD:-}
-
-      # Arize auth
-      - ARIZE_API_KEY=${ARIZE_API_KEY}
-      - ARIZE_SPACE_KEY=${ARIZE_SPACE_KEY}
-
-      # "Project" info that shows up in the Arize UI
+      # "Project" info that shows up in the Arize UI (if enabled)
       - ARIZE_MODEL_ID=${ARIZE_MODEL_ID:-litellm-proxy}
       - ARIZE_MODEL_VERSION=${ARIZE_MODEL_VERSION:-local-dev}
 
@@ -60,6 +38,74 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
+
+  # Advanced features (PostgreSQL Database and Web UI)
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      - POSTGRES_USER=litellm
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-litellm123}
+      - POSTGRES_DB=litellm
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U litellm"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    profiles:
+      - advanced
+
+  # Advanced proxy with database and authentication
+  litellm-proxy-advanced:
+    image: ghcr.io/berriai/litellm:main-latest
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "4001:4000"  # Different port to avoid conflict
+    volumes:
+      - ./litellm_config.yaml:/app/config.yaml
+    environment:
+      # Anthropic + runtime
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+
+      # LiteLLM configuration (required for advanced features)
+      - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY}
+      - LITELLM_SALT_KEY=${LITELLM_SALT_KEY}
+      - DATABASE_URL=postgresql://litellm:${POSTGRES_PASSWORD:-litellm123}@postgres:5432/litellm
+      - STORE_MODEL_IN_DB=true
+
+      # Optional UI authentication
+      - UI_USERNAME=${UI_USERNAME:-}
+      - UI_PASSWORD=${UI_PASSWORD:-}
+
+      # Arize observability
+      - ARIZE_API_KEY=${ARIZE_API_KEY:-}
+      - ARIZE_SPACE_KEY=${ARIZE_SPACE_KEY:-}
+
+      # "Project" info that shows up in the Arize UI
+      - ARIZE_MODEL_ID=${ARIZE_MODEL_ID:-litellm-proxy}
+      - ARIZE_MODEL_VERSION=${ARIZE_MODEL_VERSION:-local-dev}
+
+      # Optional but recommended – explicit endpoint
+      - ARIZE_ENDPOINT=https://otlp.arize.com/v1
+
+      # Give the resource a name so you can filter by service
+      - OTEL_RESOURCE_ATTRIBUTES=service.name=litellm-proxy-advanced
+    env_file:
+      - .env
+    command:
+      ["--config", "/app/config.yaml", "--port", "4000", "--num_workers", "1"]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:4000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    profiles:
+      - advanced
 
 volumes:
   postgres_data:
