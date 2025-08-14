@@ -86,9 +86,6 @@ Uncomment desired features in your `.env` file:
 # Start with PostgreSQL database and Web UI
 docker compose --profile advanced up -d
 
-# Wait for database initialization
-sleep 15
-
 # Access the web UI (requires LITELLM_MASTER_KEY)
 open http://localhost:4001/ui
 ```
@@ -146,8 +143,8 @@ All examples automatically route through the LiteLLM proxy for full observabilit
 
 ### Simple vs Advanced Mode
 
-- **Simple Mode** (`docker-compose-simple.yml`): No authentication, no database, no UI
-- **Advanced Mode** (`docker-compose.yml --profile advanced`): Full features with auth, database, and UI
+- **Simple Mode** (`docker compose up`): No authentication, no database, no UI
+- **Advanced Mode** (`docker compose --profile advanced up`): Full features with auth, database, and UI
 
 ### Model Routing
 

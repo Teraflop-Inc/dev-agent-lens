@@ -5,28 +5,24 @@ Demonstrates how to use Claude Code SDK with Dev-Agent-Lens observability
 """
 
 import asyncio
+import os
 from claude_code_sdk import ClaudeSDKClient, ClaudeCodeOptions
 from dotenv import load_dotenv
 
 # Load environment variables
 load_dotenv()
 
-
 async def run_with_observability():
     """Basic example of using Claude Code SDK with observability."""
-
+    
     # Configure SDK with proxy (using default model)
     options = ClaudeCodeOptions(
-        # API Configuration for LiteLLM proxy
-        base_url="http://localhost:4000",  # LiteLLM proxy endpoint
-        # Authentication (only needed if LITELLM_MASTER_KEY is set in your .env)
-        # If you have enabled authentication, uncomment the line below:
-        # api_key=os.getenv('LITELLM_MASTER_KEY'),  # Use LiteLLM master key as API key
-        # For no-auth setup (default), Claude Code will use your ANTHROPIC_API_KEY automatically
-        # Model is optional - Claude Code will use its default model if not specified
+        #api_key=os.getenv('ANTHROPIC_API_KEY'),
+        #base_url=os.getenv('ANTHROPIC_BASE_URL', 'http://localhost:4000'),
+        # model is optional - Claude Code will use its default model if not specified
         # model='claude-3-5-sonnet-20241022',  # Uncomment to override default
-        system_prompt="You are a Python development assistant with full observability",
-        max_turns=5,
+        system_prompt='You are a Python development assistant with full observability',
+        max_turns=5
     )
 
     async with ClaudeSDKClient(options) as client:
