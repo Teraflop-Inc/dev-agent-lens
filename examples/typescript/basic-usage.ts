@@ -16,16 +16,7 @@ async function runWithObservability() {
     // Model configuration - will use LiteLLM proxy for observability
     model: 'claude-sonnet-4-20250514', // This will route through our LiteLLM proxy
     maxTurns: 10,
-    customSystemPrompt: 'You are a helpful TypeScript development assistant with full observability through Dev-Agent-Lens.',
-    
-    // API Configuration for LiteLLM proxy
-    baseURL: 'http://localhost:4000', // LiteLLM proxy endpoint
-    
-    // Authentication (only needed if LITELLM_MASTER_KEY is set in your .env)
-    // If you have enabled authentication, uncomment the line below:
-    // apiKey: process.env.LITELLM_MASTER_KEY,  // Use LiteLLM master key as API key
-    
-    // For no-auth setup (default), Claude Code will use your ANTHROPIC_API_KEY automatically
+    customSystemPrompt: 'You are a helpful TypeScript development assistant with full observability through Dev-Agent-Lens.'
   };
 
   try {
