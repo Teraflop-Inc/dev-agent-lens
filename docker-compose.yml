@@ -15,9 +15,9 @@ services:
       # Disable authentication for simple setup
       - LITELLM_DISABLE_AUTH=true
       
-      # Optional Arize observability (can be left blank)
-      - ARIZE_API_KEY=${ARIZE_API_KEY:-}
-      - ARIZE_SPACE_KEY=${ARIZE_SPACE_KEY:-}
+      # Required Arize observability
+      - ARIZE_API_KEY=${ARIZE_API_KEY}
+      - ARIZE_SPACE_KEY=${ARIZE_SPACE_KEY}
 
       # "Project" info that shows up in the Arize UI (if enabled)
       - ARIZE_MODEL_ID=${ARIZE_MODEL_ID:-litellm-proxy}
@@ -81,9 +81,9 @@ services:
       - UI_USERNAME=${UI_USERNAME:-}
       - UI_PASSWORD=${UI_PASSWORD:-}
 
-      # Arize observability
-      - ARIZE_API_KEY=${ARIZE_API_KEY:-}
-      - ARIZE_SPACE_KEY=${ARIZE_SPACE_KEY:-}
+      # Required Arize observability
+      - ARIZE_API_KEY=${ARIZE_API_KEY}
+      - ARIZE_SPACE_KEY=${ARIZE_SPACE_KEY}
 
       # "Project" info that shows up in the Arize UI
       - ARIZE_MODEL_ID=${ARIZE_MODEL_ID:-litellm-proxy}
