@@ -3,53 +3,53 @@
 
 model_list:
   # All available Claude models from Anthropic API
-  # Claude Opus 4.1 (Latest)
+  # Claude Opus 4.1 (Latest) - OAuth Pass-through Only
   - model_name: "claude-opus-4-1-20250805"
     litellm_params:
       model: "anthropic/claude-opus-4-1-20250805"
-      api_key: os.environ/ANTHROPIC_API_KEY
+      oauth_pass_through: true  # Enable OAuth pass-through (no fixed API key)
 
-  # Claude Opus 4
+  # Claude Opus 4 - OAuth Pass-through Only  
   - model_name: "claude-opus-4-20250514"
     litellm_params:
       model: "anthropic/claude-opus-4-20250514"
-      api_key: os.environ/ANTHROPIC_API_KEY
+      oauth_pass_through: true  # Enable OAuth pass-through (no fixed API key)
 
-  # Claude Sonnet 4 (Current Claude Code default)
+  # Claude Sonnet 4 (Current Claude Code default) - OAuth Pass-through Only
   - model_name: "claude-sonnet-4-20250514"
     litellm_params:
       model: "anthropic/claude-sonnet-4-20250514"
-      api_key: os.environ/ANTHROPIC_API_KEY
+      oauth_pass_through: true  # Enable OAuth pass-through (no fixed API key)
 
-  # Claude Sonnet 3.7
+  # Claude Sonnet 3.7 - OAuth Pass-through Only
   - model_name: "claude-3-7-sonnet-20250219"
     litellm_params:
       model: "anthropic/claude-3-7-sonnet-20250219"
-      api_key: os.environ/ANTHROPIC_API_KEY
+      oauth_pass_through: true  # Enable OAuth pass-through (no fixed API key)
 
-  # Claude Sonnet 3.5 (New)
+  # Claude Sonnet 3.5 (New) - OAuth Pass-through Only
   - model_name: "claude-3-5-sonnet-20241022"
     litellm_params:
       model: "anthropic/claude-3-5-sonnet-20241022"
-      api_key: os.environ/ANTHROPIC_API_KEY
+      oauth_pass_through: true  # Enable OAuth pass-through (no fixed API key)
 
-  # Claude Haiku 3.5
+  # Claude Haiku 3.5 - OAuth Pass-through Only
   - model_name: "claude-3-5-haiku-20241022"
     litellm_params:
-      model: "anthropic/claude-3-5-haiku-20241022" 
-      api_key: os.environ/ANTHROPIC_API_KEY
+      model: "anthropic/claude-3-5-haiku-20241022"
+      oauth_pass_through: true  # Enable OAuth pass-through (no fixed API key)
 
-  # Claude Sonnet 3.5 (Old)
+  # Claude Sonnet 3.5 (Old) - OAuth Pass-through Only
   - model_name: "claude-3-5-sonnet-20240620"
     litellm_params:
       model: "anthropic/claude-3-5-sonnet-20240620"
-      api_key: os.environ/ANTHROPIC_API_KEY
+      oauth_pass_through: true  # Enable OAuth pass-through (no fixed API key)
 
-  # Claude Haiku 3
+  # Claude Haiku 3 - OAuth Pass-through Only
   - model_name: "claude-3-haiku-20240307"
     litellm_params:
       model: "anthropic/claude-3-haiku-20240307"
-      api_key: os.environ/ANTHROPIC_API_KEY
+      oauth_pass_through: true  # Enable OAuth pass-through (no fixed API key)
 
 
 litellm_settings:

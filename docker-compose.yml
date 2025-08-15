@@ -3,7 +3,12 @@
 services:
   # Simple LiteLLM proxy (runs by default)
   litellm-proxy:
-    image: ghcr.io/berriai/litellm:main-latest
+    build:
+      context: ../litellm
+      dockerfile: Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
     ports:
       - "4000:4000"
     volumes:
