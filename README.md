@@ -24,70 +24,34 @@ Claude Code CLI → LiteLLM Proxy (localhost:4000) → Anthropic API
 ## Prerequisites
 
 - Docker and Docker Compose
-- Claude Code CLI installed
-- Anthropic API key
-- Arize AI account (for observability)
-
-## Environment Variables
-
-The following environment variables are required:
-
-- `ANTHROPIC_API_KEY` - Your Anthropic API key for Claude models
-- `ARIZE_API_KEY` - Your Arize AI API key for observability
-- `ARIZE_SPACE_KEY` - Your Arize AI space key
-- `LITELLM_MASTER_KEY` - Master key for LiteLLM proxy authentication and UI access
-- `LITELLM_SALT_KEY` - Encryption key for credentials (cannot be changed once set)
-
-Optional environment variables:
-
-- `POSTGRES_PASSWORD` - PostgreSQL password (default: `litellm123`)
-- `UI_USERNAME` - Username for web UI authentication (optional)
-- `UI_PASSWORD` - Password for web UI authentication (optional)
-- `ARIZE_MODEL_ID` - Model ID shown in Arize UI (default: `litellm-proxy`)
-- `ARIZE_MODEL_VERSION` - Model version shown in Arize UI (default: `local-dev`)
-
-## Quick Start
-
-### 1. Prerequisites Check
-
-- Docker and Docker Compose installed
 - Claude Code CLI installed (`curl -fsSL https://claude.ai/install.sh | sh`)
-- API keys ready (see Environment Variables section)
+- Anthropic API key (get from https://console.anthropic.com/settings/keys)
 
-### 2. Setup Environment
+## Quick Start (No Authentication)
+
+Get started in under 2 minutes with just an Anthropic API key!
+
+### 1. Setup Environment
 
 ```bash
 # Copy the example environment file
 cp .env.example .env
 
-# Edit .env and add your API keys
+# Edit .env and add ONLY your Anthropic API key
 # ANTHROPIC_API_KEY=sk-ant-api03-your-key-here
-# ARIZE_SPACE_KEY=your-space-key-here
-# ARIZE_API_KEY=your-api-key-here
-# LITELLM_MASTER_KEY=sk-1234  # Generate a secure key
-# LITELLM_SALT_KEY=sk-salt-key  # Generate a secure salt key (DO NOT CHANGE once set)
 ```
 
-### 3. Start the Service
+### 2. Start the Simple Proxy
 
 ```bash
-# Start the proxy and database (runs in background)
-docker-compose up -d
-
-# Wait for services to be ready (especially database initialization)
-sleep 10
-
-# Verify proxy is running (should return healthy endpoints)
-curl http://localhost:4000/health
-
-# Access the web UI
-open http://localhost:4000/ui
+# Start the no-auth proxy (no database, no UI) - this is now the default!
+docker compose up -d
 ```
 
-### 4. Use Claude Code with Observability
+### 3. Use Claude Code
 
 ```bash
-# Use the wrapper script (recommended)
+# Use the wrapper script
 ./claude-lens
 
 # Or install globally for convenience
@@ -95,13 +59,42 @@ sudo cp claude-lens /usr/local/bin
 claude-lens
 ```
 
-### 5. View Traces in Arize
+**That's it!** Claude Code now routes through LiteLLM for consistent API handling.
+
+## Advanced Setup
+
+For production use, teams, observability, and management features:
+
+### Prerequisites
+
+- All Quick Start prerequisites
+- Arize AI account (for observability) - optional
+- PostgreSQL database (for model/key storage) - optional
+
+### Environment Variables
+
+Uncomment desired features in your `.env` file:
+
+- **Observability**: `ARIZE_API_KEY`, `ARIZE_SPACE_KEY` - AI monitoring via Arize
+- **Authentication**: `LITELLM_MASTER_KEY`, `LITELLM_SALT_KEY` - API auth + Web UI
+- **Database**: `POSTGRES_PASSWORD`, `STORE_MODEL_IN_DB` - Persistent storage
+- **UI Access**: `UI_USERNAME`, `UI_PASSWORD` - Web interface credentials
+
+### Advanced Startup
+
+```bash
+# Start with PostgreSQL database and Web UI
+docker compose --profile advanced up -d
+
+# Access the web UI (requires LITELLM_MASTER_KEY)
+open http://localhost:4001/ui
+```
+
+### View Observability in Arize
 
 - Open [Arize AI Dashboard](https://app.arize.com)
-- Navigate to your project
-- Filter traces with: `status_code = 'OK' and attributes.llm.token_count.total > 0`
-
-**That's it!** All Claude Code interactions now include full observability and tracing.
+- Navigate to your project  
+- Filter traces: `status_code = 'OK' and attributes.llm.token_count.total > 0`
 
 ## Claude Code SDK Examples
 
@@ -148,6 +141,11 @@ All examples automatically route through the LiteLLM proxy for full observabilit
 
 ## Configuration
 
+### Simple vs Advanced Mode
+
+- **Simple Mode** (`docker compose up`): No authentication, no database, no UI
+- **Advanced Mode** (`docker compose --profile advanced up`): Full features with auth, database, and UI
+
 ### Model Routing
 
 The proxy uses wildcard routing in `litellm_config.yaml` to allow Claude Code to select any model:
@@ -160,10 +158,10 @@ The proxy uses wildcard routing in `litellm_config.yaml` to allow Claude Code to
 ### Services
 
 - **LiteLLM Proxy**: Port 4000
-- **Web UI**: <http://localhost:4000/ui> (requires LITELLM_MASTER_KEY)
 - **Health Check**: <http://localhost:4000/health>
-- **PostgreSQL Database**: Port 5432 (for model storage and management)
-- **OpenTelemetry**: Configured for Arize endpoint
+- **Web UI**: <http://localhost:4000/ui> (Advanced mode only, requires LITELLM_MASTER_KEY)
+- **PostgreSQL Database**: Port 5432 (Advanced mode only)
+- **OpenTelemetry**: Configured for Arize endpoint (when enabled)
 
 ## Key Files
 
