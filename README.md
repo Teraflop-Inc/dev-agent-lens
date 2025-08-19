@@ -61,36 +61,7 @@ claude-lens
 
 **That's it!** Claude Code now routes through LiteLLM for consistent API handling.
 
-## Advanced Setup
-
-For production use, teams, observability, and management features:
-
-### Prerequisites
-
-- All Quick Start prerequisites
-- Arize AI account (for observability) - optional
-- PostgreSQL database (for model/key storage) - optional
-
-### Environment Variables
-
-Uncomment desired features in your `.env` file:
-
-- **Observability**: `ARIZE_API_KEY`, `ARIZE_SPACE_KEY` - AI monitoring via Arize
-- **Authentication**: `LITELLM_MASTER_KEY`, `LITELLM_SALT_KEY` - API auth + Web UI
-- **Database**: `POSTGRES_PASSWORD`, `STORE_MODEL_IN_DB` - Persistent storage
-- **UI Access**: `UI_USERNAME`, `UI_PASSWORD` - Web interface credentials
-
-### Advanced Startup
-
-```bash
-# Start with PostgreSQL database and Web UI
-docker compose --profile advanced up -d
-
-# Access the web UI (requires LITELLM_MASTER_KEY)
-open http://localhost:4001/ui
-```
-
-### View Observability in Arize
+## View Observability in Arize
 
 - Open [Arize AI Dashboard](https://app.arize.com)
 - Navigate to your project  
@@ -141,11 +112,6 @@ All examples automatically route through the LiteLLM proxy for full observabilit
 
 ## Configuration
 
-### Simple vs Advanced Mode
-
-- **Simple Mode** (`docker compose up`): No authentication, no database, no UI
-- **Advanced Mode** (`docker compose --profile advanced up`): Full features with auth, database, and UI
-
 ### Model Routing
 
 The proxy uses wildcard routing in `litellm_config.yaml` to allow Claude Code to select any model:
@@ -159,9 +125,7 @@ The proxy uses wildcard routing in `litellm_config.yaml` to allow Claude Code to
 
 - **LiteLLM Proxy**: Port 4000
 - **Health Check**: <http://localhost:4000/health>
-- **Web UI**: <http://localhost:4000/ui> (Advanced mode only, requires LITELLM_MASTER_KEY)
-- **PostgreSQL Database**: Port 5432 (Advanced mode only)
-- **OpenTelemetry**: Configured for Arize endpoint (when enabled)
+- **OpenTelemetry**: Configured for Arize endpoint (when ARIZE keys are configured)
 
 ## Key Files
 
@@ -190,23 +154,15 @@ status_code = 'OK' and attributes.llm.token_count.total > 0 and attributes.input
 
 ## Docker Compose Configuration
 
-The `docker-compose.yml` file sets up two services:
+The `docker-compose.yml` file sets up the LiteLLM proxy:
 
 ### LiteLLM Proxy Service
-- **Image**: Uses the official LiteLLM image (`ghcr.io/berriai/litellm:main-latest`)
+- **Image**: Custom OAuth-enabled image (`aowen14/litellm-oauth-fix:latest`)
 - **Port mapping**: 4000 (host) → 4000 (container)
-- **Web UI**: Accessible at <http://localhost:4000/ui>
 - **Configuration**: Mounts `litellm_config.yaml` for model routing
-- **Environment**: Passes through all required API keys and Arize configuration
+- **Environment**: Passes through API keys and Arize configuration
 - **Health checks**: Automatic health monitoring every 30 seconds
 - **Restart policy**: Automatically restarts unless manually stopped
-
-### PostgreSQL Database Service
-- **Image**: PostgreSQL 15 Alpine (`postgres:15-alpine`)
-- **Port**: 5432 (for database connections)
-- **Database**: `litellm` database with persistent volume storage
-- **Purpose**: Stores model configurations, API keys, and usage data
-- **Health checks**: Verifies database readiness before proxy starts
 
 ## Development
 
@@ -242,27 +198,15 @@ docker-compose logs -f
 docker-compose restart
 ```
 
-## Web UI Features
-
-The LiteLLM web UI provides:
-
-- **Model Management**: Add, edit, and delete model configurations stored in the database
-- **API Key Management**: Create and manage API keys for proxy access
-- **Usage Analytics**: View request metrics, token usage, and cost tracking
-- **Request Logs**: Monitor all API requests and responses
-- **Team Management**: Configure teams and user access (requires authentication)
-
-Access the UI at <http://localhost:4000/ui> using your `LITELLM_MASTER_KEY`.
-
 ## Troubleshooting
 
 - **Check if services are running**: `docker-compose ps`
 - **Verify proxy health**: `curl http://localhost:4000/health`
-- **View real-time logs**: `docker-compose logs -f litellm-proxy` or `docker-compose logs -f postgres`
-- **Database connection issues**: Ensure PostgreSQL is healthy with `docker-compose ps postgres`
-- **Web UI access denied**: Verify `LITELLM_MASTER_KEY` is set in your `.env` file
-- **Verify environment variables**: Ensure all required variables are set in `.env`
+- **View real-time logs**: `docker-compose logs -f litellm-proxy`
+- **Verify environment variables**: Ensure required variables are set in `.env`
 - **Claude Lens errors**: The wrapper script will check if the proxy is running before starting Claude Code
+- **OAuth issues**: Check logs for OAuth token detection and passthrough messages
+- **API key fallback**: Ensure `ANTHROPIC_API_KEY` is set if not using OAuth
 
 ## Benefits
 
