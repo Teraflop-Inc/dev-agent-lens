@@ -11,11 +11,14 @@ services:
     volumes:
       - ./litellm_config.yaml:/app/config.yaml
     environment:
-      # Anthropic + runtime
+      # ANTHROPIC_API_KEY - Available as fallback for non-OAuth requests
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
 
-      # Disable authentication for simple setup
+      # Disable authentication for simple setup (no master key)
       - LITELLM_DISABLE_AUTH=true
+      
+      # Enable debug logging for OAuth testing
+      - LITELLM_LOG=DEBUG
       
       # Required Arize observability
       - ARIZE_API_KEY=${ARIZE_API_KEY}
@@ -60,6 +63,8 @@ services:
       - advanced
 
   # Advanced proxy with database and authentication
+  # With the new OAuth Passthrough changes, this isn't officially supported  at the moment, but feel free to try!
+  # You will need to swap out your Anthropic API key in API-key based requests for your LiteLLM Master key.
   litellm-proxy-advanced:
     image: ghcr.io/berriai/litellm:main-latest
     depends_on:
@@ -70,10 +75,11 @@ services:
     volumes:
       - ./litellm_config.yaml:/app/config.yaml
     environment:
-      # Anthropic + runtime
+      # ANTHROPIC_API_KEY - Available as fallback for non-OAuth requests
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
 
       # LiteLLM configuration (required for advanced features)
+
       - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY}
       - LITELLM_SALT_KEY=${LITELLM_SALT_KEY}
       - DATABASE_URL=postgresql://litellm:${POSTGRES_PASSWORD:-litellm123}@postgres:5432/litellm
