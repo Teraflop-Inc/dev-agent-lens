@@ -9,11 +9,6 @@ model_list:
       model: "anthropic/claude-opus-4-1-20250805"
       api_key: os.environ/ANTHROPIC_API_KEY
 
-  # Claude Opus 4
-  - model_name: "claude-opus-4-20250514"
-    litellm_params:
-      model: "anthropic/claude-opus-4-20250514"
-      api_key: os.environ/ANTHROPIC_API_KEY
 
   # Claude Sonnet 4 (Current Claude Code default)
   - model_name: "claude-sonnet-4-20250514"
@@ -21,34 +16,10 @@ model_list:
       model: "anthropic/claude-sonnet-4-20250514"
       api_key: os.environ/ANTHROPIC_API_KEY
 
-  # Claude Sonnet 3.7
-  - model_name: "claude-3-7-sonnet-20250219"
-    litellm_params:
-      model: "anthropic/claude-3-7-sonnet-20250219"
-      api_key: os.environ/ANTHROPIC_API_KEY
-
-  # Claude Sonnet 3.5 (New)
-  - model_name: "claude-3-5-sonnet-20241022"
-    litellm_params:
-      model: "anthropic/claude-3-5-sonnet-20241022"
-      api_key: os.environ/ANTHROPIC_API_KEY
-
   # Claude Haiku 3.5
   - model_name: "claude-3-5-haiku-20241022"
     litellm_params:
-      model: "anthropic/claude-3-5-haiku-20241022" 
-      api_key: os.environ/ANTHROPIC_API_KEY
-
-  # Claude Sonnet 3.5 (Old)
-  - model_name: "claude-3-5-sonnet-20240620"
-    litellm_params:
-      model: "anthropic/claude-3-5-sonnet-20240620"
-      api_key: os.environ/ANTHROPIC_API_KEY
-
-  # Claude Haiku 3
-  - model_name: "claude-3-haiku-20240307"
-    litellm_params:
-      model: "anthropic/claude-3-haiku-20240307"
+      model: "anthropic/claude-3-5-haiku-20241022"
       api_key: os.environ/ANTHROPIC_API_KEY
 
 
