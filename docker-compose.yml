@@ -3,7 +3,7 @@
 services:
   # Simple LiteLLM proxy (runs by default)
   litellm-proxy:
-    image: aowen14/litellm:oauth-passthrough
+    image: aowen14/litellm-oauth-fix:latest
     ports:
       - "4000:4000"
     volumes:
