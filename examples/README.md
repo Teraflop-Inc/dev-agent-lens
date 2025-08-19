@@ -34,8 +34,11 @@ cd examples/python
 # Install dependencies with uv
 uv pip install -e .
 
-# Run basic usage example
+# Run basic usage example (API key authentication)
 uv run python basic_usage.py
+
+# Run OAuth authentication example (OAuth pass-through)
+uv run python basic_usage_oauth.py
 
 # Run observable agent examples (includes security analysis and incident response)
 uv run python observable_agent.py
@@ -54,7 +57,8 @@ source venv/bin/activate  # On Windows: venv\Scripts\activate
 pip install claude-code-sdk python-dotenv
 
 # Run examples
-python basic_usage.py
+python basic_usage.py           # API key authentication
+python basic_usage_oauth.py     # OAuth authentication
 python observable_agent.py
 ```
 
@@ -104,7 +108,15 @@ bun run doc-generator.ts ./src
 - Demonstrates basic SDK setup with observability
 - Shows how to use the default model
 - Handles streaming responses
+- Uses API key authentication
 - Includes error handling
+
+#### `basic_usage_oauth.py` 🆕
+- OAuth authentication example with LiteLLM proxy
+- Tests OAuth pass-through functionality (Case 3)
+- Short prompt for fast response times
+- Environment configuration validation
+- Authentication troubleshooting guide
 
 #### `observable_agent.py`
 - Advanced agent implementation with session management
@@ -162,9 +174,28 @@ View traces in your Arize dashboard: https://app.arize.com
 
 Each example directory contains a `.env.example` file with required configuration:
 
+### API Key Authentication (basic_usage.py)
 - `ANTHROPIC_API_KEY`: Your Anthropic API key
 - `ANTHROPIC_BASE_URL`: Proxy URL (default: `http://localhost:8082`)
 - `ANTHROPIC_MODEL`: (Optional) Override the default model
+
+### OAuth Authentication (basic_usage_oauth.py) 🆕
+- `ANTHROPIC_AUTH_TOKEN`: OAuth token from get-token.ts
+- `ANTHROPIC_BASE_URL`: LiteLLM proxy URL (`http://localhost:4000`)
+- `ANTHROPIC_API_KEY`: (Optional) API key fallback
+
+#### OAuth Setup Commands:
+```bash
+# Generate OAuth token
+bun run get-token.ts > credentials.json
+
+# Set OAuth environment variables
+export ANTHROPIC_AUTH_TOKEN=$(cat credentials.json | jq -r .accessToken)
+export ANTHROPIC_BASE_URL=http://localhost:4000
+
+# Start LiteLLM proxy with OAuth support
+docker compose up -d
+```
 
 ## Tips for Running with UV
 
