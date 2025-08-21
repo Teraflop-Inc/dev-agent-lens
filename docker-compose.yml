@@ -1,13 +1,15 @@
-# Default: Simple no-auth setup (just run `docker compose up`)
-# Advanced: Full features with `docker compose --profile advanced up`
+# Choose your observability backend:
+# Arize AX: `docker compose --profile arize up`
+# Phoenix: `docker compose --profile phoenix up`
+# Advanced: Full features with PostgreSQL `docker compose --profile advanced up`
 services:
-  # Simple LiteLLM proxy (runs by default)
+  # Arize AX LiteLLM proxy (use with --profile arize)
   litellm-proxy:
     image: aowen14/litellm-oauth-fix:latest
     ports:
       - "4000:4000"
     volumes:
-      - ./litellm_config.yaml:/app/config.yaml
+      - ./litellm_config_arize.yaml:/app/config.yaml
     environment:
       # ANTHROPIC_API_KEY - Available as fallback for non-OAuth requests
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
@@ -41,6 +43,64 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
+    profiles:
+      - arize
+
+  # Phoenix-based LiteLLM proxy (use with --profile phoenix)
+  litellm-proxy-phoenix:
+    image: aowen14/litellm-oauth-fix:latest
+    ports:
+      - "4000:4000"
+    volumes:
+      - ./litellm_config_phoenix.yaml:/app/config.yaml
+    environment:
+      # Anthropic + runtime
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+
+      # OTEL service name for Phoenix tracing
+      - OTEL_SERVICE_NAME=${OTEL_SERVICE_NAME:-litellm-proxy}
+
+      # Phoenix OTLP endpoint
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://phoenix:4317
+      - OTEL_EXPORTER_OTLP_PROTOCOL=grpc
+      - PHOENIX_COLLECTOR_ENDPOINT=http://phoenix:4317
+
+      # Give the resource a name so you can filter by service
+      - OTEL_RESOURCE_ATTRIBUTES=service.name=${OTEL_SERVICE_NAME:-litellm-proxy},openinference.project.name=${OTEL_SERVICE_NAME:-litellm-proxy}
+    env_file:
+      - .env
+    command:
+      ["--config", "/app/config.yaml", "--port", "4000", "--num_workers", "1"]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:4000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    depends_on:
+      - phoenix
+    profiles:
+      - phoenix
+
+  # Phoenix observability server (use with --profile phoenix)
+  phoenix:
+    image: arizephoenix/phoenix:latest
+    ports:
+      - "6006:6006"  # Phoenix UI
+      - "4317:4317"  # OTLP gRPC endpoint
+    environment:
+      - PHOENIX_PORT=6006
+      - PHOENIX_HOST=0.0.0.0
+    volumes:
+      - phoenix_data:/mnt/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:6006"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    profiles:
+      - phoenix
 
   # Advanced features (PostgreSQL Database and Web UI)
   postgres:
@@ -115,3 +175,4 @@ services:
 
 volumes:
   postgres_data:
+  phoenix_data:
