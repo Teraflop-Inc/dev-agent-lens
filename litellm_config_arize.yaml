@@ -24,7 +24,7 @@ model_list:
 
 
 litellm_settings:
-  # Enable Arize callbacks for observability (when ARIZE_API_KEY is set)
+  # Enable Arize AX callbacks for cloud observability
   callbacks: ["arize"]
   
   # Don't drop any parameters - preserve everything Claude Code sends
