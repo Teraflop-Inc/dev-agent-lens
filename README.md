@@ -16,9 +16,10 @@ This repository provides a transparent proxy layer for Claude Code that:
 ```
 Claude Code CLI → LiteLLM Proxy (localhost:4000) → Anthropic API
                        ↓                              ↓
-                  PostgreSQL DB               Arize AI (Observability)
+                Arize AX/Phoenix              Arize AI (Cloud)
+                (Observability)               Phoenix (Local UI: :6006)
                        ↓
-                   Web UI (:4000/ui)
+          Optional: PostgreSQL DB + Web UI (:4000/ui)
 ```
 
 ## Prerequisites
@@ -27,25 +28,38 @@ Claude Code CLI → LiteLLM Proxy (localhost:4000) → Anthropic API
 - Claude Code CLI installed (`curl -fsSL https://claude.ai/install.sh | sh`)
 - Anthropic API key (get from https://console.anthropic.com/settings/keys)
 
-## Quick Start (No Authentication)
+## Quick Start
 
-Get started in under 2 minutes with just an Anthropic API key!
+Get started in under 2 minutes by choosing your observability backend!
 
 ### 1. Setup Environment
 
 ```bash
-# Copy the example environment file
+# Copy the example environment file  
 cp .env.example .env
 
-# Edit .env and add ONLY your Anthropic API key
+# Edit .env and add your Anthropic API key:
 # ANTHROPIC_API_KEY=sk-ant-api03-your-key-here
+
+# For Arize AX, also add:
+# ARIZE_API_KEY=your-arize-api-key
+# ARIZE_SPACE_KEY=your-arize-space-key
 ```
 
-### 2. Start the Simple Proxy
+### 2. Choose Your Observability Backend
 
+**Option A: Arize AX (Cloud)**
 ```bash
-# Start the no-auth proxy (no database, no UI) - this is now the default!
-docker compose up -d
+# Start with Arize AX cloud observability
+docker compose --profile arize up -d
+```
+
+**Option B: Phoenix (Local)**
+```bash
+# Start with local Phoenix observability
+docker compose --profile phoenix up -d
+
+# Access Phoenix UI at http://localhost:6006
 ```
 
 ### 3. Use Claude Code
@@ -61,11 +75,58 @@ claude-lens
 
 **That's it!** Claude Code now routes through LiteLLM for consistent API handling.
 
-## View Observability in Arize
+## Observability Options
 
-- Open [Arize AI Dashboard](https://app.arize.com)
-- Navigate to your project  
-- Filter traces: `status_code = 'OK' and attributes.llm.token_count.total > 0`
+This project supports two primary observability backends:
+
+### 1. Arize AX (Cloud)
+- **Usage**: `docker compose --profile arize up -d`
+- **UI**: [Arize AI Dashboard](https://app.arize.com)
+- **Benefits**: Cloud-based, advanced analytics, team collaboration
+- **Requirements**: Arize API key and Space key
+
+### 2. Phoenix (Local)
+- **Usage**: `docker compose --profile phoenix up -d`
+- **UI**: http://localhost:6006
+- **Benefits**: Local deployment, no cloud dependencies, privacy
+- **Requirements**: None (fully local)
+
+## About Arize & Phoenix
+
+**[Arize AX](https://arize.com/docs/ax)** - Enterprise AI engineering platform that provides:
+- **Prompts** - Prompt playground, management, and versioning
+- **Experiments** - Systematic A/B testing and performance measurement  
+- **Tracing** - Complete visibility into AI application workflows
+- **Evaluation** - LLM and code evaluations with custom metrics
+- **AI Copilot** - AI-powered insights and optimization suggestions
+
+**[Phoenix](https://arize.com/docs/phoenix)** - Lightweight, open-source project for:
+- **Tracing** - OpenTelemetry-compliant LLM application monitoring
+- **Prompt Engineering** - Interactive playground and span replay
+- **Experiments** - Dataset management and experiment tracking  
+- **Evaluation** - Built-in evaluations and annotation tools
+
+## Advanced Features
+
+### PostgreSQL Database & Web UI
+- **Usage**: `docker compose --profile advanced up -d`
+- **UI**: http://localhost:4001/ui
+- **Benefits**: 
+  - Database persistence for all traces and metrics
+  - Advanced user management and authentication
+  - Enhanced security features and access controls
+  - Custom dashboard creation and management
+- **Requirements**: PostgreSQL setup (automatically configured with profile)
+
+### Combined Profiles
+You can combine observability backends with advanced features:
+```bash
+# Arize AX + Advanced features
+docker compose --profile arize --profile advanced up -d
+
+# Phoenix + Advanced features
+docker compose --profile phoenix --profile advanced up -d
+```
 
 ## Claude Code SDK Examples
 
@@ -90,8 +151,9 @@ This repository includes comprehensive examples for integrating the Claude Code 
 Our examples contain code samples to leverage the Claude Code SDKs for python and typescript, while maintaining the proxy and observability features from Dev-Agent-Lens.
 
 ```bash
-# 1. Ensure the proxy is running
-docker-compose up -d
+# 1. Ensure the proxy is running (choose your observability backend)
+docker compose --profile arize up -d    # Arize AX (cloud)
+# OR: docker compose --profile phoenix up -d  # Phoenix (local)
 
 # 2. Try TypeScript examples
 cd examples/typescript
@@ -134,23 +196,6 @@ The proxy uses wildcard routing in `litellm_config.yaml` to allow Claude Code to
 - `litellm_config.yaml` - Model routing and callback configuration
 - `.env.example` - Example environment variables file
 - `.env` - Your local environment configuration (not tracked in git)
-
-## Monitoring & Observability
-
-All Claude Code interactions are automatically:
-
-- Logged and traced in Arize AI
-- Monitored for performance and usage patterns
-- Available for cost analysis and optimization
-- Tracked with OpenTelemetry standards
-
-### Viewing Traces in Arize
-
-To filter traces in Arize for relevant tool-related interactions, use this filter:
-
-```
-status_code = 'OK' and attributes.llm.token_count.total > 0 and attributes.input.value contains "tool" or attributes.input.value contains "text"
-```
 
 ## Docker Compose Configuration
 
