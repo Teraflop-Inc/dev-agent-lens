@@ -91,14 +91,35 @@ This project supports two primary observability backends:
 - **Benefits**: Local deployment, no cloud dependencies, privacy
 - **Requirements**: None (fully local)
 
-### 3. Advanced Features (PostgreSQL + Web UI)
+## About Arize & Phoenix
+
+**[Arize AX](https://arize.com/docs/ax)** - Enterprise AI engineering platform that provides:
+- **Prompts** - Prompt playground, management, and versioning
+- **Experiments** - Systematic A/B testing and performance measurement  
+- **Tracing** - Complete visibility into AI application workflows
+- **Evaluation** - LLM and code evaluations with custom metrics
+- **AI Copilot** - AI-powered insights and optimization suggestions
+
+**[Phoenix](https://arize.com/docs/phoenix)** - Lightweight, open-source project for:
+- **Tracing** - OpenTelemetry-compliant LLM application monitoring
+- **Prompt Engineering** - Interactive playground and span replay
+- **Experiments** - Dataset management and experiment tracking  
+- **Evaluation** - Built-in evaluations and annotation tools
+
+## Advanced Features
+
+### PostgreSQL Database & Web UI
 - **Usage**: `docker compose --profile advanced up -d`
 - **UI**: http://localhost:4001/ui
-- **Benefits**: Database persistence, user management, advanced authentication
-- **Requirements**: PostgreSQL setup (automatic with profile)
+- **Benefits**: 
+  - Database persistence for all traces and metrics
+  - Advanced user management and authentication
+  - Enhanced security features and access controls
+  - Custom dashboard creation and management
+- **Requirements**: PostgreSQL setup (automatically configured with profile)
 
 ### Combined Profiles
-You can combine profiles for different setups:
+You can combine observability backends with advanced features:
 ```bash
 # Arize AX + Advanced features
 docker compose --profile arize --profile advanced up -d
@@ -106,12 +127,6 @@ docker compose --profile arize --profile advanced up -d
 # Phoenix + Advanced features
 docker compose --profile phoenix --profile advanced up -d
 ```
-
-## View Observability in Arize
-
-- Open [Arize AI Dashboard](https://app.arize.com)
-- Navigate to your project  
-- Filter traces: `status_code = 'OK' and attributes.llm.token_count.total > 0`
 
 ## Claude Code SDK Examples
 
@@ -181,23 +196,6 @@ The proxy uses wildcard routing in `litellm_config.yaml` to allow Claude Code to
 - `litellm_config.yaml` - Model routing and callback configuration
 - `.env.example` - Example environment variables file
 - `.env` - Your local environment configuration (not tracked in git)
-
-## Monitoring & Observability
-
-All Claude Code interactions are automatically:
-
-- Logged and traced in Arize AI
-- Monitored for performance and usage patterns
-- Available for cost analysis and optimization
-- Tracked with OpenTelemetry standards
-
-### Viewing Traces in Arize
-
-To filter traces in Arize for relevant tool-related interactions, use this filter:
-
-```
-status_code = 'OK' and attributes.llm.token_count.total > 0 and attributes.input.value contains "tool" or attributes.input.value contains "text"
-```
 
 ## Docker Compose Configuration
 
