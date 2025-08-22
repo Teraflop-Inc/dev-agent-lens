@@ -1,6 +1,10 @@
 # Dev-Agent-Lens with LiteLLM and Arize Integration
 
-A proxy setup for Open Source, Open Telemetry Compliant, or proxyable Developer Agents to add observability, monitoring, and tracing capabilities. The first developer agent is Claude Code.
+A proxy setup for Open Source, Open Telemetry Compliant, or proxyable Developer Agents to add observability, monitoring, and tracing capabilities. Each layer can be easily hosted or depolyed anywhere, allowing teams to view all of their traces in a single pane of glass, no matter the deployment needs.
+
+The first developer agent is Claude Code, Dev-Agent-Lens comes complete with seamless OAuth Passthrough for Pro and Max plans.
+
+Leverage observability to track cost, identify common errors, and increase your teams 
 
 ## Overview
 
@@ -13,13 +17,13 @@ This repository provides a transparent proxy layer for Claude Code that:
 
 ## Architecture
 
-```
-Claude Code CLI → LiteLLM Proxy (localhost:4000) → Anthropic API
-                       ↓                              ↓
-                Arize AX/Phoenix              Arize AI (Cloud)
-                (Observability)               Phoenix (Local UI: :6006)
-                       ↓
-          Optional: PostgreSQL DB + Web UI (:4000/ui)
+```mermaid
+graph TD
+    A[Claude CLI / SDK] -->|OAuth / API-key<br/>passthrough| B[LiteLLM Proxy<br/>localhost:4000]
+    B --> C[OpenTelemetry exporter]
+    B --> D["Postgres<br/>(optional)"]
+    C --> E[Arize AX OR<br/>Arize Phoenix]
+    D --> F["LiteLLM UI / stats<br/>(optional)"]
 ```
 
 ## Prerequisites
@@ -38,7 +42,7 @@ Get started in under 2 minutes by choosing your observability backend!
 # Copy the example environment file  
 cp .env.example .env
 
-# Edit .env and add your Anthropic API key:
+# Edit .env and add ONLY your Anthropic API key (OAuth will pass through automatically)
 # ANTHROPIC_API_KEY=sk-ant-api03-your-key-here
 
 # For Arize AX, also add:
@@ -75,62 +79,17 @@ claude-lens
 
 **That's it!** Claude Code now routes through LiteLLM for consistent API handling.
 
-## Observability Options
+## View Observability in Arize
 
-This project supports two primary observability backends:
-
-### 1. Arize AX (Cloud)
-- **Usage**: `docker compose --profile arize up -d`
-- **UI**: [Arize AI Dashboard](https://app.arize.com)
-- **Benefits**: Cloud-based, advanced analytics, team collaboration
-- **Requirements**: Arize API key and Space key
-
-### 2. Phoenix (Local)
-- **Usage**: `docker compose --profile phoenix up -d`
-- **UI**: http://localhost:6006
-- **Benefits**: Local deployment, no cloud dependencies, privacy
-- **Requirements**: None (fully local)
-
-## About Arize & Phoenix
-
-**[Arize AX](https://arize.com/docs/ax)** - Enterprise AI engineering platform that provides:
-- **Prompts** - Prompt playground, management, and versioning
-- **Experiments** - Systematic A/B testing and performance measurement  
-- **Tracing** - Complete visibility into AI application workflows
-- **Evaluation** - LLM and code evaluations with custom metrics
-- **AI Copilot** - AI-powered insights and optimization suggestions
-
-**[Phoenix](https://arize.com/docs/phoenix)** - Lightweight, open-source project for:
-- **Tracing** - OpenTelemetry-compliant LLM application monitoring
-- **Prompt Engineering** - Interactive playground and span replay
-- **Experiments** - Dataset management and experiment tracking  
-- **Evaluation** - Built-in evaluations and annotation tools
-
-## Advanced Features
-
-### PostgreSQL Database & Web UI
-- **Usage**: `docker compose --profile advanced up -d`
-- **UI**: http://localhost:4001/ui
-- **Benefits**: 
-  - Database persistence for all traces and metrics
-  - Advanced user management and authentication
-  - Enhanced security features and access controls
-  - Custom dashboard creation and management
-- **Requirements**: PostgreSQL setup (automatically configured with profile)
-
-### Combined Profiles
-You can combine observability backends with advanced features:
-```bash
-# Arize AX + Advanced features
-docker compose --profile arize --profile advanced up -d
-
-# Phoenix + Advanced features
-docker compose --profile phoenix --profile advanced up -d
-```
+- Open [Arize AI Dashboard](https://app.arize.com)
+- Navigate to your project  
+- Filter traces: `status_code = 'OK' and attributes.llm.token_count.total > 0`
 
 ## Claude Code SDK Examples
 
 This repository includes comprehensive examples for integrating the Claude Code SDK with Dev-Agent-Lens observability in both **TypeScript** and **Python**. These examples demonstrate advanced usage patterns, specialized agents, and full observability integration.
+
+Note: Due to Claude Code SDK authentication options, OAuth passthrough for the SDK is not supported.
 
 ### Available Examples
 
