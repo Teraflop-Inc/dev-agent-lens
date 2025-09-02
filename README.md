@@ -69,12 +69,17 @@ docker compose --profile phoenix up -d
 ### 3. Use Claude Code
 
 ```bash
-# Use the wrapper script
+# Use the wrapper script with default settings (localhost:4000)
 ./claude-lens
 
 # Or install globally for convenience
 sudo cp claude-lens /usr/local/bin
 claude-lens
+
+# Use different proxy configurations:
+./claude-lens --proxy-url http://localhost:4001  # For advanced profile
+CLAUDE_LENS_PROXY_URL=http://remote-server:4000 ./claude-lens  # Via environment
+./claude-lens --help  # View all configuration options
 ```
 
 **That's it!** Claude Code now routes through LiteLLM for consistent API handling.
