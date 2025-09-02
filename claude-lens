@@ -1,15 +1,98 @@
 #!/bin/bash
 
+# Help function
+show_help() {
+    cat << EOF
+Claude Lens - Claude Code with LiteLLM proxy
+
+Usage: ./claude-lens [--proxy-url URL] [--help] [claude args...]
+
+Configuration (precedence: highest to lowest):
+  1. --proxy-url URL    Override proxy URL via command line
+  2. CLAUDE_LENS_PROXY_URL   Environment variable
+  3. http://localhost:4000   Default proxy URL
+
+Options:
+  --proxy-url URL    Set the LiteLLM proxy URL
+  --help, -h         Show this help message
+
+Examples:
+  ./claude-lens
+  ./claude-lens --proxy-url http://remote-server:4000
+  CLAUDE_LENS_PROXY_URL=http://remote:4000 ./claude-lens
+
+All other arguments are passed to Claude Code.
+EOF
+}
+
+# URL validation function
+validate_url() {
+    local url="$1"
+    if [[ ! "$url" =~ ^https?://[^[:space:]]+$ ]]; then
+        echo "❌ Invalid URL format: $url"
+        echo "   URL must start with http:// or https://"
+        return 1
+    fi
+    return 0
+}
+
+# Parse command line arguments
+PROXY_URL=""
+CLAUDE_ARGS=()
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --proxy-url)
+            if [[ -n "$2" && "$2" != --* ]]; then
+                PROXY_URL="$2"
+                shift 2
+            else
+                echo "❌ --proxy-url requires a URL argument"
+                exit 1
+            fi
+            ;;
+        --help|-h)
+            show_help
+            exit 0
+            ;;
+        *)
+            CLAUDE_ARGS+=("$1")
+            shift
+            ;;
+    esac
+done
+
+# Determine proxy URL with precedence order
+if [[ -n "$PROXY_URL" ]]; then
+    # 1. Command line flag (highest precedence)
+    FINAL_PROXY_URL="$PROXY_URL"
+    echo "🔧 Using proxy URL from command line: $FINAL_PROXY_URL"
+elif [[ -n "$CLAUDE_LENS_PROXY_URL" ]]; then
+    # 2. Environment variable
+    FINAL_PROXY_URL="$CLAUDE_LENS_PROXY_URL"
+    echo "🔧 Using proxy URL from environment variable: $FINAL_PROXY_URL"
+else
+    # 3. Default
+    FINAL_PROXY_URL="http://localhost:4000"
+    echo "🔧 Using default proxy URL: $FINAL_PROXY_URL"
+fi
+
+# Validate the final URL
+if ! validate_url "$FINAL_PROXY_URL"; then
+    exit 1
+fi
+
 # Check if proxy is running
-echo "🔍 Checking if LiteLLM proxy is running..."
-if ! curl -s http://localhost:4000/health >/dev/null; then
-  echo "❌ LiteLLM proxy is not running. Please start it first with: docker-compose up -d"
+echo "🔍 Checking if LiteLLM proxy is running at $FINAL_PROXY_URL..."
+if ! curl -s "$FINAL_PROXY_URL/health" >/dev/null; then
+  echo "❌ LiteLLM proxy is not running at $FINAL_PROXY_URL"
+  echo "   Please start it first with: docker-compose up -d"
   exit 1
 fi
 
 echo "✅ LiteLLM proxy is running"
-echo "🚀 Starting Claude Code with Arize tracing..."
+echo "🚀 Starting Claude Code with proxy at $FINAL_PROXY_URL..."
 
 # Set the environment variable and run Claude Code
-export ANTHROPIC_BASE_URL=http://localhost:4000
-claude "$@"
+export ANTHROPIC_BASE_URL="$FINAL_PROXY_URL"
+claude "${CLAUDE_ARGS[@]}"
