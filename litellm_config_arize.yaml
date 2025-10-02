@@ -3,9 +3,9 @@
 
 model_list:
   # All available Claude models from Anthropic API
-  - model_name: "claude-*"
+  - model_name: "anthropic/*"
     litellm_params:
-      model: "anthropic/{model}"
+      model: "anthropic/*"
       api_key: os.environ/ANTHROPIC_API_KEY
 
 litellm_settings:
