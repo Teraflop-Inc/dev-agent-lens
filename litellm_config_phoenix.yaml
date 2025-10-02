@@ -33,9 +33,8 @@ router_settings:
   disable_cooldowns: true
   allowed_fails: 1000
 
-# Arize environment configuration
-environment:
-  - ARIZE_API_KEY=${ARIZE_API_KEY}
-  - ARIZE_SPACE_KEY=${ARIZE_SPACE_KEY}
-  - ARIZE_ENDPOINT=https://otlp.arize.com/v1
+# Phoenix environment configuration
+environment_variables:
+  PHOENIX_COLLECTOR_ENDPOINT: "http://phoenix:4317"
+  PHOENIX_COLLECTOR_HTTP_ENDPOINT: "http://phoenix:6006/v1/traces"
 
