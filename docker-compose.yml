@@ -25,14 +25,14 @@ services:
       - ARIZE_SPACE_KEY=${ARIZE_SPACE_KEY}
 
       # "Project" info that shows up in the Arize UI (if enabled)
-      - ARIZE_MODEL_ID=${ARIZE_MODEL_ID:-litellm-proxy}
+      - ARIZE_MODEL_ID=${ARIZE_MODEL_ID:-dev-agent-lens}
       - ARIZE_MODEL_VERSION=${ARIZE_MODEL_VERSION:-local-dev}
 
       # Optional but recommended – explicit endpoint
       - ARIZE_ENDPOINT=https://otlp.arize.com/v1
 
       # Give the resource a name so you can filter by service
-      - OTEL_RESOURCE_ATTRIBUTES=service.name=litellm-proxy
+      - OTEL_RESOURCE_ATTRIBUTES=service.name=dev-agent-lens
     env_file:
       - .env
     command:
@@ -58,7 +58,7 @@ services:
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
 
       # OTEL service name for Phoenix tracing
-      - OTEL_SERVICE_NAME=${OTEL_SERVICE_NAME:-litellm-proxy}
+      - OTEL_SERVICE_NAME=${OTEL_SERVICE_NAME:-dev-agent-lens}
 
       # Phoenix OTLP endpoint
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://phoenix:4317
@@ -66,7 +66,7 @@ services:
       - PHOENIX_COLLECTOR_ENDPOINT=http://phoenix:4317
 
       # Give the resource a name so you can filter by service
-      - OTEL_RESOURCE_ATTRIBUTES=service.name=${OTEL_SERVICE_NAME:-litellm-proxy},openinference.project.name=${OTEL_SERVICE_NAME:-litellm-proxy}
+      - OTEL_RESOURCE_ATTRIBUTES=service.name=${OTEL_SERVICE_NAME:-dev-agent-lens},openinference.project.name=${OTEL_SERVICE_NAME:-dev-agent-lens}
     env_file:
       - .env
     command:
@@ -152,14 +152,14 @@ services:
       - ARIZE_SPACE_KEY=${ARIZE_SPACE_KEY}
 
       # "Project" info that shows up in the Arize UI
-      - ARIZE_MODEL_ID=${ARIZE_MODEL_ID:-litellm-proxy}
+      - ARIZE_MODEL_ID=${ARIZE_MODEL_ID:-dev-agent-lens}
       - ARIZE_MODEL_VERSION=${ARIZE_MODEL_VERSION:-local-dev}
 
       # Optional but recommended – explicit endpoint
       - ARIZE_ENDPOINT=https://otlp.arize.com/v1
 
       # Give the resource a name so you can filter by service
-      - OTEL_RESOURCE_ATTRIBUTES=service.name=litellm-proxy-advanced
+      - OTEL_RESOURCE_ATTRIBUTES=service.name=dev-agent-lens-advanced
     env_file:
       - .env
     command:
