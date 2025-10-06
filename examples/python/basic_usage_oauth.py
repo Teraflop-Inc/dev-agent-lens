@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
 OAuth Authentication Example
-Demonstrates how to use Claude Code SDK with OAuth authentication via LiteLLM proxy
+Demonstrates how to use Claude Agent SDK with OAuth authentication via LiteLLM proxy
 """
 
 import asyncio
 import os
 import json
-from claude_code_sdk import ClaudeSDKClient, ClaudeCodeOptions
+from claude_agent_sdk import ClaudeSDKClient, ClaudeAgentOptions
 from dotenv import load_dotenv
 
 # Load environment variables
@@ -56,17 +56,17 @@ def check_environment():
 
 async def run_oauth_test():
     """Test OAuth authentication through LiteLLM proxy."""
-    
-    print('🔐 OAuth Authentication Test - Claude Code SDK Integration')
+
+    print('🔐 OAuth Authentication Test - Claude Agent SDK Integration')
     print('='*70)
-    
-    # First, let's see what Claude Code actually sends by intercepting the request
+
+    # First, let's see what Claude Agent actually sends by intercepting the request
     oauth_token = os.getenv('ANTHROPIC_AUTH_TOKEN')
     base_url = os.getenv('ANTHROPIC_BASE_URL')
-    
+
     if not oauth_token:
         print('❌ ANTHROPIC_AUTH_TOKEN not set')
-        print('💡 For testing with Claude Code SDK:')
+        print('💡 For testing with Claude Agent SDK:')
         print('   export ANTHROPIC_AUTH_TOKEN="sk-ant-api-your-actual-key"  # Use real API key for now')
         print('   export ANTHROPIC_BASE_URL="http://localhost:4000"')
         return
@@ -83,53 +83,53 @@ async def run_oauth_test():
     # Show what we expect to see in LiteLLM logs
     print('📋 What to watch for in LiteLLM logs:')
     print('   • [OAUTH DEBUG] headers should show the Authorization header')
-    print('   • Should see Claude Code SDK making requests with proper headers')
-    print('   • Check what model Claude Code requests')
+    print('   • Should see Claude Agent SDK making requests with proper headers')
+    print('   • Check what model Claude Agent requests')
     print()
-    
+
     # Configure SDK with minimal prompt for fast response
-    options = ClaudeCodeOptions(
+    options = ClaudeAgentOptions(
         system_prompt='You are a helpful assistant. Give very concise answers.',
         max_turns=1
     )
-    
+
     try:
-        print('🚀 Starting Claude Code SDK test...')
+        print('🚀 Starting Claude Agent SDK test...')
         async with ClaudeSDKClient(options) as client:
             print('✅ Claude SDK client connected')
-            
+
             # Send a simple query for fast response
-            print('📤 Sending test query via Claude Code SDK...')
+            print('📤 Sending test query via Claude Agent SDK...')
             print('   Query: "What is 2+2? Just give the number."')
             await client.query('What is 2+2? Just give the number.')
-            
+
             print('⏳ Check Docker logs now: docker compose logs litellm-proxy --follow')
             print()
-            
+
             # Process streaming response
-            print('📥 Claude Code Response: ', end='')
+            print('📥 Claude Agent Response: ', end='')
             response_text = ''
             async for message in client.receive_response():
                 print(str(message), end='', flush=True)
                 response_text += str(message)
-            
+
             print('\n')
-            
+
             # Validate response
             if response_text.strip():
                 print('✅ Request completed!')
                 print(f'📊 Response length: {len(response_text)} characters')
-                
+
             else:
                 print('⚠️  Empty response - check logs for authentication issues')
-                
+
     except Exception as e:
-        print(f'\n❌ Claude Code SDK test failed: {e}')
+        print(f'\n❌ Claude Agent SDK test failed: {e}')
         print('\n🔧 Next steps:')
         print('   1. Check Docker logs: docker compose logs litellm-proxy')
         print('   2. Look for [OAUTH DEBUG] messages')
-        print('   3. See what headers Claude Code SDK actually sends')
-        print('   4. Identify the authentication method Claude Code uses')
+        print('   3. See what headers Claude Agent SDK actually sends')
+        print('   4. Identify the authentication method Claude Agent uses')
 
 async def run_comparison_test():
     """Compare OAuth vs API key authentication (if API key available)."""
@@ -166,7 +166,7 @@ async def run_comparison_test():
 
 async def main():
     """Main entry point."""
-    print('🧪 Claude Code OAuth Integration Test')
+    print('🧪 Claude Agent OAuth Integration Test')
     print('📋 Purpose: Verify OAuth pass-through authentication')
     print()
     

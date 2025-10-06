@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 /**
  * Basic Usage Example
- * Demonstrates how to use Claude Code SDK with Dev-Agent-Lens observability
+ * Demonstrates how to use Claude Agent SDK with Dev-Agent-Lens observability
  */
 
-import { query, Options } from '@anthropic-ai/claude-code';
+import { query, Options } from '@anthropic-ai/claude-agent-sdk';
 import dotenv from 'dotenv';
 
 // Load environment variables
@@ -20,9 +20,9 @@ async function runWithObservability() {
   };
 
   try {
-    console.log('✅ Starting Claude Code query with observability');
-    
-    // Send a query using the Claude Code SDK
+    console.log('✅ Starting Claude Agent SDK query with observability');
+
+    // Send a query using the Claude Agent SDK
     console.log('📤 Sending query to Claude...');
     const response = query({
       prompt: 'Hello! Please explain what TypeScript is and give me 3 benefits of using it. Keep your response concise.',
