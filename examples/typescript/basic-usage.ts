@@ -16,7 +16,7 @@ async function runWithObservability() {
     // Model configuration - will use LiteLLM proxy for observability
     model: 'claude-sonnet-4-20250514', // This will route through our LiteLLM proxy
     maxTurns: 10,
-    customSystemPrompt: 'You are a helpful TypeScript development assistant with full observability through Dev-Agent-Lens.'
+    systemPrompt: 'You are a helpful TypeScript development assistant with full observability through Dev-Agent-Lens.'
   };
 
   try {
@@ -63,7 +63,8 @@ async function runWithObservability() {
 }
 
 // Run if this is the main module
-if (require.main === module) {
+const isMainModule = import.meta.url === `file://${process.argv[1]}`;
+if (isMainModule) {
   runWithObservability().catch(console.error);
 }
 
