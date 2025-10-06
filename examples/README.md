@@ -1,6 +1,6 @@
-# Claude Code SDK Examples
+# Claude Agent SDK Examples
 
-This directory contains example implementations of the Claude Code SDK with Dev-Agent-Lens observability.
+This directory contains example implementations of the Claude Agent SDK with Dev-Agent-Lens observability.
 
 ## Prerequisites
 
@@ -17,50 +17,31 @@ This directory contains example implementations of the Claude Code SDK with Dev-
 
 ## Python Examples
 
-### Running with UV
+### Setup and Run
 
-[UV](https://github.com/astral-sh/uv) is a fast Python package manager that simplifies dependency management.
+We use [uv](https://github.com/astral-sh/uv) for fast Python dependency management.
 
-#### Install UV (if not already installed):
+#### Install uv (if not already installed):
 ```bash
 curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
 
-#### Run Python examples:
+#### Run examples:
 
 ```bash
 cd examples/python
-
-# Install dependencies with uv
-uv pip install -e .
 
 # Run basic usage example (API key authentication)
-uv run python basic_usage.py
+uv run basic_usage.py
 
 # Run OAuth authentication example (OAuth pass-through)
-uv run python basic_usage_oauth.py
+uv run basic_usage_oauth.py
 
 # Run observable agent examples (includes security analysis and incident response)
-uv run python observable_agent.py
+uv run observable_agent.py
 ```
 
-### Alternative: Run with standard Python
-
-```bash
-cd examples/python
-
-# Create virtual environment
-python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
-
-# Install dependencies
-pip install claude-code-sdk python-dotenv
-
-# Run examples
-python basic_usage.py           # API key authentication
-python basic_usage_oauth.py     # OAuth authentication
-python observable_agent.py
-```
+uv automatically manages virtual environments and dependencies from `pyproject.toml`.
 
 ## TypeScript Examples
 
@@ -78,11 +59,11 @@ npm run tools      # Custom tools example
 npm run review -- ./path/to/file.ts  # Code review
 npm run docs -- ./src  # Generate documentation
 
-# Or run directly with ts-node
-npx ts-node basic-usage.ts
-npx ts-node custom-tools.ts
-npx ts-node code-review.ts ./path/to/file.ts
-npx ts-node doc-generator.ts ./src ./docs
+# Or run directly with tsx
+npx tsx basic-usage.ts
+npx tsx custom-tools.ts
+npx tsx code-review.ts ./path/to/file.ts
+npx tsx doc-generator.ts ./src ./docs
 ```
 
 ### Alternative: Run with Bun
@@ -197,25 +178,22 @@ export ANTHROPIC_BASE_URL=http://localhost:4000
 docker compose up -d
 ```
 
-## Tips for Running with UV
+## Tips for Running with uv
 
-UV provides several advantages for Python development:
+uv provides several advantages for Python development:
 
 ```bash
-# Create a new virtual environment with uv
-uv venv
-
-# Sync dependencies from pyproject.toml
-uv pip sync pyproject.toml
-
-# Add a new dependency
-uv pip install new-package
-
-# Run scripts with automatic dependency resolution
-uv run python script.py
+# Run scripts with automatic dependency resolution (no venv needed!)
+uv run script.py
 
 # Run with specific Python version
-uv run --python 3.11 python script.py
+uv run --python 3.11 script.py
+
+# Sync dependencies from pyproject.toml
+uv sync
+
+# Add a new dependency
+uv add package-name
 ```
 
 ## Troubleshooting
@@ -232,14 +210,10 @@ docker-compose restart
 ### Missing dependencies
 ```bash
 # Python
-uv pip install -e .
-# or
-pip install -r requirements.txt
+uv sync  # Install dependencies from pyproject.toml
 
 # TypeScript
 npm install
-# or
-bun install
 ```
 
 ### API key issues
@@ -252,7 +226,7 @@ docker-compose logs -f litellm-proxy
 
 ## Additional Resources
 
-- [Claude Code SDK Documentation](https://docs.anthropic.com/en/docs/claude-code/sdk)
+- [Claude Agent SDK Documentation](https://docs.anthropic.com/en/api/agent-sdk/overview)
 - [Dev-Agent-Lens Guide](../../claude-code-sdk-guide.md)
 - [LiteLLM Documentation](https://docs.litellm.ai)
 - [Arize AI Platform](https://docs.arize.com)

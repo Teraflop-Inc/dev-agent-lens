@@ -4,7 +4,7 @@
  * Demonstrates building a code review agent with observability
  */
 
-import { query, Options } from '@anthropic-ai/claude-code';
+import { query, Options } from '@anthropic-ai/claude-agent-sdk';
 import { readFileSync, existsSync } from 'fs';
 import { join } from 'path';
 import dotenv from 'dotenv';
@@ -39,7 +39,7 @@ async function reviewCode(filePath: string): Promise<CodeReviewResult> {
   
   const options: Options = {
     model: 'claude-sonnet-4-20250514', // Routes through LiteLLM proxy
-    customSystemPrompt: `You are a senior code reviewer. Provide constructive feedback in JSON format.
+    systemPrompt: `You are a senior code reviewer. Provide constructive feedback in JSON format.
     
     Return a JSON object with this structure:
     {
@@ -205,15 +205,16 @@ function getLanguageFromExtension(filePath: string): string {
 }
 
 // CLI interface
-if (require.main === module) {
+const isMainModule = import.meta.url === `file://${process.argv[1]}`;
+if (isMainModule) {
   const args = process.argv.slice(2);
-  
+
   if (args.length === 0) {
-    console.log('Usage: ts-node code-review.ts <file-path>');
-    console.log('Example: ts-node code-review.ts ./src/api/auth.ts');
+    console.log('Usage: tsx code-review.ts <file-path>');
+    console.log('Example: tsx code-review.ts ./src/api/auth.ts');
     process.exit(1);
   }
-  
+
   const filePath = args[0];
   reviewCode(filePath)
     .then(() => process.exit(0))

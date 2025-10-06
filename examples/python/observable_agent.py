@@ -8,7 +8,7 @@ import asyncio
 import json
 import os
 from typing import Dict, Any, Optional
-from claude_code_sdk import ClaudeSDKClient, ClaudeCodeOptions
+from claude_agent_sdk import ClaudeSDKClient, ClaudeAgentOptions
 from dotenv import load_dotenv
 from datetime import datetime
 
@@ -21,12 +21,12 @@ class ObservableClaudeAgent:
     def __init__(self, agent_type: str = 'general'):
         """
         Initialize the agent with a specific type.
-        
+
         Args:
             agent_type: Type of agent ('sre', 'security', 'performance', 'general')
         """
         self.agent_type = agent_type
-        self.options = ClaudeCodeOptions(
+        self.options = ClaudeAgentOptions(
             system_prompt=self._get_system_prompt(agent_type),
             max_turns=10
         )
