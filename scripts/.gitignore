@@ -1,0 +1,16 @@
+# Environment variables (contains secrets)
+.env
+
+# Data exports
+*.jsonl
+*.csv
+*.parquet
+
+# Python virtual environment
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# UV lock file
+uv.lock
