@@ -1,7 +1,7 @@
 {
-  "name": "claude-code-sdk-typescript-examples",
+  "name": "claude-agent-sdk-typescript-examples",
   "version": "1.0.0",
-  "description": "TypeScript examples for Claude Code SDK with Dev-Agent-Lens observability",
+  "description": "TypeScript examples for Claude Agent SDK with Dev-Agent-Lens observability",
   "scripts": {
     "basic": "ts-node basic-usage.ts",
     "tools": "ts-node custom-tools.ts",
@@ -10,7 +10,7 @@
     "dev": "ts-node"
   },
   "dependencies": {
-    "@anthropic-ai/claude-code": "latest",
+    "@anthropic-ai/claude-agent-sdk": "latest",
     "dotenv": "^16.0.0"
   },
   "devDependencies": {

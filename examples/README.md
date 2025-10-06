@@ -1,6 +1,6 @@
-# Claude Code SDK Examples
+# Claude Agent SDK Examples
 
-This directory contains example implementations of the Claude Code SDK with Dev-Agent-Lens observability.
+This directory contains example implementations of the Claude Agent SDK with Dev-Agent-Lens observability.
 
 ## Prerequisites
 
@@ -54,7 +54,7 @@ python -m venv venv
 source venv/bin/activate  # On Windows: venv\Scripts\activate
 
 # Install dependencies
-pip install claude-code-sdk python-dotenv
+pip install claude-agent-sdk python-dotenv
 
 # Run examples
 python basic_usage.py           # API key authentication
@@ -252,7 +252,7 @@ docker-compose logs -f litellm-proxy
 
 ## Additional Resources
 
-- [Claude Code SDK Documentation](https://docs.anthropic.com/en/docs/claude-code/sdk)
+- [Claude Agent SDK Documentation](https://docs.anthropic.com/en/api/agent-sdk/overview)
 - [Dev-Agent-Lens Guide](../../claude-code-sdk-guide.md)
 - [LiteLLM Documentation](https://docs.litellm.ai)
 - [Arize AI Platform](https://docs.arize.com)
