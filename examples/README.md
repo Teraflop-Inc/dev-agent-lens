@@ -78,11 +78,11 @@ npm run tools      # Custom tools example
 npm run review -- ./path/to/file.ts  # Code review
 npm run docs -- ./src  # Generate documentation
 
-# Or run directly with ts-node
-npx ts-node basic-usage.ts
-npx ts-node custom-tools.ts
-npx ts-node code-review.ts ./path/to/file.ts
-npx ts-node doc-generator.ts ./src ./docs
+# Or run directly with tsx
+npx tsx basic-usage.ts
+npx tsx custom-tools.ts
+npx tsx code-review.ts ./path/to/file.ts
+npx tsx doc-generator.ts ./src ./docs
 ```
 
 ### Alternative: Run with Bun
