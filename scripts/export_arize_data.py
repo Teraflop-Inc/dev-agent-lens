@@ -30,6 +30,7 @@ Usage Examples:
 import argparse
 import os
 import sys
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -133,6 +134,15 @@ def parse_date(date_str: str) -> datetime:
         sys.exit(1)
 
 
+def format_file_size(size_bytes: int) -> str:
+    """Format file size in human-readable format."""
+    for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
+        if size_bytes < 1024.0:
+            return f"{size_bytes:.2f} {unit}"
+        size_bytes /= 1024.0
+    return f"{size_bytes:.2f} PB"
+
+
 def export_traces(args):
     """Export trace data from Arize."""
     # Load environment
@@ -172,8 +182,10 @@ def export_traces(args):
 
     # Export data
     print(f"🔄 Fetching trace data from Arize (model_id: {model_id})...")
+    start_time = time.time()
     try:
         df = client.export_model_to_df(**export_params)
+        fetch_duration = time.time() - start_time
 
         if df.empty:
             print("⚠️  No trace data found for the specified criteria")
@@ -183,27 +195,28 @@ def export_traces(args):
             print(f"  - Ensure traces are being sent to Arize from Dev-Agent-Lens")
             return
 
-        print(f"✅ Retrieved {len(df)} trace records")
+        print(f"✅ Retrieved {len(df)} trace records in {fetch_duration:.2f}s")
 
         # Save to file
         output_path = Path(args.output)
+        save_start = time.time()
 
         if args.format == 'parquet':
             df.to_parquet(output_path, index=False)
         else:
             df.to_csv(output_path, index=False)
 
+        save_duration = time.time() - save_start
+        total_duration = time.time() - start_time
+
         print(f"💾 Exported data to: {output_path.absolute()}")
+        print(f"⏱️  Save time: {save_duration:.2f}s | Total time: {total_duration:.2f}s")
 
         # Print summary
         print(f"\n📊 Data Summary:")
         print(f"  Total records: {len(df)}")
         print(f"  Columns: {', '.join(df.columns.tolist()[:5])}{'...' if len(df.columns) > 5 else ''}")
-        print(f"  File size: {output_path.stat().st_size / 1024:.2f} KB")
-
-        # Show preview
-        print(f"\n🔍 First 3 records preview:")
-        print(df.head(3).to_string())
+        print(f"  File size: {format_file_size(output_path.stat().st_size)}")
 
     except Exception as e:
         print(f"❌ Error exporting data: {e}")
