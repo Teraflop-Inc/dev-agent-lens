@@ -47,7 +47,7 @@ Export trace data from Arize AX platform for analysis and reporting.
 
 ### Usage Examples
 
-#### Export data for Oct 1, 2025 (default)
+#### Export data for Oct 1, 2025 (default - JSONL format)
 ```bash
 uv run python scripts/export_arize_data.py
 ```
@@ -62,9 +62,9 @@ uv run python scripts/export_arize_data.py --all
 uv run python scripts/export_arize_data.py --start-date 2025-10-01 --end-date 2025-10-06
 ```
 
-#### Export to a specific file
+#### Export to CSV format
 ```bash
-uv run python scripts/export_arize_data.py --output traces_october.csv
+uv run python scripts/export_arize_data.py --output traces.csv --format csv
 ```
 
 #### Export as Parquet format
@@ -77,13 +77,13 @@ uv run python scripts/export_arize_data.py --output traces.parquet --format parq
 uv run python scripts/export_arize_data.py \
   --start-date 2025-10-01 \
   --end-date 2025-10-31 \
-  --output october_traces.csv \
-  --format csv
+  --output october_traces.jsonl \
+  --format jsonl
 ```
 
 ### Output
 
-The script exports trace data to a CSV or Parquet file containing:
+The script exports trace data to JSONL, CSV, or Parquet format containing:
 - Span IDs and trace information
 - Timestamps (start/end times)
 - Input/output data
@@ -112,8 +112,11 @@ Once exported, you can analyze the trace data using pandas:
 ```python
 import pandas as pd
 
-# Load the exported data
-df = pd.read_csv('arize_traces.csv')
+# Load the exported data (JSONL)
+df = pd.read_json('arize_traces.jsonl', lines=True)
+
+# Or if you exported as CSV
+# df = pd.read_csv('arize_traces.csv')
 
 # Analyze token usage
 print(df['token_count'].sum())
