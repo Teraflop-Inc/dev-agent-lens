@@ -4,7 +4,7 @@
  * Generates API documentation for TypeScript files
  */
 
-import { ClaudeSDKClient, ClaudeCodeOptions } from '@anthropic-ai/claude-code';
+import { ClaudeSDKClient, ClaudeCodeOptions } from '@anthropic-ai/claude-agent-sdk';
 import { readdirSync, readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs';
 import { join, basename } from 'path';
 import dotenv from 'dotenv';
@@ -120,7 +120,7 @@ async function generateDocs(options: DocGenerationOptions) {
     if (format === 'markdown') {
       const indexContent = `# API Documentation\n\nGenerated on ${new Date().toISOString()}\n\n## Files\n\n${
         results.map(r => `- [${r.file}](./${basename(r.outputPath)})`).join('\n')
-      }\n\n---\n\n*Generated with Claude Code SDK + Dev-Agent-Lens observability*`;
+      }\n\n---\n\n*Generated with Claude Agent SDK + Dev-Agent-Lens observability*`;
       
       writeFileSync(join(outputDir, 'README.md'), indexContent);
       console.log('\n📋 Generated index: README.md');
@@ -156,22 +156,23 @@ function getExtension(filename: string): string {
 }
 
 // CLI interface
-if (require.main === module) {
+const isMainModule = import.meta.url === `file://${process.argv[1]}`;
+if (isMainModule) {
   const args = process.argv.slice(2);
-  
+
   if (args.length === 0) {
-    console.log('Usage: ts-node doc-generator.ts <source-dir> [output-dir] [--json]');
+    console.log('Usage: tsx doc-generator.ts <source-dir> [output-dir] [--json]');
     console.log('Examples:');
-    console.log('  ts-node doc-generator.ts ./src');
-    console.log('  ts-node doc-generator.ts ./src ./docs');
-    console.log('  ts-node doc-generator.ts ./src ./api-docs --json');
+    console.log('  tsx doc-generator.ts ./src');
+    console.log('  tsx doc-generator.ts ./src ./docs');
+    console.log('  tsx doc-generator.ts ./src ./api-docs --json');
     process.exit(1);
   }
-  
+
   const sourceDir = args[0];
   const outputDir = args[1] && !args[1].startsWith('--') ? args[1] : undefined;
   const format = args.includes('--json') ? 'json' : 'markdown';
-  
+
   generateDocs({ sourceDir, outputDir, format })
     .then(() => process.exit(0))
     .catch(() => process.exit(1));

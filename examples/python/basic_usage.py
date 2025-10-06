@@ -1,25 +1,25 @@
 #!/usr/bin/env python3
 """
 Basic Usage Example
-Demonstrates how to use Claude Code SDK with Dev-Agent-Lens observability
+Demonstrates how to use Claude Agent SDK with Dev-Agent-Lens observability
 """
 
 import asyncio
 import os
-from claude_code_sdk import ClaudeSDKClient, ClaudeCodeOptions
+from claude_agent_sdk import ClaudeSDKClient, ClaudeAgentOptions
 from dotenv import load_dotenv
 
 # Load environment variables
 load_dotenv()
 
 async def run_with_observability():
-    """Basic example of using Claude Code SDK with observability."""
-    
+    """Basic example of using Claude Agent SDK with observability."""
+
     # Configure SDK with proxy (using default model)
-    options = ClaudeCodeOptions(
+    options = ClaudeAgentOptions(
         #api_key=os.getenv('ANTHROPIC_API_KEY'),
         #base_url=os.getenv('ANTHROPIC_BASE_URL', 'http://localhost:4000'),
-        # model is optional - Claude Code will use its default model if not specified
+        # model is optional - Claude Agent SDK will use its default model if not specified
         # model='claude-3-5-sonnet-20241022',  # Uncomment to override default
         system_prompt='You are a Python development assistant with full observability',
         max_turns=5
