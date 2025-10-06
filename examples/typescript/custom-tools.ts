@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 /**
  * Custom Tools Example
- * Demonstrates how to add custom tools to Claude Code SDK with observability
+ * Demonstrates how to add custom tools to Claude Agent SDK with observability
  */
 
-import { ClaudeSDKClient, ClaudeCodeOptions, Tool } from '@anthropic-ai/claude-code';
+import { ClaudeSDKClient, ClaudeCodeOptions, Tool } from '@anthropic-ai/claude-agent-sdk';
 import dotenv from 'dotenv';
 
 // Load environment variables
@@ -80,7 +80,7 @@ async function runAdvancedAgent() {
   const sdkOptions: ClaudeCodeOptions = {
     apiKey: process.env.ANTHROPIC_API_KEY,
     baseUrl: 'http://localhost:8082',
-    // model is optional - uses Claude Code's default if not specified
+    // model is optional - uses Claude Agent SDK's default if not specified
     tools: customTools,
     systemPrompt: 'You are a DevOps assistant with metric analysis capabilities. Use the available tools to analyze system performance.',
     // Enable JSON output for structured responses

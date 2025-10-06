@@ -4,7 +4,7 @@
  * Generates API documentation for TypeScript files
  */
 
-import { ClaudeSDKClient, ClaudeCodeOptions } from '@anthropic-ai/claude-code';
+import { ClaudeSDKClient, ClaudeCodeOptions } from '@anthropic-ai/claude-agent-sdk';
 import { readdirSync, readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs';
 import { join, basename } from 'path';
 import dotenv from 'dotenv';
@@ -120,7 +120,7 @@ async function generateDocs(options: DocGenerationOptions) {
     if (format === 'markdown') {
       const indexContent = `# API Documentation\n\nGenerated on ${new Date().toISOString()}\n\n## Files\n\n${
         results.map(r => `- [${r.file}](./${basename(r.outputPath)})`).join('\n')
-      }\n\n---\n\n*Generated with Claude Code SDK + Dev-Agent-Lens observability*`;
+      }\n\n---\n\n*Generated with Claude Agent SDK + Dev-Agent-Lens observability*`;
       
       writeFileSync(join(outputDir, 'README.md'), indexContent);
       console.log('\n📋 Generated index: README.md');

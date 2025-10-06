@@ -1,10 +1,10 @@
 [project]
 name = "python"
 version = "1.0.0"
-description = "Claude Code SDK examples with Dev-Agent-Lens observability"
+description = "Claude Agent SDK examples with Dev-Agent-Lens observability"
 requires-python = ">=3.10"
 dependencies = [
-    "claude-code-sdk",
+    "claude-agent-sdk",
     "python-dotenv>=1.0.0",
     "asyncio",
 ]

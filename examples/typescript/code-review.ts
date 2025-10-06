@@ -4,7 +4,7 @@
  * Demonstrates building a code review agent with observability
  */
 
-import { query, Options } from '@anthropic-ai/claude-code';
+import { query, Options } from '@anthropic-ai/claude-agent-sdk';
 import { readFileSync, existsSync } from 'fs';
 import { join } from 'path';
 import dotenv from 'dotenv';
