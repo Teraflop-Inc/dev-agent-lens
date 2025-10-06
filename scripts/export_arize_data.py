@@ -11,7 +11,7 @@ Environment Variables Required:
     ARIZE_MODEL_ID: Model ID in Arize (default: 'dev-agent-lens')
 
 Usage Examples:
-    # Export data for Oct 1, 2025 (default)
+    # Export data for Oct 1, 2025 (default - JSONL format)
     uv run python scripts/export_arize_data.py
 
     # Export all available data
@@ -20,8 +20,8 @@ Usage Examples:
     # Export data for a custom date range
     uv run python scripts/export_arize_data.py --start-date 2025-10-01 --end-date 2025-10-06
 
-    # Export to a specific file
-    uv run python scripts/export_arize_data.py --output traces_oct.csv
+    # Export to CSV format
+    uv run python scripts/export_arize_data.py --output traces.csv --format csv
 
     # Export as Parquet
     uv run python scripts/export_arize_data.py --output traces.parquet --format parquet
@@ -75,16 +75,16 @@ def parse_args():
     parser.add_argument(
         '--output',
         type=str,
-        default='arize_traces.csv',
-        help='Output file path (default: arize_traces.csv)'
+        default='arize_traces.jsonl',
+        help='Output file path (default: arize_traces.jsonl)'
     )
 
     parser.add_argument(
         '--format',
         type=str,
-        choices=['csv', 'parquet'],
-        default='csv',
-        help='Output format (default: csv)'
+        choices=['jsonl', 'csv', 'parquet'],
+        default='jsonl',
+        help='Output format (default: jsonl)'
     )
 
     return parser.parse_args()
@@ -203,8 +203,10 @@ def export_traces(args):
 
         if args.format == 'parquet':
             df.to_parquet(output_path, index=False)
-        else:
+        elif args.format == 'csv':
             df.to_csv(output_path, index=False)
+        else:  # jsonl
+            df.to_json(output_path, orient='records', lines=True)
 
         save_duration = time.time() - save_start
         total_duration = time.time() - start_time
