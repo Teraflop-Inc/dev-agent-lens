@@ -112,7 +112,8 @@ async function runAdvancedAgent() {
 }
 
 // Run if this is the main module
-if (require.main === module) {
+const isMainModule = import.meta.url === `file://${process.argv[1]}`;
+if (isMainModule) {
   runAdvancedAgent().catch(console.error);
 }
 
