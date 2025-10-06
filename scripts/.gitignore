@@ -2,6 +2,7 @@
 .env
 
 # Data exports
+*.jsonl
 *.csv
 *.parquet
 
