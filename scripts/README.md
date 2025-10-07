@@ -12,7 +12,8 @@ scripts/
 │   ├── export_arize.py      # Arize backend
 │   ├── export_phoenix.py    # Phoenix backend
 │   ├── analyze_sessions.py  # Session analysis
-│   └── reconstruct_sessions.py  # Session reconstruction
+│   ├── reconstruct_sessions.py  # Session reconstruction
+│   └── compare_spans.py     # Span comparison and duplication analysis
 ├── arize/                   # Arize export output (auto-created)
 └── phoenix/                 # Phoenix export output (auto-created)
 ```
@@ -32,7 +33,71 @@ uv run main.py analyze <trace_file>
 
 # Reconstruct sessions
 uv run main.py reconstruct <trace_file>
+
+# Compare spans to identify duplication patterns
+uv run main.py compare <session_file>
 ```
+
+## Compare Spans (Duplication Analysis)
+
+Analyze spans within reconstructed sessions to identify content duplication and accumulation patterns. This is useful for understanding how conversational AI systems accumulate context across turns.
+
+### Usage
+
+```bash
+# Compare all sessions in a file
+uv run main.py compare phoenix/phoenix_sessions.jsonl
+
+# Compare a specific session
+uv run main.py compare phoenix/phoenix_sessions.jsonl --session 1
+```
+
+### What It Checks
+
+The compare script analyzes whether content from earlier spans appears in later spans by checking:
+
+- **Input messages** (`attributes.llm.input_messages`)
+- **Input values** (`attributes.input.value`)
+- **Output messages** (`attributes.llm.output_messages`)
+- **Output values** (`attributes.output.value`)
+
+It uses **fuzzy/substring matching** on actual text content (not metadata) to determine if earlier content is contained within later spans.
+
+### Output
+
+For each session, the script shows:
+
+1. **Containment Analysis**: Whether earlier spans are fully contained in later spans
+   - ✅ FULLY CONTAINED: 100% of content from earlier span found in later span
+   - ❌ PARTIAL/NOT CONTAINED: Some content missing
+
+2. **Location Details**: Exact positions where content appears in later spans
+   - Shows the character position in the accumulated content
+   - Displays context around each match
+
+3. **Span-by-Span Comparison**: Message-level comparison between consecutive spans
+   - Duplicated message count
+   - New message count
+   - Overlap percentage
+
+### Example Output
+
+```
+Span 1 → Span 3: ✅ FULLY CONTAINED
+  Content chunks in Span 1: 6
+  Found in Span 3: 6 (100.0%)
+
+  ✅ Contained chunks and their locations:
+    [input_msg] at position 0
+      Chunk: <system-reminder> This is a reminder...
+      Context: ...<system-reminder> This is a reminder that your todo list...
+
+    [input_msg] at position 363
+      Chunk: can you tell me what this repo does
+      Context: ...tion this message to the user. </system-reminder> can you tell me...
+```
+
+This helps verify the hypothesis that **later spans contain the complete history of earlier spans** in conversational AI systems.
 
 ## Export Trace Data (Arize or Phoenix)
 

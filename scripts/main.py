@@ -17,9 +17,14 @@ Usage:
     # Reconstruct sessions
     uv run main.py reconstruct <trace_file>
 
+    # Compare spans to identify duplication patterns
+    uv run main.py compare <session_file>
+    uv run main.py compare <session_file> --session 1
+
     # Get help on any command
     uv run main.py export --help
     uv run main.py analyze --help
+    uv run main.py compare --help
 """
 
 import sys
@@ -54,6 +59,12 @@ def main():
         help='Reconstruct sessions from trace data'
     )
 
+    # Compare subcommand
+    compare_parser = subparsers.add_parser(
+        'compare',
+        help='Compare spans to identify duplication and accumulation patterns'
+    )
+
     # Parse just the command
     if len(sys.argv) == 1:
         parser.print_help()
@@ -76,6 +87,11 @@ def main():
         from src.reconstruct_sessions import main as reconstruct_main
         sys.argv = [sys.argv[0]] + remaining
         reconstruct_main()
+
+    elif args.command == 'compare':
+        from src.compare_spans import main as compare_main
+        sys.argv = [sys.argv[0]] + remaining
+        compare_main()
 
     else:
         parser.print_help()
