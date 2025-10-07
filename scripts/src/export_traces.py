@@ -94,13 +94,20 @@ def main():
     # Import and run appropriate backend
     print(f"🔍 Using backend: {backend.upper()}")
 
+    # Set default output path based on backend if not specified
+    if '--output' not in remaining:
+        if backend == 'phoenix':
+            remaining.extend(['--output', 'phoenix/phoenix_traces.jsonl'])
+        else:
+            remaining.extend(['--output', 'arize/arize_traces.jsonl'])
+
     if backend == 'phoenix':
-        from export_phoenix_data import main as phoenix_main
+        from src.export_phoenix import main as phoenix_main
         # Update sys.argv to pass remaining args
         sys.argv = [sys.argv[0]] + remaining
         phoenix_main()
     else:  # arize
-        from export_arize_data import main as arize_main
+        from src.export_arize import main as arize_main
         sys.argv = [sys.argv[0]] + remaining
         arize_main()
 
