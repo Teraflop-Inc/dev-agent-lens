@@ -1,17 +1,32 @@
 #!/usr/bin/env python3
 """
-Reconstruct session threads from Arize trace data using parent_id relationships.
+Reconstruct session threads from trace data using parent_id relationships.
+
+Supports both Arize and Phoenix trace data.
 
 This script works around the missing session metadata by:
 1. Using trace_id to group related spans
 2. Using parent_id to build hierarchical span trees
 3. Detecting conversation boundaries via time gaps
+
+Usage:
+    # Auto-detect trace file from phoenix/ or arize/ folders
+    uv run main.py reconstruct
+
+    # Specify file path
+    uv run main.py reconstruct phoenix/phoenix_traces.jsonl
+
+    # Use different reconstruction methods
+    uv run main.py reconstruct --method trace    # Trace ID grouping only
+    uv run main.py reconstruct --method time     # Time window detection only
+    uv run main.py reconstruct --method both     # Both methods (default)
 """
 import json
 import pandas as pd
 from datetime import timedelta
 from typing import Dict, List, Any
 import argparse
+from pathlib import Path
 
 
 def load_trace_data(filepath: str) -> pd.DataFrame:
@@ -211,13 +226,33 @@ def reconstruct_by_time_windows(df: pd.DataFrame, gap_threshold: int = 300) -> N
         print(f"Spans with session ID: {has_session}/{len(conv_df)}")
 
 
+def find_trace_file():
+    """Auto-detect trace file from arize/ or phoenix/ folders."""
+    script_dir = Path(__file__).parent.parent
+
+    # Check phoenix first (local development priority)
+    phoenix_file = script_dir / 'phoenix' / 'phoenix_traces.jsonl'
+    if phoenix_file.exists():
+        return phoenix_file
+
+    # Check arize
+    arize_file = script_dir / 'arize' / 'arize_traces.jsonl'
+    if arize_file.exists():
+        return arize_file
+
+    return None
+
+
 def main():
-    parser = argparse.ArgumentParser(description='Reconstruct sessions from Arize trace data')
+    parser = argparse.ArgumentParser(
+        description='Reconstruct sessions from trace data',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__
+    )
     parser.add_argument(
         'input_file',
-        default='../oxen/dev-agent-lens/traces/arize_traces_10-01-2025.jsonl',
         nargs='?',
-        help='Path to input JSONL file'
+        help='Path to input JSONL file (default: auto-detect from arize/ or phoenix/)'
     )
     parser.add_argument(
         '--gap-threshold',
@@ -240,8 +275,26 @@ def main():
 
     args = parser.parse_args()
 
-    print(f"Loading trace data from: {args.input_file}")
-    df = load_trace_data(args.input_file)
+    # Determine input file
+    if args.input_file:
+        input_file = Path(args.input_file)
+    else:
+        input_file = find_trace_file()
+        if not input_file:
+            print("❌ Error: No trace data found")
+            print("\nPlease run the export script first:")
+            print("  uv run main.py export")
+            print("\nOr specify a file path:")
+            print("  uv run main.py reconstruct <path/to/traces.jsonl>")
+            return
+        print(f"🔍 Auto-detected: {input_file}")
+
+    if not input_file.exists():
+        print(f"❌ Error: File not found: {input_file}")
+        return
+
+    print(f"Loading trace data from: {input_file}")
+    df = load_trace_data(str(input_file))
     print(f"Loaded {len(df)} spans")
 
     if args.method in ['trace', 'both']:
