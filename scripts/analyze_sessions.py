@@ -5,9 +5,18 @@ Analyze Arize trace data to understand session structure
 import json
 import pandas as pd
 from collections import Counter
+import sys
+from pathlib import Path
 
 # Load the data
-df = pd.read_json('../oxen/dev-agent-lens/traces/arize_traces_10-01-2025.jsonl', lines=True)
+data_file = Path(__file__).parent / 'arize_traces.jsonl'
+if not data_file.exists():
+    print(f"❌ Error: Data file not found: {data_file}")
+    print("\nPlease run the export script first:")
+    print("  uv run export_arize_data.py")
+    sys.exit(1)
+
+df = pd.read_json(data_file, lines=True)
 
 print(f"Total records: {len(df)}")
 print(f"\nColumns: {len(df.columns)}")
@@ -68,10 +77,18 @@ if not df['session_id'].isna().all():
     for session, count in small_sessions.items():
         print(f"  {session}: {count} records")
 
-    # Show details of smallest session
+    # Show details of specific session
     if len(small_sessions) > 0:
-        smallest_session = small_sessions.index[0]
-        print(f"\n🎯 Smallest session detail: {smallest_session}")
+        # Use specific session instead of smallest
+        target_session = 'f3ee7c49-86a7-4292-a2ce-26db48f2088f'
+        if target_session not in df['session_id'].values:
+            print(f"\n⚠️  Target session {target_session} not found, using smallest session")
+            target_session = small_sessions.index[0]
+        else:
+            print(f"\n🎯 Target session detail: {target_session}")
+
+        smallest_session = target_session
+        print(f"\n🎯 Analyzing session: {smallest_session}")
         session_df = df[df['session_id'] == smallest_session].copy()
         session_df = session_df.sort_values('start_time')
 
@@ -130,17 +147,27 @@ if not df['session_id'].isna().all():
             print(f"  Duration: {duration:.3f}s")
 
             if input_val:
-                print(f"  Input: {str(input_val)[:200]}...")
+                input_str = str(input_val)
+                print(f"  Input ({len(input_str)} chars): {input_str[:500]}...")
+                if len(input_str) > 500:
+                    print(f"    [truncated {len(input_str) - 500} more chars]")
             if output_val:
-                print(f"  Output: {str(output_val)[:200]}...")
+                output_str = str(output_val)
+                print(f"  Output ({len(output_str)} chars): {output_str[:500]}...")
+                if len(output_str) > 500:
+                    print(f"    [truncated {len(output_str) - 500} more chars]")
 
             if input_messages and isinstance(input_messages, list) and len(input_messages) > 0:
                 print(f"  Input Messages: {len(input_messages)} message(s)")
-                for msg in input_messages[:2]:  # Show first 2
+                for i, msg in enumerate(input_messages[:2]):  # Show first 2
                     if isinstance(msg, dict):
                         role = msg.get('message.role', 'unknown')
                         content = msg.get('message.content', '')
-                        print(f"    [{role}] {str(content)[:150]}...")
+                        content_str = str(content)
+                        print(f"    [{i+1}] Role: {role}")
+                        print(f"        Content ({len(content_str)} chars): {content_str[:800]}")
+                        if len(content_str) > 800:
+                            print(f"        [truncated {len(content_str) - 800} more chars]")
 
             if output_messages and isinstance(output_messages, str):
                 print(f"  Output Messages: {output_messages[:200]}...")
