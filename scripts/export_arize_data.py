@@ -143,90 +143,202 @@ def format_file_size(size_bytes: int) -> str:
     return f"{size_bytes:.2f} PB"
 
 
+def classify_span(row):
+    """Classify span type for filtering."""
+    input_val = row.get('attributes.input.value', '')
+    output_val = row.get('attributes.output.value', '')
+    span_name = row.get('name', '')
+    span_kind = row.get('attributes.openinference.span.kind', '')
+
+    # Tool-related spans
+    if span_kind == 'TOOL':
+        return 'tools'
+
+    # Check for tool_use or tool_result in input/output
+    input_str = str(input_val) if input_val else ''
+    output_str = str(output_val) if output_val else ''
+
+    if 'tool_result' in input_str or 'tool_use' in input_str or 'tool_use' in output_str:
+        return 'tools'
+
+    # Incomplete LLM requests (has input but no output)
+    if span_kind == 'LLM' and span_name == 'litellm_request':
+        if input_val and (not output_val or output_val == '' or str(output_val).strip() == ''):
+            return 'incomplete'
+
+    # Safety classification prompts
+    if 'policy_spec' in input_str and 'Claude Code Code Bash' in input_str:
+        return 'safety'
+
+    # Title/summarization prompts
+    if 'Please write a 5-10 word title' in input_str:
+        return 'summarization'
+
+    # Add more classifications as needed
+    # if 'some_other_pattern' in input_str:
+    #     return 'other_type'
+
+    return 'main'
+
+
 def export_traces(args):
     """Export trace data from Arize."""
-    # Load environment
-    api_key, space_key, model_id = load_environment()
+    output_path = Path(args.output)
+    raw_file = output_path.parent / f"{output_path.stem}_raw{output_path.suffix}"
 
-    # Initialize Arize export client with explicit API key
-    print("🔄 Initializing Arize export client...")
-    client = ArizeExportClient(api_key=api_key)
-
-    # Prepare export parameters
-    export_params = {
-        'space_id': space_key,
-        'model_id': model_id,
-        'environment': Environments.TRACING,
-    }
-
-    # Configure date range
-    if not args.all:
-        if args.start_date:
-            start_date = parse_date(args.start_date)
-        else:
-            # Default to Oct 1, 2025
-            start_date = datetime(2025, 10, 1)
-
-        if args.end_date:
-            end_date = parse_date(args.end_date)
-        else:
-            # Default to end of start date
-            end_date = start_date + timedelta(days=1)
-
-        export_params['start_time'] = start_date
-        export_params['end_time'] = end_date
-
-        print(f"📅 Exporting traces from {start_date.date()} to {end_date.date()}")
+    # Check if raw file already exists
+    if raw_file.exists():
+        print(f"✅ Found existing raw data: {raw_file}")
+        print(f"⏭️  Skipping download, loading from file...")
+        start_time = time.time()
+        df = pd.read_json(raw_file, lines=True)
+        load_duration = time.time() - start_time
+        print(f"✅ Loaded {len(df)} records in {load_duration:.2f}s")
     else:
-        print("📅 Exporting all available traces")
+        # Load environment
+        api_key, space_key, model_id = load_environment()
 
-    # Export data
-    print(f"🔄 Fetching trace data from Arize (model_id: {model_id})...")
-    start_time = time.time()
-    try:
-        df = client.export_model_to_df(**export_params)
-        fetch_duration = time.time() - start_time
+        # Initialize Arize export client with explicit API key
+        print("🔄 Initializing Arize export client...")
+        client = ArizeExportClient(api_key=api_key)
 
-        if df.empty:
-            print("⚠️  No trace data found for the specified criteria")
+        # Prepare export parameters
+        export_params = {
+            'space_id': space_key,
+            'model_id': model_id,
+            'environment': Environments.TRACING,
+        }
+
+        # Configure date range
+        if not args.all:
+            if args.start_date:
+                start_date = parse_date(args.start_date)
+            else:
+                # Default to Oct 1, 2025
+                start_date = datetime(2025, 10, 1)
+
+            if args.end_date:
+                end_date = parse_date(args.end_date)
+            else:
+                # Default to end of start date
+                end_date = start_date + timedelta(days=1)
+
+            export_params['start_time'] = start_date
+            export_params['end_time'] = end_date
+
+            print(f"📅 Exporting traces from {start_date.date()} to {end_date.date()}")
+        else:
+            print("📅 Exporting all available traces")
+
+        # Export data
+        print(f"🔄 Fetching trace data from Arize (model_id: {model_id})...")
+        start_time = time.time()
+        try:
+            df = client.export_model_to_df(**export_params)
+            fetch_duration = time.time() - start_time
+
+            if df.empty:
+                print("⚠️  No trace data found for the specified criteria")
+                print("\nTroubleshooting:")
+                print(f"  - Verify model_id '{model_id}' exists in Arize")
+                print(f"  - Check date range contains data")
+                print(f"  - Ensure traces are being sent to Arize from Dev-Agent-Lens")
+                return
+
+            print(f"✅ Retrieved {len(df)} trace records in {fetch_duration:.2f}s")
+
+            # Save raw file
+            print(f"💾 Saving raw data to: {raw_file.absolute()}")
+            if args.format == 'parquet':
+                df.to_parquet(raw_file, index=False)
+            elif args.format == 'csv':
+                df.to_csv(raw_file, index=False)
+            else:  # jsonl
+                df.to_json(raw_file, orient='records', lines=True)
+
+        except Exception as e:
+            print(f"❌ Error exporting data: {e}")
             print("\nTroubleshooting:")
-            print(f"  - Verify model_id '{model_id}' exists in Arize")
-            print(f"  - Check date range contains data")
-            print(f"  - Ensure traces are being sent to Arize from Dev-Agent-Lens")
-            return
+            print("  - Verify ARIZE_API_KEY and ARIZE_SPACE_KEY are correct")
+            print("  - Check that the model_id exists in Arize")
+            print("  - Ensure you have access to the Arize space")
+            sys.exit(1)
 
-        print(f"✅ Retrieved {len(df)} trace records in {fetch_duration:.2f}s")
+    # Classify and split data
+    print(f"\n🔍 Classifying spans...")
+    start_time = time.time()
+    df['classification'] = df.apply(classify_span, axis=1)
 
-        # Save to file
-        output_path = Path(args.output)
-        save_start = time.time()
+    classification_counts = df['classification'].value_counts()
+    print(f"✅ Classification complete:")
+    for classification, count in classification_counts.items():
+        print(f"  {classification}: {count} records")
+
+    # Save datasets by classification
+    print(f"\n💾 Saving classified datasets...")
+    save_start = time.time()
+
+    # Save main dataset
+    main_df = df[df['classification'] == 'main'].copy()
+    if args.format == 'parquet':
+        main_df.to_parquet(output_path, index=False)
+    elif args.format == 'csv':
+        main_df.to_csv(output_path, index=False)
+    else:  # jsonl
+        main_df.to_json(output_path, orient='records', lines=True)
+
+    main_size = format_file_size(output_path.stat().st_size)
+    print(f"  [main] {len(main_df)} records → {output_path.name} ({main_size})")
+
+    # Save tools dataset
+    tools_df = df[df['classification'] == 'tools'].copy()
+    if len(tools_df) > 0:
+        tools_output = output_path.parent / f"{output_path.stem}_tools{output_path.suffix}"
 
         if args.format == 'parquet':
-            df.to_parquet(output_path, index=False)
+            tools_df.to_parquet(tools_output, index=False)
         elif args.format == 'csv':
-            df.to_csv(output_path, index=False)
+            tools_df.to_csv(tools_output, index=False)
         else:  # jsonl
-            df.to_json(output_path, orient='records', lines=True)
+            tools_df.to_json(tools_output, orient='records', lines=True)
 
-        save_duration = time.time() - save_start
-        total_duration = time.time() - start_time
+        tools_size = format_file_size(tools_output.stat().st_size)
+        print(f"  [tools] {len(tools_df)} records → {tools_output.name} ({tools_size})")
 
-        print(f"💾 Exported data to: {output_path.absolute()}")
-        print(f"⏱️  Save time: {save_duration:.2f}s | Total time: {total_duration:.2f}s")
+    # Save all other ancillary data in one file (with classification column)
+    ancillary_df = df[(df['classification'] != 'main') & (df['classification'] != 'tools')].copy()
+    if len(ancillary_df) > 0:
+        ancillary_output = output_path.parent / f"{output_path.stem}_ancillary{output_path.suffix}"
 
-        # Print summary
-        print(f"\n📊 Data Summary:")
-        print(f"  Total records: {len(df)}")
-        print(f"  Columns: {', '.join(df.columns.tolist()[:5])}{'...' if len(df.columns) > 5 else ''}")
-        print(f"  File size: {format_file_size(output_path.stat().st_size)}")
+        if args.format == 'parquet':
+            ancillary_df.to_parquet(ancillary_output, index=False)
+        elif args.format == 'csv':
+            ancillary_df.to_csv(ancillary_output, index=False)
+        else:  # jsonl
+            ancillary_df.to_json(ancillary_output, orient='records', lines=True)
 
-    except Exception as e:
-        print(f"❌ Error exporting data: {e}")
-        print("\nTroubleshooting:")
-        print("  - Verify ARIZE_API_KEY and ARIZE_SPACE_KEY are correct")
-        print("  - Check that the model_id exists in Arize")
-        print("  - Ensure you have access to the Arize space")
-        sys.exit(1)
+        ancillary_size = format_file_size(ancillary_output.stat().st_size)
+        print(f"  [ancillary] {len(ancillary_df)} records → {ancillary_output.name} ({ancillary_size})")
+
+        # Show breakdown of ancillary types
+        for classification, count in ancillary_df['classification'].value_counts().items():
+            print(f"    - {classification}: {count} records")
+
+    save_duration = time.time() - save_start
+    total_duration = time.time() - start_time
+
+    print(f"\n⏱️  Processing time: {save_duration:.2f}s | Total: {total_duration:.2f}s")
+
+    # Print summary
+    print(f"\n📊 Final Summary:")
+    print(f"  Total records: {len(df)}")
+    print(f"  Main dataset: {len(main_df)} records")
+    print(f"  Tools dataset: {len(tools_df)} records")
+    print(f"  Ancillary dataset: {len(ancillary_df)} records")
+    if len(ancillary_df) > 0:
+        for classification, count in ancillary_df['classification'].value_counts().items():
+            print(f"    - {classification}: {count}")
+    print(f"  Columns: {len(df.columns)}")
 
 
 def main():
