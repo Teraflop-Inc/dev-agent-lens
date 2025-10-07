@@ -89,6 +89,12 @@ def parse_args():
         help='Maximum number of spans to retrieve (default: 100000)'
     )
 
+    parser.add_argument(
+        '--overwrite',
+        action='store_true',
+        help='Overwrite existing files (re-export data)'
+    )
+
     return parser.parse_args()
 
 
@@ -212,6 +218,28 @@ def classify_span(row):
 
 def export_traces(args):
     """Export trace data from Phoenix."""
+    output_path = Path(args.output)
+
+    # Delete existing files if --overwrite is specified
+    if args.overwrite:
+        # Delete all related output files
+        patterns = [
+            output_path,
+            output_path.parent / f"{output_path.stem}_tools{output_path.suffix}",
+            output_path.parent / f"{output_path.stem}_haiku_holdover{output_path.suffix}",
+            output_path.parent / f"{output_path.stem}_litellm_overhead{output_path.suffix}",
+            output_path.parent / f"{output_path.stem}_ancillary{output_path.suffix}",
+        ]
+        deleted = []
+        for file_path in patterns:
+            if file_path.exists():
+                file_path.unlink()
+                deleted.append(file_path.name)
+        if deleted:
+            print(f"🗑️  Overwrite mode: deleted {len(deleted)} existing file(s)")
+            for name in deleted:
+                print(f"    - {name}")
+
     phoenix_url, phoenix_project = load_environment()
 
     print(f"🔄 Connecting to Phoenix at {phoenix_url}")
