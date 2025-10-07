@@ -2,6 +2,38 @@
 
 Utility scripts for managing and analyzing Dev-Agent-Lens data.
 
+## Project Structure
+
+```
+scripts/
+├── main.py                  # Unified CLI entry point (use this!)
+├── src/                     # All implementation code
+│   ├── export_traces.py     # Export orchestrator
+│   ├── export_arize.py      # Arize backend
+│   ├── export_phoenix.py    # Phoenix backend
+│   ├── analyze_sessions.py  # Session analysis
+│   └── reconstruct_sessions.py  # Session reconstruction
+├── arize/                   # Arize export output (auto-created)
+└── phoenix/                 # Phoenix export output (auto-created)
+```
+
+## Quick Start
+
+```bash
+# Install dependencies
+cd scripts
+uv sync
+
+# Export traces (auto-detects backend from .env)
+uv run main.py export
+
+# Analyze session reconstruction
+uv run main.py analyze <trace_file>
+
+# Reconstruct sessions
+uv run main.py reconstruct <trace_file>
+```
+
 ## Export Trace Data (Arize or Phoenix)
 
 Export trace data from either Arize AX (cloud) or Phoenix (local) for analysis and reporting. The script auto-detects which backend to use based on environment variables.
@@ -64,66 +96,56 @@ ARIZE_MODEL_ID=litellm
 
 ### Usage Examples
 
-The unified `export_traces.py` script auto-detects which backend to use based on your `.env` configuration.
+The export script auto-detects which backend to use based on your `.env` configuration and automatically saves data to the appropriate folder (`arize/` or `phoenix/`).
 
-#### Export data from today (default - JSONL format)
 ```bash
-uv run export_traces.py
-```
+# Export data from today (default - JSONL format)
+uv run main.py export
 
-#### Export all available data
-```bash
-uv run export_traces.py --all
-```
+# Export all available data
+uv run main.py export --all
 
-#### Export data for a custom date range
-```bash
-uv run export_traces.py --start-date 2025-10-01 --end-date 2025-10-06
-```
+# Export data for a custom date range
+uv run main.py export --start-date 2025-10-01 --end-date 2025-10-06
 
-#### Export to CSV format
-```bash
-uv run export_traces.py --output traces.csv --format csv
-```
+# Export to CSV format (saves to arize/arize_traces.csv or phoenix/phoenix_traces.csv)
+uv run main.py export --format csv
 
-#### Export as Parquet format
-```bash
-uv run export_traces.py --output traces.parquet --format parquet
-```
+# Export as Parquet format
+uv run main.py export --format parquet
 
-#### Force specific backend (override auto-detection)
-```bash
-uv run export_traces.py --backend phoenix
-uv run export_traces.py --backend arize
-```
+# Force specific backend (override auto-detection)
+uv run main.py export --backend phoenix
+uv run main.py export --backend arize
 
-#### Combine options
-```bash
-uv run export_traces.py \
-  --start-date 2025-10-01 \
-  --end-date 2025-10-31 \
-  --output october_traces.jsonl \
-  --format jsonl
+# Custom output path (overrides default arize/ or phoenix/ folder)
+uv run main.py export --output custom_folder/traces.jsonl
 ```
 
 ### Output
 
-The script automatically classifies and splits trace data into separate files:
+The script automatically classifies and splits trace data into separate files, saving them to `arize/` or `phoenix/` folders:
 
-**Main Files:**
-- `{filename}.jsonl` - Main dataset (user-agent conversations, LLM requests)
-- `{filename}_tools.jsonl` - Tool calls and tool results
-- `{filename}_ancillary.jsonl` - Ancillary data (safety checks, title generation, incomplete requests)
+**Output Files:**
+- `{folder}/{filename}.jsonl` - Main dataset (Sonnet conversations only)
+- `{folder}/{filename}_tools.jsonl` - Tool calls and tool results
+- `{folder}/{filename}_haiku_holdover.jsonl` - Haiku model calls (for further categorization)
+- `{folder}/{filename}_litellm_overhead.jsonl` - LiteLLM system overhead/test calls
+- `{folder}/{filename}_ancillary.jsonl` - Ancillary data (quota, safety, titles, incomplete)
 
 **For Arize exports only:**
-- `{filename}_raw.jsonl` - Raw unprocessed data (cached to avoid re-downloading)
+- `arize/{filename}_raw.jsonl` - Raw unprocessed data (cached to avoid re-downloading)
 
 **Classification Types:**
-- `main` - Primary user-agent conversation data
+- `main` - Primary Sonnet user-agent conversation data (claude-sonnet-4-5)
 - `tools` - Tool executions (Read, Edit, Bash, etc.)
-- `safety` - Bash command safety policy checks
-- `summarization` - Title generation prompts
-- `incomplete` - Failed or interrupted LLM requests
+- `haiku_holdover` - All Haiku model calls (needs further categorization)
+- `litellm_system_overhead` - LiteLLM test/health check calls
+- `quota` - Quota check calls (in ancillary)
+- `is_new_topic` - Topic detection calls (in ancillary)
+- `safety` - Bash command safety policy checks (in ancillary)
+- `summarization` - Title generation prompts (in ancillary)
+- `incomplete` - Failed or interrupted LLM requests (in ancillary)
 
 **Data includes:**
 - Span IDs and trace information
@@ -175,19 +197,25 @@ Once exported, you can analyze the trace data using pandas:
 import pandas as pd
 
 # Load the exported data (JSONL)
-df = pd.read_json('arize_traces.jsonl', lines=True)
+df = pd.read_json('arize/arize_traces.jsonl', lines=True)
+# Or for Phoenix
+# df = pd.read_json('phoenix/phoenix_traces.jsonl', lines=True)
 
 # Or if you exported as CSV
-# df = pd.read_csv('arize_traces.csv')
+# df = pd.read_csv('arize/arize_traces.csv')
 
-# Analyze token usage
+# Analyze token usage (Arize only)
 print(df['token_count'].sum())
 
 # Find most expensive traces
 print(df.nlargest(10, 'cost'))
 
 # Group by model
-print(df.groupby('model_name')['token_count'].sum())
+print(df.groupby('attributes.llm.model_name')['token_count'].sum())
+
+# Load tools data
+tools_df = pd.read_json('arize/arize_traces_tools.jsonl', lines=True)
+print(f"Tool calls: {len(tools_df)}")
 ```
 
 ## Adding More Scripts
