@@ -80,15 +80,34 @@ def main():
 
     # Extract session IDs from metadata
     def extract_session_id(metadata):
-        if pd.isna(metadata) or not isinstance(metadata, dict):
+        if pd.isna(metadata):
             return None
 
-        # Try user_api_key_end_user_id first
+        # Handle string representation of dict (Phoenix format)
+        if isinstance(metadata, str):
+            if 'session_' in metadata:
+                # Extract from pattern like: _session_ae99895f-9fad-4453-bb91-1005e8ccc4d3
+                parts = metadata.split('session_')
+                if len(parts) > 1:
+                    # Get the session ID (everything after 'session_')
+                    session_id = parts[-1].rstrip("'}\"")  # Remove trailing quotes/braces
+                    return session_id
+            return None
+
+        if not isinstance(metadata, dict):
+            return None
+
+        # Try Phoenix format: metadata.user_id with _session_ pattern
+        user_id = metadata.get('user_id')
+        if user_id and 'session_' in str(user_id):
+            return str(user_id).split('session_')[-1]
+
+        # Try Arize format: user_api_key_end_user_id
         user_id = metadata.get('user_api_key_end_user_id')
         if user_id and 'session_' in user_id:
             return user_id.split('session_')[-1]
 
-        # Also try requester_metadata.user_id
+        # Also try requester_metadata.user_id (Arize format)
         req_meta = metadata.get('requester_metadata', {})
         if isinstance(req_meta, dict):
             user_id = req_meta.get('user_id')
@@ -97,7 +116,14 @@ def main():
 
         return None
 
-    df['session_id'] = df['attributes.metadata'].apply(extract_session_id)
+    # Check both metadata columns
+    if 'metadata' in df.columns:
+        df['session_id'] = df['metadata'].apply(extract_session_id)
+    elif 'attributes.metadata' in df.columns:
+        df['session_id'] = df['attributes.metadata'].apply(extract_session_id)
+    else:
+        print("❌ No metadata column found")
+        df['session_id'] = None
 
     print(f"\n📊 Session Analysis:")
     print(f"  Unique sessions: {df['session_id'].nunique()}")
@@ -134,17 +160,9 @@ def main():
         for session, count in small_sessions.items():
             print(f"  {session}: {count} records")
 
-        # Show details of specific session
+        # Show details of smallest session
         if len(small_sessions) > 0:
-            # Use specific session instead of smallest
-            target_session = 'f3ee7c49-86a7-4292-a2ce-26db48f2088f'
-            if target_session not in df['session_id'].values:
-                print(f"\n⚠️  Target session {target_session} not found, using smallest session")
-                target_session = small_sessions.index[0]
-            else:
-                print(f"\n🎯 Target session detail: {target_session}")
-
-            smallest_session = target_session
+            smallest_session = small_sessions.index[0]
             print(f"\n🎯 Analyzing session: {smallest_session}")
             session_df = df[df['session_id'] == smallest_session].copy()
             session_df = session_df.sort_values('start_time')
