@@ -87,6 +87,12 @@ def parse_args():
         help='Output format (default: jsonl)'
     )
 
+    parser.add_argument(
+        '--overwrite',
+        action='store_true',
+        help='Overwrite existing files (skip cache, re-download data)'
+    )
+
     return parser.parse_args()
 
 
@@ -208,15 +214,18 @@ def export_traces(args):
     output_path = Path(args.output)
     raw_file = output_path.parent / f"{output_path.stem}_raw{output_path.suffix}"
 
-    # Check if raw file already exists
-    if raw_file.exists():
+    # Check if raw file already exists (unless --overwrite is specified)
+    if raw_file.exists() and not args.overwrite:
         print(f"✅ Found existing raw data: {raw_file}")
         print(f"⏭️  Skipping download, loading from file...")
+        print(f"   (Use --overwrite to re-download)")
         start_time = time.time()
         df = pd.read_json(raw_file, lines=True)
         load_duration = time.time() - start_time
         print(f"✅ Loaded {len(df)} records in {load_duration:.2f}s")
     else:
+        if args.overwrite and raw_file.exists():
+            print(f"🗑️  Overwrite mode: deleting existing raw file")
         # Load environment
         api_key, space_key, model_id = load_environment()
 
