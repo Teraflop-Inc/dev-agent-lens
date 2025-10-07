@@ -6,13 +6,16 @@ This script analyzes session data to detect if later spans contain duplicated
 content from earlier spans, which is common in conversational AI where context
 accumulates across turns.
 
+Uses fuzzy/subset matching on actual content (not metadata) from both inputs
+and outputs. Checks if text from earlier spans appears anywhere in later spans.
+
 Usage:
     uv run compare_spans.py phoenix/phoenix_sessions.jsonl
     uv run compare_spans.py phoenix/phoenix_sessions.jsonl --session 1
-    uv run compare_spans.py phoenix/phoenix_sessions.jsonl --detailed
 """
 
 import argparse
+import ast
 import json
 import sys
 from pathlib import Path
@@ -53,29 +56,157 @@ def compare_messages(msg1: List, msg2: List) -> Dict[str, Any]:
     }
 
 
-def check_complete_containment(earlier_msgs: List, later_msgs: List) -> Dict[str, Any]:
-    """Check if all messages from earlier span are contained in later span."""
-    earlier_str = [json.dumps(m, sort_keys=True) if isinstance(m, dict) else str(m) for m in (earlier_msgs or [])]
-    later_str = [json.dumps(m, sort_keys=True) if isinstance(m, dict) else str(m) for m in (later_msgs or [])]
+def extract_text_from_content(content) -> List[str]:
+    """Recursively extract text from nested content structures."""
+    texts = []
 
-    # Check if all earlier messages exist in later messages
-    contained = [m for m in earlier_str if m in later_str]
-    missing = [m for m in earlier_str if m not in later_str]
+    if isinstance(content, str):
+        # Try to parse as JSON/dict first (handle both JSON and Python dict string format)
+        if content.strip().startswith('[') or content.strip().startswith('{'):
+            # Try JSON first
+            try:
+                parsed = json.loads(content)
+                texts.extend(extract_text_from_content(parsed))
+                return texts
+            except json.JSONDecodeError:
+                pass
 
-    is_complete_subset = len(missing) == 0 and len(earlier_str) > 0
-    containment_pct = (len(contained) / len(earlier_str) * 100) if earlier_str else 0
+            # Try Python literal eval (handles single quotes properly)
+            try:
+                parsed = ast.literal_eval(content)
+                texts.extend(extract_text_from_content(parsed))
+                return texts
+            except:
+                pass
+
+        # Not parseable or parsing failed - treat as plain text
+        if content.strip():
+            texts.append(content.strip())
+    elif isinstance(content, dict):
+        # Handle common content structures
+        if 'text' in content:
+            texts.extend(extract_text_from_content(content['text']))
+        if 'thinking' in content:
+            texts.extend(extract_text_from_content(content['thinking']))
+        if 'content' in content:
+            texts.extend(extract_text_from_content(content['content']))
+        if 'message.content' in content:
+            texts.extend(extract_text_from_content(content['message.content']))
+    elif isinstance(content, list):
+        for item in content:
+            texts.extend(extract_text_from_content(item))
+
+    return texts
+
+
+def extract_content(span: Dict) -> str:
+    """Extract all text content from a span (inputs and outputs)."""
+    content_parts = []
+
+    # Get input messages content
+    input_msgs = span.get('attributes.llm.input_messages', [])
+    if isinstance(input_msgs, list):
+        for msg in input_msgs:
+            if isinstance(msg, dict):
+                msg_content = msg.get('message.content', '')
+                if msg_content:
+                    content_parts.extend(extract_text_from_content(msg_content))
+
+    # Get input value
+    input_val = span.get('attributes.input.value', '')
+    if input_val:
+        content_parts.extend(extract_text_from_content(input_val))
+
+    # Get output messages
+    output_msgs = span.get('attributes.llm.output_messages', '')
+    if output_msgs:
+        content_parts.extend(extract_text_from_content(output_msgs))
+
+    # Get output value
+    output_val = span.get('attributes.output.value', '')
+    if output_val:
+        content_parts.extend(extract_text_from_content(output_val))
+
+    return '\n'.join(content_parts)
+
+
+def check_content_containment(earlier_span: Dict, later_span: Dict) -> Dict[str, Any]:
+    """Check if content from earlier span is contained in later span (fuzzy/subset matching)."""
+    earlier_content = extract_content(earlier_span)
+    later_content = extract_content(later_span)
+
+    # Extract individual text chunks from earlier span to check
+    chunks = []
+
+    # Get input messages
+    input_msgs = earlier_span.get('attributes.llm.input_messages', [])
+    if isinstance(input_msgs, list):
+        for msg in input_msgs:
+            if isinstance(msg, dict):
+                content = msg.get('message.content', '')
+                if content:
+                    texts = extract_text_from_content(content)
+                    for text in texts:
+                        if text and text.strip():
+                            chunks.append(('input_msg', text.strip()))
+
+    # Get input value
+    input_val = earlier_span.get('attributes.input.value', '')
+    if input_val:
+        texts = extract_text_from_content(input_val)
+        for text in texts:
+            if text and text.strip():
+                chunks.append(('input_val', text.strip()))
+
+    # Get output
+    output_msgs = earlier_span.get('attributes.llm.output_messages', '')
+    if output_msgs:
+        texts = extract_text_from_content(output_msgs)
+        for text in texts:
+            if text and text.strip():
+                chunks.append(('output_msg', text.strip()))
+
+    output_val = earlier_span.get('attributes.output.value', '')
+    if output_val:
+        texts = extract_text_from_content(output_val)
+        for text in texts:
+            if text and text.strip():
+                chunks.append(('output_val', text.strip()))
+
+    # Check which chunks are contained in later content
+    contained = []
+    missing = []
+
+    for chunk_type, chunk_text in chunks:
+        # Fuzzy check: is this chunk contained as substring in later content?
+        if chunk_text in later_content:
+            # Find the position and context
+            pos = later_content.find(chunk_text)
+            # Get some context around the match (50 chars before and after)
+            context_start = max(0, pos - 50)
+            context_end = min(len(later_content), pos + len(chunk_text) + 50)
+            context = later_content[context_start:context_end]
+
+            contained.append((chunk_type, chunk_text, pos, context))
+        else:
+            missing.append((chunk_type, chunk_text))
+
+    total_chunks = len(chunks)
+    is_complete_subset = len(missing) == 0 and total_chunks > 0
+    containment_pct = (len(contained) / total_chunks * 100) if total_chunks > 0 else 0
 
     return {
         'is_complete_subset': is_complete_subset,
-        'total_earlier': len(earlier_str),
+        'total_chunks': total_chunks,
         'contained_count': len(contained),
         'missing_count': len(missing),
         'containment_percentage': containment_pct,
-        'missing_messages': missing
+        'contained_chunks': contained,
+        'missing_chunks': missing
     }
 
 
-def analyze_session(session: Dict, detailed: bool = False) -> None:
+def analyze_session(session: Dict) -> None:
     """Analyze a single session for span duplication."""
     print(f"\n{'═' * 80}")
     print(f"SESSION {session['session_number']}: {session.get('session_id', 'unknown')}")
@@ -94,21 +225,29 @@ def analyze_session(session: Dict, detailed: bool = False) -> None:
 
     if len(spans) > 1:
         last_span = spans[-1]
-        last_msgs = last_span.get('attributes.llm.input_messages', [])
 
         for i, span in enumerate(spans[:-1]):  # All except last
-            span_msgs = span.get('attributes.llm.input_messages', [])
+            result = check_content_containment(span, last_span)
 
-            if isinstance(span_msgs, list) and isinstance(last_msgs, list):
-                result = check_complete_containment(span_msgs, last_msgs)
+            status = "✅ FULLY CONTAINED" if result['is_complete_subset'] else "❌ PARTIAL/NOT CONTAINED"
+            print(f"Span {i+1} → Span {len(spans)}: {status}")
+            print(f"  Content chunks in Span {i+1}: {result['total_chunks']}")
+            print(f"  Found in Span {len(spans)}: {result['contained_count']} ({result['containment_percentage']:.1f}%)")
 
-                status = "✅ FULLY CONTAINED" if result['is_complete_subset'] else "❌ PARTIAL/NOT CONTAINED"
-                print(f"Span {i+1} → Span {len(spans)}: {status}")
-                print(f"  Messages in Span {i+1}: {result['total_earlier']}")
-                print(f"  Found in Span {len(spans)}: {result['contained_count']} ({result['containment_percentage']:.1f}%)")
-                if result['missing_count'] > 0:
-                    print(f"  Missing: {result['missing_count']} messages")
-                print()
+            if result['contained_count'] > 0:
+                print(f"\n  ✅ Contained chunks and their locations:")
+                for chunk_type, chunk_text, pos, context in result['contained_chunks'][:5]:  # Show first 5
+                    chunk_preview = chunk_text[:100].replace('\n', ' ')
+                    print(f"\n    [{chunk_type}] at position {pos}")
+                    print(f"      Chunk: {chunk_preview}{'...' if len(chunk_text) > 100 else ''}")
+                    print(f"      Context: ...{context.replace(chr(10), ' ')}...")
+
+            if result['missing_count'] > 0:
+                print(f"\n  ❌ Missing chunks:")
+                for chunk_type, chunk_text in result['missing_chunks'][:3]:  # Show first 3
+                    preview = chunk_text[:200].replace('\n', ' ')
+                    print(f"    [{chunk_type}] {preview}{'...' if len(chunk_text) > 200 else ''}")
+            print()
 
     print(f"{'─' * 80}\n")
 
@@ -150,7 +289,7 @@ def analyze_session(session: Dict, detailed: bool = False) -> None:
                 if comparison['duplicated_count'] > 0:
                     print(f"    ⚠️  DUPLICATION DETECTED: {comparison['duplicated_count']} messages from previous span")
 
-                if detailed and comparison['new_count'] > 0:
+                if comparison['new_count'] > 0:
                     print(f"\n  🆕 New messages:")
                     for j, new_msg in enumerate(comparison['new_messages'][:3]):  # Show first 3
                         msg_dict = json.loads(new_msg) if new_msg.startswith('{') else new_msg
@@ -200,11 +339,6 @@ def main():
         type=int,
         help='Analyze specific session number (default: all)'
     )
-    parser.add_argument(
-        '--detailed',
-        action='store_true',
-        help='Show detailed message content'
-    )
 
     args = parser.parse_args()
 
@@ -224,11 +358,11 @@ def main():
         if not target_sessions:
             print(f"❌ Error: Session {args.session} not found")
             sys.exit(1)
-        analyze_session(target_sessions[0], detailed=args.detailed)
+        analyze_session(target_sessions[0])
     else:
         # Analyze all sessions
         for session in sessions:
-            analyze_session(session, detailed=args.detailed)
+            analyze_session(session)
 
 
 if __name__ == '__main__':
