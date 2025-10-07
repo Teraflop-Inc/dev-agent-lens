@@ -158,6 +158,9 @@ def classify_span(row):
     output_val = row.get('attributes.output.value', '')
     span_name = row.get('name', '')
     span_kind = row.get('attributes.openinference.span.kind', '')
+    model_name = row.get('attributes.llm.model_name', '')
+    input_msgs = row.get('attributes.llm.input_messages', '')
+    output_msgs = row.get('attributes.llm.output_messages', '')
 
     # Tool-related spans
     if span_kind == 'TOOL':
@@ -169,6 +172,27 @@ def classify_span(row):
 
     if 'tool_result' in input_str or 'tool_use' in input_str or 'tool_use' in output_str:
         return 'tools'
+
+    # Combine all text for pattern matching
+    all_text = (input_str + output_str + str(input_msgs) + str(output_msgs)).lower()
+
+    # Quota calls → ancillary (check before haiku since quota uses haiku)
+    if 'quota' in input_str.lower() and len(input_str) < 50:  # Simple quota check
+        return 'quota'
+    if 'quota' in str(input_msgs).lower() and 'quota' in str(output_str).lower() and len(str(output_str)) < 10:
+        return 'quota'
+
+    # Haiku model calls → holdover (needs further categorization)
+    if model_name and 'haiku' in model_name.lower():
+        return 'haiku_holdover'
+
+    # LiteLLM test calls → system overhead
+    if 'test' in all_text and 'litellm' in all_text.lower():
+        return 'litellm_system_overhead'
+
+    # "Is new topic" calls → ancillary
+    if 'new topic' in all_text or 'is_new_topic' in all_text:
+        return 'is_new_topic'
 
     # Incomplete LLM requests (has input but no output)
     if span_kind == 'LLM' and 'litellm' in span_name:
@@ -292,8 +316,39 @@ def export_traces(args):
             tools_size = format_file_size(tools_output.stat().st_size)
             print(f"  [tools] {len(tools_df)} records → {tools_output.name} ({tools_size})")
 
-        # Save all other ancillary data
-        ancillary_df = df[(df['classification'] != 'main') & (df['classification'] != 'tools')].copy()
+        # Save haiku_holdover dataset (needs further categorization)
+        haiku_df = df[df['classification'] == 'haiku_holdover'].copy()
+        if len(haiku_df) > 0:
+            haiku_output = output_path.parent / f"{output_path.stem}_haiku_holdover{output_path.suffix}"
+
+            if args.format == 'parquet':
+                haiku_df.to_parquet(haiku_output, index=False)
+            elif args.format == 'csv':
+                haiku_df.to_csv(haiku_output, index=False)
+            else:  # jsonl
+                haiku_df.to_json(haiku_output, orient='records', lines=True)
+
+            haiku_size = format_file_size(haiku_output.stat().st_size)
+            print(f"  [haiku_holdover] {len(haiku_df)} records → {haiku_output.name} ({haiku_size})")
+
+        # Save litellm_system_overhead dataset
+        overhead_df = df[df['classification'] == 'litellm_system_overhead'].copy()
+        if len(overhead_df) > 0:
+            overhead_output = output_path.parent / f"{output_path.stem}_litellm_overhead{output_path.suffix}"
+
+            if args.format == 'parquet':
+                overhead_df.to_parquet(overhead_output, index=False)
+            elif args.format == 'csv':
+                overhead_df.to_csv(overhead_output, index=False)
+            else:  # jsonl
+                overhead_df.to_json(overhead_output, orient='records', lines=True)
+
+            overhead_size = format_file_size(overhead_output.stat().st_size)
+            print(f"  [litellm_overhead] {len(overhead_df)} records → {overhead_output.name} ({overhead_size})")
+
+        # Save ancillary data (quota, is_new_topic, safety, summarization, incomplete)
+        ancillary_types = ['quota', 'is_new_topic', 'safety', 'summarization', 'incomplete']
+        ancillary_df = df[df['classification'].isin(ancillary_types)].copy()
         if len(ancillary_df) > 0:
             ancillary_output = output_path.parent / f"{output_path.stem}_ancillary{output_path.suffix}"
 
@@ -319,8 +374,10 @@ def export_traces(args):
         # Print summary
         print(f"\n📊 Final Summary:")
         print(f"  Total records: {len(df)}")
-        print(f"  Main dataset: {len(main_df)} records")
+        print(f"  Main dataset (Sonnet): {len(main_df)} records")
         print(f"  Tools dataset: {len(tools_df)} records")
+        print(f"  Haiku holdover: {len(haiku_df)} records")
+        print(f"  LiteLLM overhead: {len(overhead_df)} records")
         print(f"  Ancillary dataset: {len(ancillary_df)} records")
         if len(ancillary_df) > 0:
             for classification, count in ancillary_df['classification'].value_counts().items():
