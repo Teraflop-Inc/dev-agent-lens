@@ -16,23 +16,19 @@ services:
 
       # Disable authentication for simple setup (no master key)
       - LITELLM_DISABLE_AUTH=true
-      
+
       # Enable debug logging for OAuth testing
       - LITELLM_LOG=DEBUG
-      
+
       # Required Arize observability
       - ARIZE_API_KEY=${ARIZE_API_KEY}
       - ARIZE_SPACE_KEY=${ARIZE_SPACE_KEY}
-
-      # "Project" info that shows up in the Arize UI (if enabled)
-      - ARIZE_MODEL_ID=${ARIZE_MODEL_ID:-dev-agent-lens}
-      - ARIZE_MODEL_VERSION=${ARIZE_MODEL_VERSION:-local-dev}
 
       # Optional but recommended – explicit endpoint
       - ARIZE_ENDPOINT=https://otlp.arize.com/v1
 
       # Give the resource a name so you can filter by service
-      - OTEL_RESOURCE_ATTRIBUTES=service.name=dev-agent-lens
+      - OTEL_SERVICE_NAME=${OTEL_SERVICE_NAME:-dev-agent-lens}
     env_file:
       - .env
     command:
@@ -86,8 +82,8 @@ services:
   phoenix:
     image: arizephoenix/phoenix:latest
     ports:
-      - "6006:6006"  # Phoenix UI
-      - "4317:4317"  # OTLP gRPC endpoint
+      - "6006:6006" # Phoenix UI
+      - "4317:4317" # OTLP gRPC endpoint
     environment:
       - PHOENIX_PORT=6006
       - PHOENIX_HOST=0.0.0.0
@@ -129,7 +125,7 @@ services:
       postgres:
         condition: service_healthy
     ports:
-      - "4001:4000"  # Different port to avoid conflict
+      - "4001:4000" # Different port to avoid conflict
     volumes:
       - ./litellm_config.yaml:/app/config.yaml
     environment:
