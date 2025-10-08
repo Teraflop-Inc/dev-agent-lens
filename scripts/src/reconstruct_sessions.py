@@ -159,7 +159,7 @@ def reconstruct_by_session_id(df: pd.DataFrame) -> List[pd.DataFrame]:
             span_duration = (span_end - span_start).total_seconds() if pd.notna(span_start) and pd.notna(span_end) else 0
 
             print(f"\n  [{span_time}] {span_name} ({span_kind}) - {span_id} [{span_duration:.2f}s]")
-            if parent_id:
+            if parent_id and isinstance(parent_id, str):
                 print(f"    Parent: {parent_id[:8]}")
 
             # Get input/output
