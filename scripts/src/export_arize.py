@@ -11,7 +11,7 @@ Environment Variables Required:
     ARIZE_MODEL_ID: Model ID in Arize (default: 'dev-agent-lens')
 
 Usage Examples:
-    # Export data for Oct 1, 2025 (default - JSONL format)
+    # Export data for today (default - JSONL format)
     uv run python scripts/export_arize_data.py
 
     # Export all available data
@@ -57,7 +57,7 @@ def parse_args():
     parser.add_argument(
         '--start-date',
         type=str,
-        help='Start date in ISO format (YYYY-MM-DD). Default: 2025-10-01'
+        help='Start date in ISO format (YYYY-MM-DD). Default: today'
     )
 
     parser.add_argument(
@@ -245,8 +245,8 @@ def export_traces(args):
             if args.start_date:
                 start_date = parse_date(args.start_date)
             else:
-                # Default to Oct 1, 2025
-                start_date = datetime(2025, 10, 1)
+                # Default to today
+                start_date = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
 
             if args.end_date:
                 end_date = parse_date(args.end_date)
