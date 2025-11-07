@@ -11,6 +11,10 @@ Usage:
     # Export with specific options
     uv run main.py export --all --format csv
 
+    # Query traces by session ID or search string
+    uv run main.py query --session-id abc123
+    uv run main.py query --search "ENG2-481"
+
     # Analyze session reconstruction
     uv run main.py analyze <trace_file>
 
@@ -23,6 +27,7 @@ Usage:
 
     # Get help on any command
     uv run main.py export --help
+    uv run main.py query --help
     uv run main.py analyze --help
     uv run main.py compare --help
 """
@@ -45,6 +50,12 @@ def main():
     export_parser = subparsers.add_parser(
         'export',
         help='Export trace data from Arize or Phoenix'
+    )
+
+    # Query subcommand
+    query_parser = subparsers.add_parser(
+        'query',
+        help='Query traces by session ID or search string'
     )
 
     # Analyze subcommand
@@ -77,6 +88,11 @@ def main():
         from src.export_traces import main as export_main
         sys.argv = [sys.argv[0]] + remaining
         export_main()
+
+    elif args.command == 'query':
+        from src.query_traces import main as query_main
+        sys.argv = [sys.argv[0]] + remaining
+        query_main()
 
     elif args.command == 'analyze':
         from src.analyze_sessions import main as analyze_main

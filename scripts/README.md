@@ -28,6 +28,9 @@ uv sync
 # Export traces (auto-detects backend from .env)
 uv run main.py export
 
+# Query traces by session ID or search string
+uv run main.py query --search "ENG2-481"
+
 # Analyze session reconstruction
 uv run main.py analyze <trace_file>
 
@@ -37,6 +40,62 @@ uv run main.py reconstruct <trace_file>
 # Compare spans to identify duplication patterns
 uv run main.py compare <session_file>
 ```
+
+## Query Traces (Session Search)
+
+Search for Claude Code sessions by session ID or text content. This is useful for linking traces back to Linear tickets, meetings, or specific development tasks.
+
+### Usage
+
+```bash
+# Query by exact session ID
+uv run main.py query --session-id <session-id>
+
+# Search for text in trace content
+uv run main.py query --search "ENG2-481"
+uv run main.py query --search "meeting analysis"
+
+# Show detailed trace information
+uv run main.py query --search "linear" --verbose
+
+# Export results to file
+uv run main.py query --search "ENG2" --export results.csv
+uv run main.py query --session-id abc123 --export traces.jsonl
+```
+
+### What It Does
+
+The query script searches through Phoenix trace data to find Claude Code sessions that match your criteria:
+
+- **Session ID lookup**: Find all spans for a specific session ID
+- **Text search**: Search within trace input/output content
+- **Multiple formats**: Export to CSV, JSON, JSONL, or Parquet
+
+### Output
+
+For each query, you'll see:
+
+1. **Summary**: Total spans found and unique session IDs
+2. **Session IDs**: List of matching session IDs
+3. **Detailed traces** (with `--verbose`):
+   - Span and trace IDs
+   - Timestamps
+   - Input/output content (truncated)
+   - Status information
+
+### Environment Variables
+
+```bash
+PHOENIX_URL=http://localhost:6006         # Phoenix server URL (default)
+PHOENIX_PROJECT=claude-code-myproject     # Project name (optional)
+```
+
+### Use Cases
+
+- **Link traces to tickets**: Search for Linear ticket IDs (e.g., "ENG2-481")
+- **Find meeting-related work**: Search for meeting IDs or keywords
+- **Debug specific sessions**: Look up all activity for a session ID
+- **Export for analysis**: Save matching traces for further processing
 
 ## Compare Spans (Duplication Analysis)
 
