@@ -3,9 +3,9 @@
 
 model_list:
   # All available Claude models from Anthropic API
-  - model_name: "anthropic/*"
+  - model_name: "*"
     litellm_params:
-      model: "anthropic/*"
+      model: "*"
       api_key: os.environ/ANTHROPIC_API_KEY
 
 litellm_settings:
@@ -38,4 +38,3 @@ environment:
   - ARIZE_API_KEY=${ARIZE_API_KEY}
   - ARIZE_SPACE_KEY=${ARIZE_SPACE_KEY}
   - ARIZE_ENDPOINT=https://otlp.arize.com/v1
-
