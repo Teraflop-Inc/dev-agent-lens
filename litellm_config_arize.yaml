@@ -2,10 +2,16 @@
 # This allows Claude Code to select any model while maintaining observability
 
 model_list:
-  # All available Claude models from Anthropic API
-  - model_name: "*"
+  # Claude models with explicit provider prefix
+  - model_name: "anthropic/*"
     litellm_params:
-      model: "*"
+      model: "anthropic/*"
+      api_key: os.environ/ANTHROPIC_API_KEY
+
+  # Route unprefixed claude-* models to Anthropic provider
+  - model_name: "claude-*"
+    litellm_params:
+      model: "anthropic/claude-*"
       api_key: os.environ/ANTHROPIC_API_KEY
 
 litellm_settings:
