@@ -1,0 +1,35 @@
+# LiteLLM OAuth Fix - AMD64 Architecture
+# Based on the ARM version but optimized for x86_64 servers
+
+FROM ghcr.io/berriai/litellm:main-latest
+
+WORKDIR /app
+
+# Copy OAuth fix files for AMD64
+COPY amd64_litellm_pre_call_utils.py /tmp/litellm_pre_call_utils.py
+COPY amd64_anthropic_passthrough_logging_handler.py /tmp/anthropic_passthrough_logging_handler.py
+COPY common_utils.py /tmp/common_utils.py
+
+# Detect Python site-packages path dynamically
+RUN SITE_PKG=$(python -c "import sysconfig; print(sysconfig.get_paths()['purelib'])") && \
+    echo "Detected site-packages: $SITE_PKG" && \
+    # Install OAuth fix in BOTH locations (LiteLLM loads from both inconsistently)
+    cp /tmp/litellm_pre_call_utils.py /app/litellm/proxy/litellm_pre_call_utils.py && \
+    cp /tmp/litellm_pre_call_utils.py $SITE_PKG/litellm/proxy/litellm_pre_call_utils.py && \
+    cp /tmp/anthropic_passthrough_logging_handler.py /app/litellm/llms/anthropic/anthropic_passthrough_logging_handler.py && \
+    cp /tmp/anthropic_passthrough_logging_handler.py $SITE_PKG/litellm/llms/anthropic/anthropic_passthrough_logging_handler.py && \
+    cp /tmp/common_utils.py /app/litellm/llms/anthropic/common_utils.py && \
+    cp /tmp/common_utils.py $SITE_PKG/litellm/llms/anthropic/common_utils.py && \
+    rm -f /tmp/*.py
+
+# Verify OAuth fix is installed
+RUN echo "Verifying OAuth fix installation..." && \
+    grep -q "sk-ant-oat" /app/litellm/proxy/litellm_pre_call_utils.py && \
+    echo "✓ OAuth fix verified in /app/litellm/proxy/" && \
+    SITE_PKG=$(python -c "import sysconfig; print(sysconfig.get_paths()['purelib'])") && \
+    grep -q "sk-ant-oat" $SITE_PKG/litellm/proxy/litellm_pre_call_utils.py && \
+    echo "✓ OAuth fix verified in site-packages"
+
+EXPOSE 4000
+
+CMD ["--config", "/app/config.yaml", "--port", "4000"]
