@@ -8,13 +8,24 @@ Claude Lens - Claude Code with LiteLLM proxy
 Usage: ./claude-lens [--proxy-url URL] [--help] [claude args...]
 
 Configuration (precedence: highest to lowest):
-  1. --proxy-url URL    Override proxy URL via command line
+  1. --proxy-url URL         Override proxy URL via command line
   2. CLAUDE_LENS_PROXY_URL   Environment variable
   3. http://localhost:4000   Default proxy URL
 
 Options:
   --proxy-url URL    Set the LiteLLM proxy URL
   --help, -h         Show this help message
+
+Project/Environment Switching:
+  Set CLAUDE_LENS_PROJECT before starting the proxy to route traces
+  to a different project (e.g., for test isolation):
+
+    export CLAUDE_LENS_PROJECT=dev-agent-lens-test
+    docker compose --profile phoenix up -d
+    ./claude-lens
+
+  WARNING: If you change CLAUDE_LENS_PROJECT, you MUST run
+  'docker compose down' then 'docker compose up -d' for it to take effect.
 
 Examples:
   ./claude-lens
