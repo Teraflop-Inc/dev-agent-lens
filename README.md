@@ -86,6 +86,33 @@ CLAUDE_LENS_PROXY_URL=http://remote-server:4000 ./claude-lens  # Via environment
 
 **That's it!** Claude Code now routes through LiteLLM for consistent API handling.
 
+### 4. Project/Environment Switching (Optional)
+
+Route traces to different projects for test isolation. Set `CLAUDE_LENS_PROJECT` before starting the proxy:
+
+```bash
+# Set the project and start (or restart) the proxy
+export CLAUDE_LENS_PROJECT=dev-agent-lens-test
+docker compose --profile phoenix up -d
+
+# Traces now go to the new project
+./claude-lens
+```
+
+> **Warning:** If you change `CLAUDE_LENS_PROJECT`, you **MUST** run `docker compose down` then `docker compose up -d` for the change to take effect. The project name is set when the container starts and cannot be changed at runtime.
+
+```bash
+# To switch projects:
+export CLAUDE_LENS_PROJECT=my-other-project
+docker compose --profile phoenix down && docker compose --profile phoenix up -d
+./claude-lens
+```
+
+**Backend mapping:**
+
+- Phoenix: Uses `openinference.project.name` resource attribute
+- Arize: Uses `OTEL_SERVICE_NAME`
+
 ## View Observability in Arize
 
 - Open [Arize AI Dashboard](https://app.arize.com)
@@ -165,6 +192,16 @@ The proxy uses wildcard routing in `litellm_config.yaml` to allow Claude Code to
 - `litellm_config.yaml` - Model routing and callback configuration
 - `.env.example` - Example environment variables file
 - `.env` - Your local environment configuration (not tracked in git)
+
+## Environment Variables
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `CLAUDE_LENS_PROXY_URL` | LiteLLM proxy URL | `http://localhost:4000` |
+| `CLAUDE_LENS_PROJECT` | Project name for trace routing | `dev-agent-lens` |
+| `ANTHROPIC_API_KEY` | Anthropic API key (fallback for non-OAuth) | - |
+| `ARIZE_API_KEY` | Arize API key (for Arize backend) | - |
+| `ARIZE_SPACE_KEY` | Arize space key (for Arize backend) | - |
 
 ## Docker Compose Configuration
 
