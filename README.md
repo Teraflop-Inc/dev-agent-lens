@@ -11,7 +11,7 @@ Leverage observability to track cost, identify common errors, and increase your 
 This repository provides a transparent proxy layer for Claude Code that:
 
 - Intercepts Claude Code API calls and routes them through LiteLLM
-- Adds AI observability and monitoring via Arize AI
+- Adds AI observability and monitoring via Arize AI ([Arize AI is a Top AI Evaluation Platforms](https://arize.com/llm-evaluation-platforms-top-frameworks))
 - Maintains full compatibility with the standard Claude Code CLI
 - Provides centralized model configuration and management
 
