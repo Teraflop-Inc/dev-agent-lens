@@ -21,11 +21,14 @@ import pytest
 
 from dev_agent_lens.query.regex import (
     DEFAULT_SEARCH_FIELDS,
+    VALID_SEARCH_FIELDS,
+    InvalidFieldError,
     RegexSearchError,
     SearchMatch,
     search,
     search_dataframe,
     search_file,
+    validate_fields,
 )
 
 
@@ -480,3 +483,79 @@ class TestMatchLocation:
         assert matches[1].matched_text == "ENG2-456"
         assert matches[0].match_start == 0
         assert matches[1].match_start == 13
+
+
+class TestFieldValidation:
+    """Test Case: Field validation for Story 2.3."""
+
+    def test_valid_fields_pass_validation(self):
+        """Valid field names pass validation without error."""
+        # Should not raise
+        validate_fields(["name", "input_value", "output_value"])
+        validate_fields(["span_id", "trace_id"])
+        validate_fields(None)  # None is valid (uses defaults)
+
+    def test_single_invalid_field_raises_error(self):
+        """Single invalid field raises InvalidFieldError."""
+        with pytest.raises(InvalidFieldError) as exc_info:
+            validate_fields(["nonexistent_field"])
+
+        error_msg = str(exc_info.value)
+        assert "nonexistent_field" in error_msg
+        assert "Valid fields" in error_msg
+
+    def test_multiple_invalid_fields_lists_all(self):
+        """Multiple invalid fields are all listed in error."""
+        with pytest.raises(InvalidFieldError) as exc_info:
+            validate_fields(["bad1", "bad2", "name"])  # name is valid
+
+        error_msg = str(exc_info.value)
+        assert "bad1" in error_msg
+        assert "bad2" in error_msg
+
+    def test_search_with_invalid_field_raises_error(self):
+        """search() with invalid field raises InvalidFieldError."""
+        spans = [{"span_id": "1", "name": "test"}]
+
+        with pytest.raises(InvalidFieldError):
+            search("test", spans, fields=["invalid_field"])
+
+    def test_search_file_with_invalid_field_raises_error(self, tmp_path):
+        """search_file() with invalid field raises InvalidFieldError."""
+        file_path = tmp_path / "test.jsonl"
+        file_path.write_text('{"span_id": "1", "name": "test"}\n')
+
+        with pytest.raises(InvalidFieldError):
+            search_file("test", file_path, fields=["invalid_field"])
+
+    def test_valid_search_fields_constant(self):
+        """VALID_SEARCH_FIELDS contains expected fields."""
+        # Default fields should be valid
+        for field in DEFAULT_SEARCH_FIELDS:
+            assert field in VALID_SEARCH_FIELDS
+
+        # Additional fields should be valid
+        assert "span_id" in VALID_SEARCH_FIELDS
+        assert "trace_id" in VALID_SEARCH_FIELDS
+        assert "span_kind" in VALID_SEARCH_FIELDS
+
+    def test_search_with_multiple_valid_fields(self):
+        """search() works with multiple valid fields."""
+        spans = [
+            {"span_id": "1", "name": "match", "input_value": "other"},
+            {"span_id": "2", "name": "other", "input_value": "match"},
+        ]
+
+        matches = search("match", spans, fields=["name", "input_value"])
+
+        assert len(matches) == 2
+
+    def test_error_message_lists_valid_fields(self):
+        """Error message includes list of valid fields."""
+        with pytest.raises(InvalidFieldError) as exc_info:
+            validate_fields(["bad_field"])
+
+        error_msg = str(exc_info.value)
+        # Should list some valid fields
+        assert "name" in error_msg
+        assert "input_value" in error_msg
