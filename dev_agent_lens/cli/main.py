@@ -20,7 +20,11 @@ import click
 
 from dev_agent_lens.clients.arize import ArizeClient
 from dev_agent_lens.clients.phoenix import PhoenixClient
-from dev_agent_lens.core.schema import normalize_arize, normalize_phoenix
+from dev_agent_lens.core.schema import (
+    normalize_arize,
+    normalize_phoenix,
+    normalize_phoenix_annotations,
+)
 from dev_agent_lens.core.state import SyncState
 from dev_agent_lens.core.unify import unify_sessions
 from dev_agent_lens.storage.oxen_store import OxenStore
@@ -88,7 +92,12 @@ def main():
     is_flag=True,
     help="Push to Oxen remote after sync (requires OXEN_REMOTE_URL)",
 )
-def sync(full: bool, backend: str | None, push: bool) -> None:
+@click.option(
+    "--skip-annotations",
+    is_flag=True,
+    help="Skip fetching annotations (faster sync)",
+)
+def sync(full: bool, backend: str | None, push: bool, skip_annotations: bool) -> None:
     """Sync trace data from configured backends.
 
     By default, performs incremental sync using saved state.
@@ -131,6 +140,8 @@ def sync(full: bool, backend: str | None, push: bool) -> None:
 
     click.echo(f"Syncing from: {', '.join(backends_to_sync)}")
     click.echo(f"Mode: {'full' if full else 'incremental'}")
+    if skip_annotations:
+        click.echo("Annotations: skipped")
     click.echo()
 
     # Initialize components
@@ -177,6 +188,30 @@ def sync(full: bool, backend: str | None, push: bool) -> None:
             click.echo("  Storing raw data...")
             raw_file = store.append_spans(normalized, backend=backend_id)
             click.echo(f"  Saved to: {raw_file.name}")
+
+            # Fetch annotations for Phoenix (Arize annotations not yet supported)
+            annotations_count = 0
+            if not skip_annotations and backend_id == "phoenix-local":
+                click.echo("  Fetching annotations...")
+                try:
+                    annotations_df = client.get_span_annotations_dataframe(
+                        spans_dataframe=spans_df,
+                    )
+                    if not annotations_df.empty:
+                        # Normalize and store annotations
+                        normalized_annotations = normalize_phoenix_annotations(annotations_df)
+                        store.append_spans(
+                            normalized_annotations,
+                            backend=f"{backend_id}-annotations",
+                        )
+                        annotations_count = len(annotations_df)
+                        click.echo(f"  Fetched {annotations_count} annotations")
+                    else:
+                        click.echo("  No annotations found")
+                except Exception as ann_err:
+                    click.echo(
+                        click.style(f"  Warning: Could not fetch annotations: {ann_err}", fg="yellow")
+                    )
 
             # Get existing sessions file
             current_sessions = store.sessions_dir / "sessions_current.jsonl"
