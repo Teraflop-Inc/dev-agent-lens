@@ -145,6 +145,7 @@ class TestPhoenixClientFetch:
                 start_time=start,
                 end_time=end,
                 limit=100000,
+                timeout=30,  # Default timeout from PhoenixClient
             )
 
     def test_fetch_with_custom_limit(self):
@@ -162,6 +163,7 @@ class TestPhoenixClientFetch:
                 start_time=None,
                 end_time=None,
                 limit=500,
+                timeout=30,  # Default timeout from PhoenixClient
             )
 
     def test_fetch_connection_error(self):
@@ -301,6 +303,7 @@ class TestPhoenixClientAnnotations:
                 include_annotation_names=["quality"],
                 exclude_annotation_names=["note"],
                 limit=10000,
+                timeout=30,  # Default timeout from PhoenixClient
             )
 
     def test_fetch_annotations_connection_error(self):
