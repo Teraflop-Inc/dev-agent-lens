@@ -221,7 +221,7 @@ def normalize_phoenix(df: pd.DataFrame) -> pd.DataFrame:
                 _get_column(row, "attributes.llm.token_count.total")
             ),
             "backend": "phoenix",
-            "raw_attributes": None,  # Could serialize all attributes if needed
+            "raw_attributes": row.to_dict(),  # Preserve all original columns for metadata extraction
         }
         rows.append(unified)
 
@@ -285,7 +285,7 @@ def normalize_arize(df: pd.DataFrame) -> pd.DataFrame:
                 _get_column(row, "attributes.llm.token_count.total")
             ),
             "backend": "arize",
-            "raw_attributes": None,  # Could serialize all attributes if needed
+            "raw_attributes": row.to_dict(),  # Preserve all original columns for metadata extraction
         }
         rows.append(unified)
 

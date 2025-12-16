@@ -327,11 +327,15 @@ class TestSchemaParity:
         phoenix_result = normalize_phoenix(phoenix_df)
         arize_result = normalize_arize(arize_df)
 
-        # Compare all fields except 'backend'
+        # Compare all fields except 'backend' and 'raw_attributes'
+        # (raw_attributes contains backend-specific column names)
         for col in UNIFIED_COLUMNS:
             if col == "backend":
                 assert phoenix_result.iloc[0][col] == "phoenix"
                 assert arize_result.iloc[0][col] == "arize"
+            elif col == "raw_attributes":
+                # Skip raw_attributes - it contains backend-specific column names
+                continue
             else:
                 assert phoenix_result.iloc[0][col] == arize_result.iloc[0][col], (
                     f"Mismatch in {col}: "
@@ -369,7 +373,7 @@ class TestSchemaParity:
 class TestSchemaSnapshots:
     """Snapshot tests comparing Phoenix vs Arize output structure."""
 
-    # Expected unified output for a complete span
+    # Expected unified output for a complete span (excluding raw_attributes which varies)
     EXPECTED_LLM_SPAN = {
         "span_id": "span-001",
         "trace_id": "trace-001",
@@ -387,7 +391,7 @@ class TestSchemaSnapshots:
         "llm_token_count_prompt": 10,
         "llm_token_count_completion": 15,
         "llm_token_count_total": 25,
-        "raw_attributes": None,
+        # raw_attributes now contains original row data for metadata extraction
     }
 
     def test_phoenix_snapshot_llm_span(self):
@@ -472,9 +476,9 @@ class TestSchemaSnapshots:
         phoenix_result = normalize_phoenix(phoenix_df).iloc[0].to_dict()
         arize_result = normalize_arize(arize_df).iloc[0].to_dict()
 
-        # All fields should match except backend
+        # All fields should match except backend and raw_attributes
         for key in UNIFIED_COLUMNS:
-            if key == "backend":
+            if key in ("backend", "raw_attributes"):
                 continue
             assert phoenix_result[key] == arize_result[key], (
                 f"Snapshot mismatch in {key}: "
@@ -499,17 +503,21 @@ class TestSchemaSnapshots:
         phoenix_result = normalize_phoenix(minimal_phoenix).iloc[0].to_dict()
         arize_result = normalize_arize(minimal_arize).iloc[0].to_dict()
 
-        # Both should have same None fields
+        # Both should have same None fields (raw_attributes is now populated with original row)
         expected_none_fields = [
             "parent_id", "span_kind", "end_time", "status_code",
             "input_value", "output_value", "input_messages", "output_messages",
             "llm_model_name", "llm_token_count_prompt",
-            "llm_token_count_completion", "llm_token_count_total", "raw_attributes",
+            "llm_token_count_completion", "llm_token_count_total",
         ]
 
         for field in expected_none_fields:
             assert phoenix_result[field] is None, f"Phoenix {field} should be None"
             assert arize_result[field] is None, f"Arize {field} should be None"
+
+        # raw_attributes should contain the original row data
+        assert isinstance(phoenix_result["raw_attributes"], dict)
+        assert isinstance(arize_result["raw_attributes"], dict)
 
 
 class TestTimestampFormats:

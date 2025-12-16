@@ -127,6 +127,19 @@ def extract_session_id_from_span(span: dict | pd.Series) -> str | None:
     for field in metadata_fields:
         if field in span:
             metadata = span[field]
+            # If this is raw_attributes, look for metadata/attributes inside it
+            if field == "raw_attributes" and isinstance(metadata, dict):
+                # Try nested metadata key (Phoenix format)
+                if "metadata" in metadata:
+                    session_id = extract_session_id(metadata["metadata"])
+                    if session_id:
+                        return session_id
+                # Try nested attributes key (Arize format)
+                if "attributes" in metadata:
+                    session_id = extract_session_id(metadata["attributes"])
+                    if session_id:
+                        return session_id
+                # Fall through to try the raw_attributes dict itself
             session_id = extract_session_id(metadata)
             if session_id:
                 return session_id
