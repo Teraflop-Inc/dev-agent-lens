@@ -156,9 +156,33 @@ ANNOTATION_COLUMNS = [
 ]
 
 
+# Import numpy at module level for type checking
+import numpy as np
+
+
+def _is_missing(value: Any) -> bool:
+    """Check if a value should be considered missing/null.
+
+    Handles scalars, arrays, and numpy types properly.
+    """
+    if value is None:
+        return True
+
+    # Handle numpy arrays and lists - they're not "missing", they're values
+    if isinstance(value, (list, np.ndarray)):
+        return len(value) == 0
+
+    # For scalars, use pd.isna which handles NaN, NaT, None
+    try:
+        return bool(pd.isna(value))
+    except (ValueError, TypeError):
+        # If pd.isna fails, assume it's a valid value
+        return False
+
+
 def _to_iso8601(value: Any) -> str | None:
     """Convert a timestamp value to ISO-8601 string."""
-    if value is None or pd.isna(value):
+    if _is_missing(value):
         return None
 
     if isinstance(value, str):
@@ -183,7 +207,7 @@ def _to_iso8601(value: Any) -> str | None:
     # Try pandas Timestamp
     try:
         ts = pd.Timestamp(value)
-        if pd.isna(ts):
+        if _is_missing(ts):
             return None
         return ts.isoformat()
     except (ValueError, TypeError):
@@ -192,14 +216,14 @@ def _to_iso8601(value: Any) -> str | None:
 
 def _safe_str(value: Any) -> str | None:
     """Convert value to string, returning None for missing values."""
-    if value is None or pd.isna(value):
+    if _is_missing(value):
         return None
     return str(value)
 
 
 def _safe_int(value: Any) -> int | None:
     """Convert value to int, returning None for missing values."""
-    if value is None or pd.isna(value):
+    if _is_missing(value):
         return None
     try:
         return int(value)
@@ -212,7 +236,7 @@ def _get_column(row: pd.Series, *column_names: str) -> Any:
     for name in column_names:
         if name in row.index:
             val = row[name]
-            if not pd.isna(val):
+            if not _is_missing(val):
                 return val
     return None
 
@@ -349,7 +373,7 @@ def normalize_arize(df: pd.DataFrame) -> pd.DataFrame:
 
 def _safe_float(value: Any) -> float | None:
     """Convert value to float, returning None for missing values."""
-    if value is None or pd.isna(value):
+    if _is_missing(value):
         return None
     try:
         return float(value)
