@@ -127,6 +127,67 @@ class PhoenixClient:
             # For other errors (like project not found), just re-raise
             raise
 
+    def get_span_annotations_dataframe(
+        self,
+        spans_dataframe: pd.DataFrame | None = None,
+        span_ids: list[str] | None = None,
+        project_name: str | None = None,
+        include_annotation_names: list[str] | None = None,
+        exclude_annotation_names: list[str] | None = None,
+        limit: int = 10000,
+    ) -> pd.DataFrame:
+        """
+        Fetch annotations for spans from Phoenix.
+
+        Args:
+            spans_dataframe: DataFrame of spans to get annotations for.
+                Must have 'context.span_id' or 'span_id' column.
+            span_ids: List of span IDs to get annotations for.
+                Either spans_dataframe or span_ids must be provided.
+            project_name: The project to query. Defaults to instance project_name.
+            include_annotation_names: Only include these annotation types.
+            exclude_annotation_names: Exclude these annotation types.
+            limit: Maximum number of annotations to retrieve. Defaults to 10000.
+
+        Returns:
+            A pandas DataFrame containing annotation data.
+            Columns include: span_id, name, annotator_kind, label, score,
+            explanation, metadata, created_at, updated_at, source, user_id.
+            Returns empty DataFrame if no annotations found.
+
+        Raises:
+            PhoenixConnectionError: If connection to Phoenix fails.
+            ValueError: If neither spans_dataframe nor span_ids provided.
+        """
+        if spans_dataframe is None and span_ids is None:
+            raise ValueError("Either spans_dataframe or span_ids must be provided")
+
+        client = self._get_client()
+        project = project_name or self.project_name
+
+        try:
+            df = client.spans.get_span_annotations_dataframe(
+                spans_dataframe=spans_dataframe,
+                span_ids=span_ids,
+                project_identifier=project,
+                include_annotation_names=include_annotation_names,
+                exclude_annotation_names=exclude_annotation_names,
+                limit=limit,
+            )
+
+            if df is None:
+                return pd.DataFrame()
+
+            return df
+
+        except Exception as e:
+            error_str = str(e).lower()
+            if "connection" in error_str or "timeout" in error_str or "refused" in error_str:
+                raise PhoenixConnectionError(
+                    f"Failed to fetch annotations from Phoenix at {self.base_url}: {e}"
+                ) from e
+            raise
+
     def test_connection(self) -> bool:
         """
         Test if the connection to Phoenix is working.
