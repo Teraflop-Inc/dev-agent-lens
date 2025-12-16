@@ -109,16 +109,22 @@ class ArizeClient:
         client = self._get_client()
         model = model_id or self.model_id
 
+        # Arize API requires start_time and end_time
+        # Default to last 30 days if not specified
+        from datetime import timedelta
+
+        if end_time is None:
+            end_time = datetime.now()
+        if start_time is None:
+            start_time = end_time - timedelta(days=30)
+
         export_params = {
             "space_id": self.space_key,
             "model_id": model,
             "environment": _Environments.TRACING,
+            "start_time": start_time,
+            "end_time": end_time,
         }
-
-        if start_time is not None:
-            export_params["start_time"] = start_time
-        if end_time is not None:
-            export_params["end_time"] = end_time
 
         try:
             df = client.export_model_to_df(**export_params)
