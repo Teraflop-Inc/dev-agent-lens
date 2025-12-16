@@ -366,6 +366,152 @@ class TestSchemaParity:
         assert isinstance(arize_result.iloc[0]["llm_token_count_total"], numbers.Integral)
 
 
+class TestSchemaSnapshots:
+    """Snapshot tests comparing Phoenix vs Arize output structure."""
+
+    # Expected unified output for a complete span
+    EXPECTED_LLM_SPAN = {
+        "span_id": "span-001",
+        "trace_id": "trace-001",
+        "parent_id": "parent-001",
+        "name": "LiteLLM Call",
+        "span_kind": "LLM",
+        "start_time": "2025-01-15T10:30:00",
+        "end_time": "2025-01-15T10:30:05",
+        "status_code": "OK",
+        "input_value": "Hello, how are you?",
+        "output_value": "I'm doing well, thank you!",
+        "input_messages": '[{"role": "user", "content": "Hello"}]',
+        "output_messages": '[{"role": "assistant", "content": "Hi"}]',
+        "llm_model_name": "claude-3-sonnet-20240229",
+        "llm_token_count_prompt": 10,
+        "llm_token_count_completion": 15,
+        "llm_token_count_total": 25,
+        "raw_attributes": None,
+    }
+
+    def test_phoenix_snapshot_llm_span(self):
+        """Given Phoenix LLM span, output matches expected snapshot."""
+        phoenix_df = pd.DataFrame(
+            {
+                "context.span_id": ["span-001"],
+                "context.trace_id": ["trace-001"],
+                "parent_id": ["parent-001"],
+                "name": ["LiteLLM Call"],
+                "span_kind": ["LLM"],
+                "start_time": [datetime(2025, 1, 15, 10, 30, 0)],
+                "end_time": [datetime(2025, 1, 15, 10, 30, 5)],
+                "status_code": ["OK"],
+                "attributes.input.value": ["Hello, how are you?"],
+                "attributes.output.value": ["I'm doing well, thank you!"],
+                "attributes.llm.input_messages": ['[{"role": "user", "content": "Hello"}]'],
+                "attributes.llm.output_messages": ['[{"role": "assistant", "content": "Hi"}]'],
+                "attributes.llm.model_name": ["claude-3-sonnet-20240229"],
+                "attributes.llm.token_count.prompt": [10],
+                "attributes.llm.token_count.completion": [15],
+                "attributes.llm.token_count.total": [25],
+            }
+        )
+
+        result = normalize_phoenix(phoenix_df)
+        row = result.iloc[0].to_dict()
+
+        # Verify against snapshot (excluding backend which differs)
+        for key, expected_value in self.EXPECTED_LLM_SPAN.items():
+            assert row[key] == expected_value, f"Mismatch in {key}: {row[key]} != {expected_value}"
+        assert row["backend"] == "phoenix"
+
+    def test_arize_snapshot_llm_span(self):
+        """Given Arize LLM span, output matches expected snapshot."""
+        arize_df = pd.DataFrame(
+            {
+                "context.span_id": ["span-001"],
+                "context.trace_id": ["trace-001"],
+                "parent_id": ["parent-001"],
+                "name": ["LiteLLM Call"],
+                "attributes.openinference.span.kind": ["LLM"],
+                "start_time": [datetime(2025, 1, 15, 10, 30, 0)],
+                "end_time": [datetime(2025, 1, 15, 10, 30, 5)],
+                "status_code": ["OK"],
+                "attributes.input.value": ["Hello, how are you?"],
+                "attributes.output.value": ["I'm doing well, thank you!"],
+                "attributes.llm.input_messages": ['[{"role": "user", "content": "Hello"}]'],
+                "attributes.llm.output_messages": ['[{"role": "assistant", "content": "Hi"}]'],
+                "attributes.llm.model_name": ["claude-3-sonnet-20240229"],
+                "attributes.llm.token_count.prompt": [10],
+                "attributes.llm.token_count.completion": [15],
+                "attributes.llm.token_count.total": [25],
+            }
+        )
+
+        result = normalize_arize(arize_df)
+        row = result.iloc[0].to_dict()
+
+        # Verify against snapshot (excluding backend which differs)
+        for key, expected_value in self.EXPECTED_LLM_SPAN.items():
+            assert row[key] == expected_value, f"Mismatch in {key}: {row[key]} != {expected_value}"
+        assert row["backend"] == "arize"
+
+    def test_phoenix_arize_produce_identical_output(self):
+        """Given same span data, Phoenix and Arize produce identical unified output."""
+        common_data = {
+            "context.span_id": ["span-001"],
+            "context.trace_id": ["trace-001"],
+            "parent_id": ["parent-001"],
+            "name": ["Tool Call"],
+            "start_time": [datetime(2025, 1, 15, 10, 30, 0)],
+            "end_time": [datetime(2025, 1, 15, 10, 30, 5)],
+            "status_code": ["OK"],
+            "attributes.input.value": ["Read file /path/to/file"],
+            "attributes.output.value": ["File contents here"],
+        }
+
+        phoenix_df = pd.DataFrame({**common_data, "span_kind": ["TOOL"]})
+        arize_df = pd.DataFrame({**common_data, "attributes.openinference.span.kind": ["TOOL"]})
+
+        phoenix_result = normalize_phoenix(phoenix_df).iloc[0].to_dict()
+        arize_result = normalize_arize(arize_df).iloc[0].to_dict()
+
+        # All fields should match except backend
+        for key in UNIFIED_COLUMNS:
+            if key == "backend":
+                continue
+            assert phoenix_result[key] == arize_result[key], (
+                f"Snapshot mismatch in {key}: "
+                f"phoenix={phoenix_result[key]}, arize={arize_result[key]}"
+            )
+
+    def test_snapshot_minimal_span(self):
+        """Given minimal span data, both backends produce consistent minimal output."""
+        minimal_phoenix = pd.DataFrame(
+            {
+                "context.span_id": ["span-minimal"],
+                "context.trace_id": ["trace-minimal"],
+            }
+        )
+        minimal_arize = pd.DataFrame(
+            {
+                "context.span_id": ["span-minimal"],
+                "context.trace_id": ["trace-minimal"],
+            }
+        )
+
+        phoenix_result = normalize_phoenix(minimal_phoenix).iloc[0].to_dict()
+        arize_result = normalize_arize(minimal_arize).iloc[0].to_dict()
+
+        # Both should have same None fields
+        expected_none_fields = [
+            "parent_id", "span_kind", "end_time", "status_code",
+            "input_value", "output_value", "input_messages", "output_messages",
+            "llm_model_name", "llm_token_count_prompt",
+            "llm_token_count_completion", "llm_token_count_total", "raw_attributes",
+        ]
+
+        for field in expected_none_fields:
+            assert phoenix_result[field] is None, f"Phoenix {field} should be None"
+            assert arize_result[field] is None, f"Arize {field} should be None"
+
+
 class TestTimestampFormats:
     """Tests for various timestamp format handling."""
 
