@@ -101,6 +101,61 @@ UNIFIED_COLUMNS = [
 ]
 
 
+class UnifiedAnnotation(TypedDict, total=False):
+    """
+    Canonical schema for span annotations.
+
+    All fields are optional (total=False) to handle missing data gracefully.
+
+    Fields:
+        annotation_id: Unique identifier for this annotation
+        span_id: ID of the span this annotation refers to
+        name: Name/type of the annotation (e.g., "helpfulness", "relevance")
+        annotator_kind: Who created the annotation ("HUMAN", "LLM", "CODE")
+        label: Categorical label (e.g., "good", "bad", "helpful")
+        score: Numeric score (typically 0.0 to 1.0)
+        explanation: Text explanation of the annotation
+        metadata: Additional annotation metadata as JSON string
+        created_at: ISO-8601 timestamp when annotation was created
+        updated_at: ISO-8601 timestamp when annotation was updated
+        source: Where annotation came from ("API" or "APP")
+        user_id: ID of user who created annotation (if applicable)
+        backend: Source backend ('phoenix' or 'arize')
+    """
+
+    annotation_id: str
+    span_id: str
+    name: str
+    annotator_kind: str | None  # HUMAN, LLM, CODE
+    label: str | None
+    score: float | None
+    explanation: str | None
+    metadata: str | None  # JSON string
+    created_at: str  # ISO-8601
+    updated_at: str | None  # ISO-8601
+    source: str | None  # API or APP
+    user_id: str | None
+    backend: str
+
+
+# Ordered list of columns in the unified annotation schema
+ANNOTATION_COLUMNS = [
+    "annotation_id",
+    "span_id",
+    "name",
+    "annotator_kind",
+    "label",
+    "score",
+    "explanation",
+    "metadata",
+    "created_at",
+    "updated_at",
+    "source",
+    "user_id",
+    "backend",
+]
+
+
 def _to_iso8601(value: Any) -> str | None:
     """Convert a timestamp value to ISO-8601 string."""
     if value is None or pd.isna(value):
@@ -290,3 +345,85 @@ def normalize_arize(df: pd.DataFrame) -> pd.DataFrame:
         rows.append(unified)
 
     return pd.DataFrame(rows, columns=UNIFIED_COLUMNS)
+
+
+def _safe_float(value: Any) -> float | None:
+    """Convert value to float, returning None for missing values."""
+    if value is None or pd.isna(value):
+        return None
+    try:
+        return float(value)
+    except (ValueError, TypeError):
+        return None
+
+
+def normalize_phoenix_annotations(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Convert Phoenix annotations DataFrame to unified schema.
+
+    Phoenix Annotation Column Mappings:
+        id → annotation_id
+        span_id → span_id
+        name → name
+        annotator_kind → annotator_kind
+        result.label → label
+        result.score → score
+        result.explanation → explanation
+        metadata → metadata (as JSON string)
+        created_at → created_at (converted to ISO-8601)
+        updated_at → updated_at (converted to ISO-8601)
+        source → source
+        user_id → user_id
+
+    Args:
+        df: DataFrame from PhoenixClient.get_span_annotations_dataframe()
+
+    Returns:
+        DataFrame with unified annotation schema columns.
+    """
+    if df.empty:
+        return pd.DataFrame(columns=ANNOTATION_COLUMNS)
+
+    rows = []
+    for _, row in df.iterrows():
+        # Handle nested result field (may be dict or separate columns)
+        label = None
+        score = None
+        explanation = None
+
+        result = _get_column(row, "result")
+        if isinstance(result, dict):
+            label = result.get("label")
+            score = result.get("score")
+            explanation = result.get("explanation")
+        else:
+            label = _get_column(row, "result.label", "label")
+            score = _get_column(row, "result.score", "score")
+            explanation = _get_column(row, "result.explanation", "explanation")
+
+        # Handle metadata - convert dict to JSON string
+        metadata = _get_column(row, "metadata")
+        if isinstance(metadata, dict):
+            import json
+            metadata = json.dumps(metadata)
+        else:
+            metadata = _safe_str(metadata)
+
+        unified = {
+            "annotation_id": _safe_str(_get_column(row, "id", "annotation_id")),
+            "span_id": _safe_str(_get_column(row, "span_id")),
+            "name": _safe_str(_get_column(row, "name")),
+            "annotator_kind": _safe_str(_get_column(row, "annotator_kind")),
+            "label": _safe_str(label),
+            "score": _safe_float(score),
+            "explanation": _safe_str(explanation),
+            "metadata": metadata,
+            "created_at": _to_iso8601(_get_column(row, "created_at")),
+            "updated_at": _to_iso8601(_get_column(row, "updated_at")),
+            "source": _safe_str(_get_column(row, "source")),
+            "user_id": _safe_str(_get_column(row, "user_id")),
+            "backend": "phoenix",
+        }
+        rows.append(unified)
+
+    return pd.DataFrame(rows, columns=ANNOTATION_COLUMNS)
