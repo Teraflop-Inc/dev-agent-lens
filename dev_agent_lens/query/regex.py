@@ -34,6 +34,44 @@ DEFAULT_SEARCH_FIELDS = [
     "raw_attributes",
 ]
 
+# All valid searchable fields (includes defaults plus additional fields)
+VALID_SEARCH_FIELDS = set(DEFAULT_SEARCH_FIELDS) | {
+    "span_id",
+    "trace_id",
+    "parent_id",
+    "span_kind",
+    "start_time",
+    "end_time",
+    "backend",
+}
+
+
+class InvalidFieldError(Exception):
+    """Raised when an invalid field name is provided."""
+
+    pass
+
+
+def validate_fields(fields: list[str] | None) -> None:
+    """
+    Validate that all provided field names are valid.
+
+    Args:
+        fields: List of field names to validate
+
+    Raises:
+        InvalidFieldError: If any field name is not valid
+    """
+    if fields is None:
+        return
+
+    invalid = [f for f in fields if f not in VALID_SEARCH_FIELDS]
+    if invalid:
+        valid_list = sorted(VALID_SEARCH_FIELDS)
+        raise InvalidFieldError(
+            f"Invalid field(s): {invalid}. Valid fields are: {valid_list}"
+        )
+
 
 @dataclass
 class SearchMatch:
@@ -186,12 +224,16 @@ def search(
 
     Raises:
         RegexSearchError: If the pattern is invalid
+        InvalidFieldError: If any field name is not valid
 
     Example:
         >>> matches = search(r"ENG2-\\d+", spans)
         >>> for m in matches:
         ...     print(f"Found '{m.matched_text}' in {m.field}")
     """
+    # Validate fields before searching
+    validate_fields(fields)
+
     compiled = _compile_pattern(pattern, case_insensitive)
 
     # Convert DataFrame to list of dicts if needed
@@ -230,12 +272,16 @@ def search_file(
 
     Raises:
         RegexSearchError: If the pattern is invalid
+        InvalidFieldError: If any field name is not valid
         FileNotFoundError: If the file doesn't exist
 
     Example:
         >>> matches = search_file(r"error", "sessions/sessions_current.jsonl", case_insensitive=True)
         >>> print(f"Found {len(matches)} matches")
     """
+    # Validate fields before searching
+    validate_fields(fields)
+
     file_path = Path(file_path)
 
     if not file_path.exists():
