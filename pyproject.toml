@@ -20,6 +20,7 @@ classifiers = [
 ]
 
 dependencies = [
+    "arize>=7.0.3",
     "arize-phoenix>=4.0.0",
     "pandas>=2.0.0",
     "python-dotenv>=1.0.0",
@@ -30,9 +31,6 @@ dev = [
     "pytest>=7.0.0",
     "pytest-cov>=4.0.0",
     "ruff>=0.1.0",
-]
-arize = [
-    "arize>=7.0.3",
 ]
 
 [project.scripts]

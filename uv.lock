@@ -600,15 +600,13 @@ name = "dev-agent-lens"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "arize" },
     { name = "arize-phoenix" },
     { name = "pandas" },
     { name = "python-dotenv" },
 ]
 
 [package.optional-dependencies]
-arize = [
-    { name = "arize" },
-]
 dev = [
     { name = "pytest" },
     { name = "pytest-cov" },
@@ -617,7 +615,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "arize", marker = "extra == 'arize'", specifier = ">=7.0.3" },
+    { name = "arize", specifier = ">=7.0.3" },
     { name = "arize-phoenix", specifier = ">=4.0.0" },
     { name = "pandas", specifier = ">=2.0.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0.0" },
