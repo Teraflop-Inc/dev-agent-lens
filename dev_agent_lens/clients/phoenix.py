@@ -110,6 +110,7 @@ class PhoenixClient:
                 start_time=start_time,
                 end_time=end_time,
                 limit=limit,
+                timeout=int(self.timeout),  # Phoenix default is 5s, we use instance timeout
             )
 
             if df is None:
@@ -173,6 +174,7 @@ class PhoenixClient:
                 include_annotation_names=include_annotation_names,
                 exclude_annotation_names=exclude_annotation_names,
                 limit=limit,
+                timeout=int(self.timeout),  # Phoenix default is 5s, we use instance timeout
             )
 
             if df is None:
