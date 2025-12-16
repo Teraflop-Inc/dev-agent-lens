@@ -194,11 +194,15 @@ class TestArizeClientFetch:
                 client = ArizeClient(api_key="test-key", space_key="test-space")
                 client.get_spans_dataframe(model_id="custom-model")
 
-                mock_client.export_model_to_df.assert_called_once_with(
-                    space_id="test-space",
-                    model_id="custom-model",
-                    environment="tracing",
-                )
+                # Check the call was made with the right model_id
+                mock_client.export_model_to_df.assert_called_once()
+                call_kwargs = mock_client.export_model_to_df.call_args.kwargs
+                assert call_kwargs["space_id"] == "test-space"
+                assert call_kwargs["model_id"] == "custom-model"
+                assert call_kwargs["environment"] == "tracing"
+                # start_time and end_time are now automatically added with defaults
+                assert "start_time" in call_kwargs
+                assert "end_time" in call_kwargs
 
     def test_fetch_connection_error(self):
         """Given connection failure during fetch, raises ArizeConnectionError."""
