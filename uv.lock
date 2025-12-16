@@ -602,6 +602,7 @@ source = { editable = "." }
 dependencies = [
     { name = "arize" },
     { name = "arize-phoenix" },
+    { name = "click" },
     { name = "pandas" },
     { name = "python-dotenv" },
 ]
@@ -617,6 +618,7 @@ dev = [
 requires-dist = [
     { name = "arize", specifier = ">=7.0.3" },
     { name = "arize-phoenix", specifier = ">=4.0.0" },
+    { name = "click", specifier = ">=8.0.0" },
     { name = "pandas", specifier = ">=2.0.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0.0" },
     { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=4.0.0" },
