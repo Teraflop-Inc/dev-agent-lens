@@ -203,62 +203,9 @@ class PhoenixClient:
         except PhoenixConnectionError:
             return False
 
-    def get_date_range(
-        self,
-        project_name: str | None = None,
-    ) -> tuple[datetime | None, datetime | None]:
-        """
-        Detect the date range of available data.
-
-        This fetches a small sample of spans to determine the date range.
-
-        Args:
-            project_name: The project to query. Defaults to instance project_name.
-
-        Returns:
-            Tuple of (earliest_date, latest_date), or (None, None) if no data.
-
-        Raises:
-            PhoenixConnectionError: If connection to Phoenix fails.
-        """
-        # Fetch a sample to find date range
-        # Phoenix API doesn't support querying without limits, so we fetch
-        # spans sorted by time to get the range
-        try:
-            # Get oldest spans
-            df = self.get_spans_dataframe(
-                project_name=project_name,
-                limit=100,  # Small sample
-            )
-
-            if df is None or df.empty:
-                return None, None
-
-            # Find the timestamp column
-            time_columns = [c for c in df.columns if 'start_time' in c.lower()]
-            if not time_columns:
-                time_columns = [c for c in df.columns if 'time' in c.lower()]
-
-            if not time_columns:
-                return None, None
-
-            time_col = time_columns[0]
-            timestamps = pd.to_datetime(df[time_col])
-            earliest = timestamps.min()
-            latest = timestamps.max()
-
-            # Convert to datetime if needed
-            if hasattr(earliest, 'to_pydatetime'):
-                earliest = earliest.to_pydatetime()
-            if hasattr(latest, 'to_pydatetime'):
-                latest = latest.to_pydatetime()
-
-            return earliest, latest
-
-        except Exception as e:
-            if "connection" in str(e).lower():
-                raise PhoenixConnectionError(f"Failed to get date range: {e}") from e
-            return None, None
+    # NOTE: get_date_range() was removed for consistency with ArizeClient.
+    # While Phoenix could support this with a small sample query, we keep
+    # the interface consistent - users should specify --start-date explicitly.
 
     def __repr__(self) -> str:
         return f"PhoenixClient(base_url='{self.base_url}', project_name='{self.project_name}')"
