@@ -769,10 +769,42 @@ def sync_historical(
             days = 365
         sync_start_time = sync_end_time - timedelta(days=days)
     else:
-        # Auto-detect: default to 90 days for now
-        # TODO: Query source for earliest available date
-        click.echo("Auto-detecting date range (defaulting to last 90 days)...")
-        sync_start_time = sync_end_time - timedelta(days=90)
+        # Auto-detect: try to query source for earliest available date
+        click.echo("Auto-detecting date range...")
+        detected_start = None
+
+        if sources_to_sync:
+            source = sources_to_sync[0]  # Use first source for detection
+            try:
+                if source.source_type == SourceType.PHOENIX:
+                    if source.url:
+                        os.environ["DAL_PHOENIX_URL"] = source.url
+                    if source.project:
+                        os.environ["DAL_PHOENIX_PROJECT"] = source.project
+                    probe_client = PhoenixClient(timeout=30.0)
+                    earliest, _ = probe_client.get_date_range()
+                    if earliest:
+                        detected_start = earliest
+                        click.echo(f"  Detected earliest data: {earliest.strftime('%Y-%m-%d')}")
+                else:  # ARIZE
+                    if source.space_key:
+                        os.environ["ARIZE_SPACE_KEY"] = source.space_key
+                    if source.model_id:
+                        os.environ["ARIZE_MODEL_ID"] = source.model_id
+                    probe_client = ArizeClient()
+                    earliest, _ = probe_client.get_date_range()
+                    if earliest:
+                        detected_start = earliest
+                        click.echo(f"  Detected earliest data: {earliest.strftime('%Y-%m-%d')}")
+            except Exception as e:
+                click.echo(click.style(f"  Could not detect date range: {e}", fg="yellow"))
+
+        if detected_start:
+            sync_start_time = detected_start
+        else:
+            # Fall back to 90 days
+            click.echo("  Defaulting to last 90 days")
+            sync_start_time = sync_end_time - timedelta(days=90)
 
     # Handle --reset flag
     for source in sources_to_sync:
@@ -1159,15 +1191,21 @@ def sync_historical(
     if total_batches_completed > 0 and total_batches_failed == 0:
         from dev_agent_lens.core.state import SyncState
         state = SyncState()
-        sync_time = datetime.now()
+        sync_time = sync_end_time  # Use the end time of the sync, not current time
 
         for source in sources_to_sync:
             state.set_last_sync(source.name, sync_time)
-            click.echo(f"Updated sync state for '{source.name}' to {sync_time.isoformat()}")
+            click.echo(f"Updated sync state for '{source.name}' to {sync_time.strftime('%Y-%m-%d')}")
+            # Clean up completed historical sync checkpoint
+            clear_historical_sync(source.name)
 
         for backend_id in backends_to_sync:
             state.set_last_sync(backend_id, sync_time)
-            click.echo(f"Updated sync state for '{backend_id}' to {sync_time.isoformat()}")
+            click.echo(f"Updated sync state for '{backend_id}' to {sync_time.strftime('%Y-%m-%d')}")
+            clear_historical_sync(backend_id)
+
+        click.echo()
+        click.echo("Future 'dal sync' commands will continue from this point.")
 
     click.echo()
     click.echo(click.style("Historical sync complete!", fg="green"))
