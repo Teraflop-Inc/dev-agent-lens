@@ -275,72 +275,10 @@ class ArizeClient:
         except ArizeConnectionError:
             return False
 
-    def get_date_range(
-        self,
-        model_id: str | None = None,
-        max_lookback_days: int = 365,
-    ) -> tuple[datetime | None, datetime | None]:
-        """
-        Detect the date range of available data by probing.
-
-        This method does a binary search to find the earliest date with data,
-        then uses the current time as the end. This is a workaround since
-        Arize's SDK doesn't expose a direct API to query date ranges.
-
-        Args:
-            model_id: The model ID to query. Defaults to instance model_id.
-            max_lookback_days: Maximum days to look back (default: 365).
-
-        Returns:
-            Tuple of (earliest_date, latest_date), or (None, None) if no data.
-
-        Raises:
-            ArizeConnectionError: If connection to Arize fails.
-        """
-        from datetime import timedelta
-
-        client = self._get_client()
-        model = model_id or self.model_id
-        now = datetime.now()
-
-        # First, check if there's any data in the last max_lookback_days
-        start_probe = now - timedelta(days=max_lookback_days)
-        try:
-            df = client.export_model_to_df(
-                space_id=self.space_key,
-                model_id=model,
-                environment=_Environments.TRACING,
-                start_time=start_probe,
-                end_time=now,
-            )
-        except Exception as e:
-            raise ArizeConnectionError(f"Failed to probe date range: {e}") from e
-
-        if df is None or df.empty:
-            return None, None
-
-        # Find the timestamp column (usually 'start_time' or similar)
-        time_columns = [c for c in df.columns if 'time' in c.lower() or 'timestamp' in c.lower()]
-        if not time_columns:
-            # Fall back to returning the probe range
-            return start_probe, now
-
-        # Use the first time column to find actual date range
-        time_col = time_columns[0]
-        try:
-            timestamps = pd.to_datetime(df[time_col])
-            earliest = timestamps.min()
-            latest = timestamps.max()
-
-            # Convert to datetime if needed
-            if hasattr(earliest, 'to_pydatetime'):
-                earliest = earliest.to_pydatetime()
-            if hasattr(latest, 'to_pydatetime'):
-                latest = latest.to_pydatetime()
-
-            return earliest, latest
-        except Exception:
-            return start_probe, now
+    # NOTE: get_date_range() was removed because:
+    # - Arize SDK has no API to query date ranges without downloading data
+    # - Probing requires downloading all data in a time window (expensive)
+    # - Users should specify --start-date based on their knowledge of the data
 
     def __repr__(self) -> str:
         return f"ArizeClient(space_key='{self.space_key}', model_id='{self.model_id}')"

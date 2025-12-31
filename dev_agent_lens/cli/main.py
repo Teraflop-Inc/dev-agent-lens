@@ -769,42 +769,15 @@ def sync_historical(
             days = 365
         sync_start_time = sync_end_time - timedelta(days=days)
     else:
-        # Auto-detect: try to query source for earliest available date
-        click.echo("Auto-detecting date range...")
-        detected_start = None
-
-        if sources_to_sync:
-            source = sources_to_sync[0]  # Use first source for detection
-            try:
-                if source.source_type == SourceType.PHOENIX:
-                    if source.url:
-                        os.environ["DAL_PHOENIX_URL"] = source.url
-                    if source.project:
-                        os.environ["DAL_PHOENIX_PROJECT"] = source.project
-                    probe_client = PhoenixClient(timeout=30.0)
-                    earliest, _ = probe_client.get_date_range()
-                    if earliest:
-                        detected_start = earliest
-                        click.echo(f"  Detected earliest data: {earliest.strftime('%Y-%m-%d')}")
-                else:  # ARIZE
-                    if source.space_key:
-                        os.environ["ARIZE_SPACE_KEY"] = source.space_key
-                    if source.model_id:
-                        os.environ["ARIZE_MODEL_ID"] = source.model_id
-                    probe_client = ArizeClient()
-                    earliest, _ = probe_client.get_date_range()
-                    if earliest:
-                        detected_start = earliest
-                        click.echo(f"  Detected earliest data: {earliest.strftime('%Y-%m-%d')}")
-            except Exception as e:
-                click.echo(click.style(f"  Could not detect date range: {e}", fg="yellow"))
-
-        if detected_start:
-            sync_start_time = detected_start
-        else:
-            # Fall back to 90 days
-            click.echo("  Defaulting to last 90 days")
-            sync_start_time = sync_end_time - timedelta(days=90)
+        # No date range specified - default to 90 days
+        # NOTE: Auto-detection is not practical for Arize because:
+        # - The Arize SDK has no API to query date ranges without downloading data
+        # - Probing would require downloading all data in a large window
+        # - This defeats the purpose of incremental batching
+        # Users should specify --start-date or --days based on their knowledge of the data.
+        click.echo("No date range specified, defaulting to last 90 days.")
+        click.echo("  Tip: Use --start-date YYYY-MM-DD or --days N for a specific range.")
+        sync_start_time = sync_end_time - timedelta(days=90)
 
     # Handle --reset flag
     for source in sources_to_sync:
