@@ -988,9 +988,11 @@ def sync_historical(
         source_spans = checkpoint_state.stats.total_spans if (is_resuming and resume) else 0
         completed = checkpoint_state.stats.batches_completed if (is_resuming and resume) else 0
         failed = 0
+        failed_batches: list[tuple[datetime, datetime]] = []  # Queue for retry
 
-        for i, (batch_start, batch_end) in enumerate(batches):
-            batch_num = i + 1
+        def process_batch(batch_start: datetime, batch_end: datetime, batch_num: int, total: int, is_retry: bool = False) -> bool:
+            """Process a single batch. Returns True if successful."""
+            nonlocal source_spans, completed, failed
 
             # Format time range based on batch granularity
             if batch_hours:
@@ -1000,20 +1002,17 @@ def sync_historical(
 
             # Calculate overall progress
             overall_progress = checkpoint_state.progress_percent
+            retry_tag = click.style(" [retry]", fg="cyan") if is_retry else ""
 
             click.echo(
-                f"  [{overall_progress:.0f}%] Batch {batch_num}/{len(batches)}: "
-                f"{batch_start.strftime(time_format)} to {batch_end.strftime(time_format)}",
+                f"  [{overall_progress:.0f}%] Batch {batch_num}/{total}: "
+                f"{batch_start.strftime(time_format)} to {batch_end.strftime(time_format)}{retry_tag}",
                 nl=False,
             )
 
             try:
                 # Mark batch as started in checkpoint
                 checkpoint_state.mark_batch_started(batch_start, batch_end)
-
-                # Add delay between main batches (not on first batch)
-                if i > 0 and delay > 0:
-                    time.sleep(delay)
 
                 # Fetch with auto-subdivision
                 dataframes, subdivisions = fetch_with_subdivision(client, batch_start, batch_end)
@@ -1023,7 +1022,7 @@ def sync_historical(
                     # Mark as completed even if no data (we've processed this range)
                     checkpoint_state.mark_batch_completed(batch_start, batch_end, 0)
                     completed += 1
-                    continue
+                    return True
 
                 # Combine all dataframes from this batch (including subdivisions)
                 if len(dataframes) == 1:
@@ -1061,17 +1060,75 @@ def sync_historical(
                         checkpoint_state.add_subdivision()
 
                 completed += 1
+                return True
+
+            except KeyboardInterrupt:
+                raise  # Re-raise to handle at outer level
+
+            except Exception as e:
+                error_str = str(e).lower()
+                if "rate" in error_str or "limit" in error_str or "exhausted" in error_str:
+                    click.echo(click.style(f" RATE LIMITED - will retry later", fg="yellow"))
+                else:
+                    click.echo(click.style(f" FAILED: {e}", fg="red"))
+                checkpoint_state.mark_batch_failed()
+                failed += 1
+                return False
+
+        # First pass: process all batches
+        try:
+            for i, (batch_start, batch_end) in enumerate(batches):
+                batch_num = i + 1
+
+                # Add delay between main batches (not on first batch)
+                if i > 0 and delay > 0:
+                    time.sleep(delay)
+
+                success = process_batch(batch_start, batch_end, batch_num, len(batches))
+                if not success:
+                    failed_batches.append((batch_start, batch_end))
+
+        except KeyboardInterrupt:
+            click.echo()
+            click.echo(click.style("  Interrupted! Progress saved.", fg="yellow"))
+            click.echo(f"  Resume with: dal sync-historical --source {name}")
+            raise SystemExit(130)
+
+        # Retry pass: retry failed batches with longer delay
+        if failed_batches:
+            click.echo()
+            click.echo(click.style(f"  Retrying {len(failed_batches)} failed batches with 10s delay...", fg="cyan"))
+            retry_delay = max(delay * 5, 10.0)  # At least 10 seconds between retries
+
+            still_failed = []
+            try:
+                for i, (batch_start, batch_end) in enumerate(failed_batches):
+                    # Longer delay for retries
+                    if i > 0:
+                        time.sleep(retry_delay)
+                    else:
+                        time.sleep(retry_delay)  # Also wait before first retry
+
+                    # Decrement failed count since we're retrying
+                    failed -= 1
+
+                    success = process_batch(batch_start, batch_end, i + 1, len(failed_batches), is_retry=True)
+                    if not success:
+                        still_failed.append((batch_start, batch_end))
 
             except KeyboardInterrupt:
                 click.echo()
-                click.echo(click.style("  Interrupted! Progress saved.", fg="yellow"))
+                click.echo(click.style("  Interrupted during retry! Progress saved.", fg="yellow"))
                 click.echo(f"  Resume with: dal sync-historical --source {name}")
                 raise SystemExit(130)
 
-            except Exception as e:
-                click.echo(click.style(f" FAILED: {e}", fg="red"))
-                checkpoint_state.mark_batch_failed()
-                failed += 1
+            if still_failed:
+                click.echo()
+                click.echo(click.style(f"  {len(still_failed)} batches still failed after retry:", fg="red"))
+                for batch_start, batch_end in still_failed[:5]:
+                    click.echo(f"    - {batch_start.strftime('%Y-%m-%d')} to {batch_end.strftime('%Y-%m-%d')}")
+                if len(still_failed) > 5:
+                    click.echo(f"    ... and {len(still_failed) - 5} more")
 
         click.echo()
         click.echo(f"  [{display_name}] Total: {source_spans:,} spans")
