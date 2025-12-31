@@ -526,8 +526,8 @@ def sync(
 @click.option(
     "--days",
     type=int,
-    default=90,
-    help="Number of days of historical data to sync (default: 90, max: 365)",
+    default=None,
+    help="Number of days of historical data to sync. If not specified, syncs all available.",
 )
 @click.option(
     "--start-date",
@@ -542,8 +542,8 @@ def sync(
 @click.option(
     "--batch-size",
     type=int,
-    default=7,
-    help="Days per batch (default: 7). Smaller batches are more reliable.",
+    default=1,
+    help="Days per batch (default: 1). Smaller batches are more reliable.",
 )
 @click.option(
     "--batch-hours",
@@ -560,8 +560,8 @@ def sync(
 @click.option(
     "--timeout",
     type=int,
-    default=60,
-    help="Timeout in seconds for each API request (default: 60)",
+    default=120,
+    help="Timeout in seconds for each API request (default: 120)",
 )
 @click.option(
     "--backend",
@@ -587,12 +587,28 @@ def sync(
 @click.option(
     "--delay",
     type=float,
-    default=1.0,
-    help="Delay in seconds between API requests (default: 1.0). Increase to avoid rate limiting.",
+    default=2.0,
+    help="Delay in seconds between API requests (default: 2.0). Increase to avoid rate limiting.",
+)
+@click.option(
+    "--resume/--no-resume",
+    default=True,
+    help="Resume from previous checkpoint if available (default: resume)",
+)
+@click.option(
+    "--reset",
+    is_flag=True,
+    help="Clear any existing checkpoint and start fresh",
+)
+@click.option(
+    "--status",
+    "show_status",
+    is_flag=True,
+    help="Show status of in-progress historical syncs without syncing",
 )
 def sync_historical(
     source_name: str | None,
-    days: int,
+    days: int | None,
     start_date: str | None,
     end_date: str | None,
     batch_size: int,
@@ -604,79 +620,79 @@ def sync_historical(
     skip_normalize: bool,
     no_auto_subdivide: bool,
     delay: float,
+    resume: bool,
+    reset: bool,
+    show_status: bool,
 ) -> None:
-    """One-time historical backfill of trace data.
+    """Sync all historical trace data from a source.
 
-    This command exports historical data in small sequential batches to avoid
-    API throttling and memory issues. Use for initial setup or backfill scenarios.
+    This command handles everything automatically:
+    - Detects the full date range of available data
+    - Downloads in daily batches (subdivides high-volume days automatically)
+    - Saves progress checkpoints so you can resume if interrupted
+    - Updates sync state so future 'dal sync' commands continue from where this left off
 
-    Unlike 'dal sync', this command:
-    - Always fetches historical data (ignores existing sync state)
-    - Uses smaller batch sizes for reliability
-    - Saves intermediate results after each batch
-    - Has built-in retry logic
-    - Auto-subdivides batches that hit the limit (can be disabled)
+    The simplest usage is just: dal sync-historical --source <name>
 
-    After successful completion (no failed batches), this updates the sync state
-    so that subsequent 'dal sync' commands will pick up from where historical
-    sync left off.
+    Features:
+    - Resume capability: Interrupted syncs continue from where they stopped
+    - Auto-subdivision: High-volume days automatically split into smaller chunks
+    - Progress tracking: See ETA and percentage complete
+    - State integration: After completion, regular 'dal sync' picks up from here
 
     Examples:
 
-        dal sync-historical --source phoenix-alex   # Named source
+        dal sync-historical --source arize-ax-alex      # Sync everything (simplest)
 
-        dal sync-historical --days 120              # Last 120 days
+        dal sync-historical --source arize-ax-alex --status  # Check progress
 
-        dal sync-historical --batch-size 3          # Smaller 3-day batches
+        dal sync-historical --source arize-ax-alex --days 30  # Last 30 days only
 
-        dal sync-historical --start-date 2025-11-10 --end-date 2025-11-11  # Specific dates
+        dal sync-historical --source arize-ax-alex --reset  # Start over
 
-        dal sync-historical --batch-hours 6         # 6-hour batches for high-volume
-
-        dal sync-historical --timeout 120 --limit 100000  # Larger timeout/limit
-
-        dal sync-historical --backend arize-cloud   # [Deprecated] Legacy backend
+        dal sync-historical --start-date 2025-11-01     # From specific date
     """
     from datetime import timedelta
     import pandas as pd
     from dev_agent_lens.core.sources import SourceConfig, SourceManager, SourceType
+    from dev_agent_lens.core.historical_sync import (
+        HistoricalSyncState,
+        SyncConfig,
+        list_historical_syncs,
+        clear_historical_sync,
+    )
+
+    # Handle --status flag: show status and exit
+    if show_status:
+        syncs = list_historical_syncs()
+        if not syncs:
+            click.echo("No historical syncs in progress.")
+            return
+
+        click.echo(click.style("Historical Sync Status", bold=True))
+        click.echo()
+        for sync_state in syncs:
+            progress = sync_state.progress_percent
+            eta = sync_state.get_eta()
+            eta_str = f" (ETA: {eta})" if eta else ""
+
+            if sync_state.is_complete:
+                status = click.style("complete", fg="green")
+            elif sync_state.current_batch:
+                status = click.style("in progress", fg="yellow")
+            else:
+                status = click.style("paused", fg="cyan")
+
+            click.echo(f"  {sync_state.source}: {progress:.1f}% {status}{eta_str}")
+            click.echo(f"    Range: {sync_state.target_start.strftime('%Y-%m-%d')} to {sync_state.target_end.strftime('%Y-%m-%d')}")
+            click.echo(f"    Spans: {sync_state.stats.total_spans:,}")
+            click.echo(f"    Batches: {sync_state.stats.batches_completed} completed, {sync_state.stats.batches_failed} failed")
+            if sync_state.stats.subdivisions > 0:
+                click.echo(f"    Subdivisions: {sync_state.stats.subdivisions}")
+            click.echo()
+        return
 
     sync_start = time.time()
-
-    # Parse date range
-    if end_date:
-        try:
-            sync_end_time = datetime.strptime(end_date, "%Y-%m-%d").replace(hour=23, minute=59, second=59)
-        except ValueError:
-            click.echo(click.style(f"Error: Invalid end-date format '{end_date}'. Use YYYY-MM-DD.", fg="red"))
-            raise SystemExit(1)
-    else:
-        sync_end_time = datetime.now()
-
-    if start_date:
-        try:
-            sync_start_time = datetime.strptime(start_date, "%Y-%m-%d")
-        except ValueError:
-            click.echo(click.style(f"Error: Invalid start-date format '{start_date}'. Use YYYY-MM-DD.", fg="red"))
-            raise SystemExit(1)
-        # Calculate days from date range
-        days = (sync_end_time - sync_start_time).days + 1
-    else:
-        # Validate days
-        if days > 365:
-            click.echo(
-                click.style("Warning: Limiting to 365 days (maximum)", fg="yellow")
-            )
-            days = 365
-        sync_start_time = sync_end_time - timedelta(days=days)
-
-    # Determine batch duration
-    if batch_hours:
-        batch_duration = timedelta(hours=batch_hours)
-        batch_description = f"{batch_hours} hours"
-    else:
-        batch_duration = timedelta(days=batch_size)
-        batch_description = f"{batch_size} days"
 
     # Determine what to sync: named source or legacy backends
     source_manager = SourceManager()
@@ -727,6 +743,63 @@ def sync_historical(
                     )
                 )
                 raise SystemExit(1)
+
+    # Parse date range
+    if end_date:
+        try:
+            sync_end_time = datetime.strptime(end_date, "%Y-%m-%d").replace(hour=23, minute=59, second=59)
+        except ValueError:
+            click.echo(click.style(f"Error: Invalid end-date format '{end_date}'. Use YYYY-MM-DD.", fg="red"))
+            raise SystemExit(1)
+    else:
+        sync_end_time = datetime.now()
+
+    if start_date:
+        try:
+            sync_start_time = datetime.strptime(start_date, "%Y-%m-%d")
+        except ValueError:
+            click.echo(click.style(f"Error: Invalid start-date format '{start_date}'. Use YYYY-MM-DD.", fg="red"))
+            raise SystemExit(1)
+    elif days is not None:
+        # Use --days
+        if days > 365:
+            click.echo(
+                click.style("Warning: Limiting to 365 days (maximum)", fg="yellow")
+            )
+            days = 365
+        sync_start_time = sync_end_time - timedelta(days=days)
+    else:
+        # Auto-detect: default to 90 days for now
+        # TODO: Query source for earliest available date
+        click.echo("Auto-detecting date range (defaulting to last 90 days)...")
+        sync_start_time = sync_end_time - timedelta(days=90)
+
+    # Handle --reset flag
+    for source in sources_to_sync:
+        if reset:
+            if clear_historical_sync(source.name):
+                click.echo(f"Cleared checkpoint for '{source.name}'")
+    for backend_id in backends_to_sync:
+        if reset:
+            if clear_historical_sync(backend_id):
+                click.echo(f"Cleared checkpoint for '{backend_id}'")
+
+    # Determine batch duration
+    if batch_hours:
+        batch_duration = timedelta(hours=batch_hours)
+        batch_description = f"{batch_hours} hours"
+    else:
+        batch_duration = timedelta(days=batch_size)
+        batch_description = f"{batch_size} day{'s' if batch_size > 1 else ''}"
+
+    # Create sync config
+    sync_config = SyncConfig(
+        batch_hours=batch_hours,
+        batch_days=batch_size,
+        limit=limit,
+        timeout=timeout,
+        delay=delay,
+    )
 
     # Calculate estimated batches (may increase with auto-subdivision)
     total_duration = sync_end_time - sync_start_time
@@ -847,7 +920,21 @@ def sync_historical(
         is_phoenix: bool = False,
     ) -> tuple[int, int, int]:
         """Process historical sync and return (spans, completed, failed)."""
-        click.echo(f"[{display_name}] Starting historical sync...")
+
+        # Load or create checkpoint state
+        checkpoint_state, is_resuming = HistoricalSyncState.load_or_create(
+            source=name,
+            target_start=sync_start_time,
+            target_end=sync_end_time,
+            config=sync_config,
+        )
+
+        if is_resuming and resume:
+            progress = checkpoint_state.progress_percent
+            click.echo(f"[{display_name}] Resuming from checkpoint ({progress:.1f}% complete)")
+            click.echo(f"  Previously synced: {checkpoint_state.stats.total_spans:,} spans")
+        else:
+            click.echo(f"[{display_name}] Starting historical sync...")
 
         # Create client with timeout
         try:
@@ -859,19 +946,42 @@ def sync_historical(
             click.echo(click.style(f"  [FAIL] Could not create client: {e}", fg="red"))
             return 0, 0, 1
 
-        # Generate batches (most recent first)
+        # Get remaining ranges to process
+        if is_resuming and resume:
+            remaining_ranges = checkpoint_state.get_remaining_ranges()
+            if not remaining_ranges:
+                click.echo(click.style(f"  Already complete!", fg="green"))
+                return checkpoint_state.stats.total_spans, checkpoint_state.stats.batches_completed, 0
+        else:
+            remaining_ranges = [(sync_start_time, sync_end_time)]
+
+        # Generate batches from remaining ranges (most recent first)
         batches = []
-        batch_end = sync_end_time
-        while batch_end > sync_start_time:
-            batch_start = max(batch_end - batch_duration, sync_start_time)
-            batches.append((batch_start, batch_end))
-            batch_end = batch_start
+        for range_start, range_end in remaining_ranges:
+            batch_end = range_end
+            while batch_end > range_start:
+                batch_start = max(batch_end - batch_duration, range_start)
+                batches.append((batch_start, batch_end))
+                batch_end = batch_start
+
+        # Sort by end time descending (most recent first)
+        batches.sort(key=lambda x: x[1], reverse=True)
+
+        if not batches:
+            click.echo(click.style(f"  No batches to process.", fg="yellow"))
+            return checkpoint_state.stats.total_spans, checkpoint_state.stats.batches_completed, 0
 
         click.echo(f"  Processing {len(batches)} batches sequentially...")
+
+        # Show ETA if resuming
+        if is_resuming and resume:
+            eta = checkpoint_state.get_eta()
+            if eta:
+                click.echo(f"  Estimated time remaining: {eta}")
         click.echo()
 
-        source_spans = 0
-        completed = 0
+        source_spans = checkpoint_state.stats.total_spans if (is_resuming and resume) else 0
+        completed = checkpoint_state.stats.batches_completed if (is_resuming and resume) else 0
         failed = 0
 
         for i, (batch_start, batch_end) in enumerate(batches):
@@ -883,13 +993,19 @@ def sync_historical(
             else:
                 time_format = "%Y-%m-%d"
 
+            # Calculate overall progress
+            overall_progress = checkpoint_state.progress_percent
+
             click.echo(
-                f"  Batch {batch_num}/{len(batches)}: "
+                f"  [{overall_progress:.0f}%] Batch {batch_num}/{len(batches)}: "
                 f"{batch_start.strftime(time_format)} to {batch_end.strftime(time_format)}",
                 nl=False,
             )
 
             try:
+                # Mark batch as started in checkpoint
+                checkpoint_state.mark_batch_started(batch_start, batch_end)
+
                 # Add delay between main batches (not on first batch)
                 if i > 0 and delay > 0:
                     time.sleep(delay)
@@ -899,6 +1015,8 @@ def sync_historical(
 
                 if not dataframes:
                     click.echo(click.style(" (no data)", fg="yellow"))
+                    # Mark as completed even if no data (we've processed this range)
+                    checkpoint_state.mark_batch_completed(batch_start, batch_end, 0)
                     completed += 1
                     continue
 
@@ -931,14 +1049,32 @@ def sync_historical(
                     click.echo(f"    Total: " + click.style(f"{batch_count:,} spans", fg="green") +
                               f" (from {subdivisions + 1} sub-batches)")
 
+                # Mark batch as completed in checkpoint
+                checkpoint_state.mark_batch_completed(batch_start, batch_end, batch_count)
+                if subdivisions > 0:
+                    for _ in range(subdivisions):
+                        checkpoint_state.add_subdivision()
+
                 completed += 1
+
+            except KeyboardInterrupt:
+                click.echo()
+                click.echo(click.style("  Interrupted! Progress saved.", fg="yellow"))
+                click.echo(f"  Resume with: dal sync-historical --source {name}")
+                raise SystemExit(130)
 
             except Exception as e:
                 click.echo(click.style(f" FAILED: {e}", fg="red"))
+                checkpoint_state.mark_batch_failed()
                 failed += 1
 
         click.echo()
         click.echo(f"  [{display_name}] Total: {source_spans:,} spans")
+
+        # Check if sync is complete
+        if checkpoint_state.is_complete:
+            click.echo(click.style(f"  Historical sync complete for {name}!", fg="green"))
+
         return source_spans, completed, failed
 
     # Process named sources
