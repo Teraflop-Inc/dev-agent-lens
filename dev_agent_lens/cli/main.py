@@ -3226,5 +3226,343 @@ def _make_bar(pct: float, color: str = "green", width: int = 20) -> str:
     return click.style(bar, fg=color)
 
 
+# =============================================================================
+# Export Commands
+# =============================================================================
+
+
+def _merge_sessions(
+    existing_sessions: list[dict],
+    new_sessions: list[dict],
+) -> tuple[list[dict], int, int, int]:
+    """
+    Merge new sessions into existing sessions using bucket unification.
+
+    For sessions with the same session_id:
+    - Combine spans from both
+    - Deduplicate by span_id
+    - Re-sort by start_time
+    - Update span_count and time range
+
+    Args:
+        existing_sessions: List of existing session dicts
+        new_sessions: List of new session dicts (already grouped)
+
+    Returns:
+        Tuple of (merged_sessions, sessions_updated, sessions_added, spans_added)
+    """
+    # Build lookup of existing sessions by session_id
+    existing_map: dict[str, dict] = {}
+    for session in existing_sessions:
+        sid = session.get("session_id")
+        if sid:
+            existing_map[sid] = session
+
+    sessions_updated = 0
+    sessions_added = 0
+    spans_added = 0
+
+    for new_session in new_sessions:
+        sid = new_session.get("session_id")
+        new_spans = new_session.get("spans", [])
+        spans_added += len(new_spans)
+
+        if sid and sid in existing_map:
+            # Merge into existing session
+            existing = existing_map[sid]
+            existing_spans = existing.get("spans", [])
+
+            # Combine spans
+            all_spans = existing_spans + new_spans
+
+            # Deduplicate by span_id (keep last occurrence = newest)
+            seen_span_ids: dict[str, dict] = {}
+            for span in all_spans:
+                span_id = span.get("span_id")
+                if span_id:
+                    seen_span_ids[span_id] = span
+                else:
+                    # No span_id, keep it
+                    seen_span_ids[id(span)] = span
+
+            deduped_spans = list(seen_span_ids.values())
+
+            # Sort by start_time
+            deduped_spans.sort(key=lambda s: s.get("start_time") or "")
+
+            # Update session
+            existing["spans"] = deduped_spans
+            existing["span_count"] = len(deduped_spans)
+
+            # Update time range
+            start_times = [s.get("start_time") for s in deduped_spans if s.get("start_time")]
+            end_times = [s.get("end_time") for s in deduped_spans if s.get("end_time")]
+            if start_times:
+                existing["start_time"] = min(start_times)
+            if end_times:
+                existing["end_time"] = max(end_times)
+
+            sessions_updated += 1
+        else:
+            # New session - add to map
+            if sid:
+                existing_map[sid] = new_session
+            sessions_added += 1
+
+    # Convert back to list, sorted by most recent first
+    merged = list(existing_map.values())
+    merged.sort(key=lambda s: s.get("end_time") or s.get("start_time") or "", reverse=True)
+
+    return merged, sessions_updated, sessions_added, spans_added
+
+
+def _load_unified_sessions(file_path) -> list[dict]:
+    """Load existing unified sessions from JSONL file."""
+    import json
+
+    sessions = []
+    if file_path.exists():
+        with open(file_path, "r") as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    sessions.append(json.loads(line))
+    return sessions
+
+
+def _get_new_spans_since(sessions_dir, raw_dir, last_export_time) -> list[dict]:
+    """Get spans from session or raw files modified after last_export_time."""
+    from dev_agent_lens.core.unify import read_sessions_file
+
+    new_spans = []
+
+    # Check session files first
+    if sessions_dir.exists():
+        for jsonl_file in sessions_dir.glob("sessions_*.jsonl"):
+            # Skip symlinks
+            if jsonl_file.is_symlink():
+                continue
+
+            # Check modification time
+            if jsonl_file.stat().st_mtime > last_export_time:
+                df = read_sessions_file(jsonl_file)
+                if not df.empty:
+                    new_spans.extend(df.to_dict(orient="records"))
+
+    # Also check raw files
+    if raw_dir.exists():
+        for jsonl_file in raw_dir.glob("sync_*.jsonl"):
+            # Check modification time
+            if jsonl_file.stat().st_mtime > last_export_time:
+                with open(jsonl_file) as f:
+                    for line in f:
+                        if line.strip():
+                            try:
+                                new_spans.append(json.loads(line))
+                            except json.JSONDecodeError:
+                                continue
+
+    return new_spans
+
+
+@main.command("export-sessions")
+@click.option(
+    "--source",
+    "source_name",
+    required=True,
+    help="Export unified sessions from a named source",
+)
+@click.option(
+    "--output",
+    "-o",
+    "output_path",
+    type=click.Path(),
+    help="Output file path (default: ~/.dal/data/unified/{source}_sessions.jsonl)",
+)
+@click.option(
+    "--update",
+    is_flag=True,
+    help="Incrementally update existing unified sessions with new spans",
+)
+def export_sessions(source_name: str, output_path: str | None, update: bool) -> None:
+    """Export unified sessions from a source.
+
+    Creates a JSONL file where each line is a complete session with all its spans
+    grouped together, sorted chronologically.
+
+    With --update, incrementally merges new spans into existing unified sessions
+    using bucket unification (group new spans first, then merge session-to-session).
+
+    Output format (one JSON per line):
+        {
+            "session_id": "abc123",
+            "span_count": 42,
+            "start_time": "2025-01-01T00:00:00",
+            "end_time": "2025-01-01T01:00:00",
+            "spans": [...]
+        }
+
+    Examples:
+
+        dal export-sessions --source phoenix-local-alex
+
+        dal export-sessions --source phoenix-local-alex --update
+
+        dal export-sessions --source arize-ax-alex -o ~/exports/arize.jsonl
+    """
+    import json
+    from pathlib import Path
+
+    from dev_agent_lens.query.query import _group_by_session
+    from dev_agent_lens.core.unify import read_sessions_file
+    from dev_agent_lens.storage import get_storage_path
+
+    storage_path = get_storage_path()
+    sessions_dir = Path(storage_path) / "sessions" / source_name
+    raw_dir = Path(storage_path) / "raw" / source_name
+
+    # Check if sessions dir exists and has files
+    sessions_exist = sessions_dir.exists() and any(sessions_dir.glob("sessions_*.jsonl"))
+    raw_exists = raw_dir.exists() and any(raw_dir.glob("sync_*.jsonl"))
+
+    if not sessions_exist and not raw_exists:
+        click.echo(click.style(f"Source not found: {source_name}", fg="red"))
+        click.echo(f"Expected directory: {sessions_dir} or {raw_dir}")
+        raise SystemExit(1)
+
+    # Determine data source
+    use_raw = not sessions_exist and raw_exists
+
+    # Determine output path
+    if output_path:
+        out_file = Path(output_path).expanduser()
+    else:
+        unified_dir = Path(storage_path) / "unified"
+        unified_dir.mkdir(parents=True, exist_ok=True)
+        out_file = unified_dir / f"{source_name}_sessions.jsonl"
+
+    if update and out_file.exists():
+        # Incremental update mode
+        click.echo(click.style("Incremental update mode", fg="cyan"))
+
+        # Get last export time
+        last_export_time = out_file.stat().st_mtime
+        click.echo(f"Last export: {Path(out_file).stat().st_mtime}")
+
+        # Load existing unified sessions
+        click.echo(f"Loading existing sessions from: {out_file}")
+        existing_sessions = _load_unified_sessions(out_file)
+        click.echo(f"Loaded {len(existing_sessions):,} existing sessions")
+
+        # Find new spans since last export
+        click.echo("Finding new spans...")
+        new_spans = _get_new_spans_since(sessions_dir, raw_dir, last_export_time)
+
+        if not new_spans:
+            click.echo(click.style("No new spans found since last export.", fg="yellow"))
+            return
+
+        click.echo(f"Found {len(new_spans):,} new spans")
+
+        # Step 1: Group new spans into sessions (bucket sort)
+        click.echo("Grouping new spans by session...")
+        new_sessions = _group_by_session(new_spans)
+        click.echo(f"New spans form {len(new_sessions):,} sessions")
+
+        # Step 2: Merge new sessions into existing (bucket unification)
+        click.echo("Merging sessions...")
+        merged_sessions, updated, added, spans_added = _merge_sessions(
+            existing_sessions, new_sessions
+        )
+
+        # Write merged sessions
+        out_file.parent.mkdir(parents=True, exist_ok=True)
+        with open(out_file, "w") as f:
+            for session in merged_sessions:
+                json.dump(session, f, default=str)
+                f.write("\n")
+
+        # Calculate stats
+        total_spans = sum(s.get("span_count", 0) for s in merged_sessions)
+        file_size_mb = out_file.stat().st_size / (1024 * 1024)
+
+        click.echo()
+        click.echo(click.style("Update complete!", fg="green", bold=True))
+        click.echo(f"  Sessions updated: {updated:,}")
+        click.echo(f"  Sessions added:   {added:,}")
+        click.echo(f"  Spans added:      {spans_added:,}")
+        click.echo(f"  Total sessions:   {len(merged_sessions):,}")
+        click.echo(f"  Total spans:      {total_spans:,}")
+        click.echo(f"  Size:             {file_size_mb:.1f} MB")
+        click.echo(f"  Output:           {out_file}")
+
+    else:
+        # Full export mode
+        if update:
+            click.echo(click.style("No existing export found, doing full export.", fg="yellow"))
+
+        if use_raw:
+            # Read from raw files
+            click.echo(click.style("Using raw sync files (no session files found)", fg="cyan"))
+            raw_files = sorted(raw_dir.glob("sync_*.jsonl"))
+            click.echo(f"Found {len(raw_files)} raw files in {raw_dir}")
+
+            spans = []
+            for raw_file in raw_files:
+                click.echo(f"  Reading {raw_file.name}...")
+                with open(raw_file) as f:
+                    for line in f:
+                        if line.strip():
+                            try:
+                                spans.append(json.loads(line))
+                            except json.JSONDecodeError:
+                                continue
+            click.echo(f"Loaded {len(spans):,} spans from raw files")
+        else:
+            # Find sessions file
+            sessions_file = sessions_dir / "sessions_current.jsonl"
+            if not sessions_file.exists():
+                # Try to find any sessions file
+                jsonl_files = list(sessions_dir.glob("sessions_*.jsonl"))
+                if not jsonl_files:
+                    click.echo(click.style(f"No session files found in {sessions_dir}", fg="red"))
+                    raise SystemExit(1)
+                sessions_file = max(jsonl_files, key=lambda f: f.stat().st_mtime)
+
+            click.echo(f"Loading spans from: {sessions_file}")
+
+            # Read all spans
+            df = read_sessions_file(sessions_file)
+            if df.empty:
+                click.echo(click.style("No spans found in session file", fg="yellow"))
+                return
+
+            spans = df.to_dict(orient="records")
+            click.echo(f"Loaded {len(spans):,} spans")
+
+        # Group by session
+        click.echo("Grouping spans by session...")
+        sessions = _group_by_session(spans)
+        click.echo(f"Found {len(sessions):,} sessions")
+
+        # Write unified sessions
+        out_file.parent.mkdir(parents=True, exist_ok=True)
+        with open(out_file, "w") as f:
+            for session in sessions:
+                json.dump(session, f, default=str)
+                f.write("\n")
+
+        # Calculate stats
+        total_spans = sum(s.get("span_count", 0) for s in sessions)
+        file_size_mb = out_file.stat().st_size / (1024 * 1024)
+
+        click.echo()
+        click.echo(click.style("Export complete!", fg="green", bold=True))
+        click.echo(f"  Sessions: {len(sessions):,}")
+        click.echo(f"  Spans:    {total_spans:,}")
+        click.echo(f"  Size:     {file_size_mb:.1f} MB")
+        click.echo(f"  Output:   {out_file}")
+
+
 if __name__ == "__main__":
     main()
