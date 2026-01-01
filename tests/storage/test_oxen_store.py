@@ -302,6 +302,12 @@ class TestOxenStoreOxenIntegration:
 
         assert store.oxen_enabled is True
 
+    def test_unified_dir_property(self, tmp_path):
+        """Given store, unified_dir points to unified directory."""
+        store = OxenStore(data_path=tmp_path)
+
+        assert store.unified_dir == tmp_path / "unified"
+
     def test_init_oxen_creates_repo(self, tmp_path, monkeypatch):
         """Given Oxen configured, init creates .oxen directory."""
         monkeypatch.setenv("OXEN_REMOTE_URL", "https://hub.oxen.ai/test/repo")
@@ -317,8 +323,8 @@ class TestOxenStoreOxenIntegration:
             assert result is True
             mock_repo.init.assert_called_once()
 
-    def test_commit_adds_and_commits(self, tmp_path, monkeypatch):
-        """Given Oxen configured, commit stages and commits files."""
+    def test_commit_only_adds_unified_directory(self, tmp_path, monkeypatch):
+        """Given Oxen configured, commit only stages unified/ directory."""
         monkeypatch.setenv("OXEN_REMOTE_URL", "https://hub.oxen.ai/test/repo")
 
         mock_oxen = MagicMock()
@@ -330,8 +336,46 @@ class TestOxenStoreOxenIntegration:
             result = store.commit("Test commit")
 
             assert result is True
-            mock_repo.add.assert_called_once_with(".")
+            # Should only add "unified" directory, not "."
+            mock_repo.add.assert_called_once_with("unified")
             mock_repo.commit.assert_called_once_with("Test commit")
+
+    def test_commit_creates_unified_directory(self, tmp_path, monkeypatch):
+        """Given no unified directory, commit creates it."""
+        monkeypatch.setenv("OXEN_REMOTE_URL", "https://hub.oxen.ai/test/repo")
+
+        mock_oxen = MagicMock()
+        mock_repo = MagicMock()
+        mock_oxen.Repo.return_value = mock_repo
+
+        with patch.dict(sys.modules, {"oxen": mock_oxen}):
+            store = OxenStore(data_path=tmp_path)
+            # unified dir should not exist yet
+            assert not store.unified_dir.exists()
+
+            store.commit("Test commit")
+
+            # unified dir should now exist
+            assert store.unified_dir.exists()
+
+    def test_commit_does_not_add_raw_files(self, tmp_path, monkeypatch):
+        """Given raw files exist, commit does not include them."""
+        monkeypatch.setenv("OXEN_REMOTE_URL", "https://hub.oxen.ai/test/repo")
+
+        mock_oxen = MagicMock()
+        mock_repo = MagicMock()
+        mock_oxen.Repo.return_value = mock_repo
+
+        with patch.dict(sys.modules, {"oxen": mock_oxen}):
+            store = OxenStore(data_path=tmp_path)
+            # Create some raw files
+            store.append_spans([{"span_id": "test"}], backend="test")
+
+            result = store.commit("Test commit")
+
+            assert result is True
+            # Should only add "unified", not "." or "raw"
+            mock_repo.add.assert_called_once_with("unified")
 
     def test_push_calls_oxen_push(self, tmp_path, monkeypatch):
         """Given Oxen configured, push calls remote push."""
