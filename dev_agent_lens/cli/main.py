@@ -3564,5 +3564,177 @@ def export_sessions(source_name: str, output_path: str | None, update: bool) -> 
         click.echo(f"  Output:   {out_file}")
 
 
+# =============================================================================
+# Oxen Push/Pull Commands
+# =============================================================================
+
+
+@main.command()
+@click.option(
+    "--message",
+    "-m",
+    type=str,
+    default=None,
+    help="Commit message (auto-generated if not provided)",
+)
+def push(message: str | None):
+    """Push unified session files to Oxen remote.
+
+    Commits any changes in the unified/ directory and pushes to the
+    configured Oxen remote. Run 'dal export-sessions' first to create
+    unified session files.
+
+    Example:
+        dal export-sessions --source phoenix-alex
+        dal push -m "Add phoenix-alex sessions"
+    """
+    from dev_agent_lens.config import get_oxen_remote, is_oxen_configured
+
+    if not is_oxen_configured():
+        click.echo(
+            click.style(
+                "Error: Oxen is not configured.\n"
+                "Run 'dal config oxen --remote <url>' to set up Oxen.",
+                fg="red",
+            )
+        )
+        raise SystemExit(1)
+
+    remote_url = get_oxen_remote()
+    store = OxenStore()
+
+    # Check if unified directory has content
+    unified_files = list(store.unified_dir.glob("*.jsonl")) if store.unified_dir.exists() else []
+    if not unified_files:
+        click.echo(
+            click.style(
+                "No unified session files found.\n"
+                "Run 'dal export-sessions' first to create unified session files.",
+                fg="yellow",
+            )
+        )
+        raise SystemExit(1)
+
+    click.echo(f"Oxen remote: {remote_url}")
+    click.echo(f"Unified files: {len(unified_files)}")
+    click.echo()
+
+    # Initialize repo if needed
+    click.echo("Initializing Oxen repository...")
+    if not store.init_oxen():
+        click.echo(click.style("Failed to initialize Oxen repository.", fg="red"))
+        click.echo("Make sure the 'oxen' package is installed: pip install oxen")
+        raise SystemExit(1)
+
+    # Set remote if not already set
+    store.set_remote(remote_url)
+
+    # Generate commit message
+    if message is None:
+        from datetime import datetime
+
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+        file_names = ", ".join(f.stem for f in unified_files[:3])
+        if len(unified_files) > 3:
+            file_names += f" +{len(unified_files) - 3} more"
+        message = f"Update unified sessions: {file_names} ({timestamp})"
+
+    # Commit
+    click.echo(f"Committing: {message}")
+    if not store.commit(message):
+        click.echo(click.style("Failed to commit changes.", fg="red"))
+        raise SystemExit(1)
+
+    # Push
+    click.echo("Pushing to remote...")
+    if not store.push():
+        click.echo(click.style("Failed to push to remote.", fg="red"))
+        raise SystemExit(1)
+
+    click.echo(click.style("Push complete!", fg="green", bold=True))
+
+
+@main.command()
+def pull():
+    """Pull latest unified session files from Oxen remote.
+
+    Fetches the latest unified session files from the configured Oxen remote.
+    Use this to sync session data from other team members.
+
+    Example:
+        dal pull
+    """
+    from dev_agent_lens.config import get_oxen_remote, is_oxen_configured
+
+    if not is_oxen_configured():
+        click.echo(
+            click.style(
+                "Error: Oxen is not configured.\n"
+                "Run 'dal config oxen --remote <url>' to set up Oxen.",
+                fg="red",
+            )
+        )
+        raise SystemExit(1)
+
+    remote_url = get_oxen_remote()
+    store = OxenStore()
+
+    click.echo(f"Oxen remote: {remote_url}")
+    click.echo()
+
+    # Initialize repo if needed
+    click.echo("Initializing Oxen repository...")
+    if not store.init_oxen():
+        click.echo(click.style("Failed to initialize Oxen repository.", fg="red"))
+        click.echo("Make sure the 'oxen' package is installed: pip install oxen")
+        raise SystemExit(1)
+
+    # Set remote if not already set
+    store.set_remote(remote_url)
+
+    # Pull
+    click.echo("Pulling from remote...")
+    if not store.pull():
+        click.echo(click.style("Failed to pull from remote.", fg="red"))
+        raise SystemExit(1)
+
+    # Show what we have now
+    unified_files = list(store.unified_dir.glob("*.jsonl")) if store.unified_dir.exists() else []
+    click.echo(click.style("Pull complete!", fg="green", bold=True))
+    click.echo(f"Unified session files: {len(unified_files)}")
+    for f in unified_files:
+        size_mb = f.stat().st_size / (1024 * 1024)
+        click.echo(f"  - {f.name} ({size_mb:.1f} MB)")
+
+
+# Add oxen subcommand to config group
+@config.command("oxen")
+@click.option(
+    "--remote",
+    type=str,
+    required=True,
+    help="Oxen remote URL (e.g., hub.oxen.ai/team/dal-sessions)",
+)
+def config_oxen(remote: str):
+    """Configure Oxen remote for push/pull.
+
+    Sets the Oxen remote URL that will be used by 'dal push' and 'dal pull'.
+    This is stored in ~/.dal/config.json.
+
+    Example:
+        dal config oxen --remote hub.oxen.ai/myteam/sessions
+    """
+    from dev_agent_lens.config import set_oxen_remote, get_config_path
+
+    set_oxen_remote(remote)
+    click.echo(click.style("Oxen remote configured!", fg="green"))
+    click.echo(f"  Remote: {remote}")
+    click.echo(f"  Config: {get_config_path()}")
+    click.echo()
+    click.echo("You can now use:")
+    click.echo("  dal push    - Push unified sessions to remote")
+    click.echo("  dal pull    - Pull unified sessions from remote")
+
+
 if __name__ == "__main__":
     main()

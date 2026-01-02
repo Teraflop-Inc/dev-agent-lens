@@ -404,6 +404,54 @@ class TestOxenStoreOxenIntegration:
             assert store.commit("test") is False
             assert store.push() is False
 
+    def test_pull_calls_oxen_pull(self, tmp_path, monkeypatch):
+        """Given Oxen configured, pull fetches from remote."""
+        monkeypatch.setenv("OXEN_REMOTE_URL", "https://hub.oxen.ai/test/repo")
+
+        mock_oxen = MagicMock()
+        mock_repo = MagicMock()
+        mock_oxen.Repo.return_value = mock_repo
+
+        with patch.dict(sys.modules, {"oxen": mock_oxen}):
+            store = OxenStore(data_path=tmp_path)
+            result = store.pull()
+
+            assert result is True
+            mock_repo.pull.assert_called_once()
+
+    def test_pull_returns_false_when_not_configured(self, tmp_path, monkeypatch):
+        """Given no Oxen config, pull returns False."""
+        monkeypatch.delenv("OXEN_REMOTE_URL", raising=False)
+
+        store = OxenStore(data_path=tmp_path)
+        result = store.pull()
+
+        assert result is False
+
+    def test_set_remote_configures_origin(self, tmp_path, monkeypatch):
+        """Given remote URL, sets origin remote."""
+        monkeypatch.setenv("OXEN_REMOTE_URL", "https://hub.oxen.ai/test/repo")
+
+        mock_oxen = MagicMock()
+        mock_repo = MagicMock()
+        mock_oxen.Repo.return_value = mock_repo
+
+        with patch.dict(sys.modules, {"oxen": mock_oxen}):
+            store = OxenStore(data_path=tmp_path)
+            result = store.set_remote("hub.oxen.ai/new/repo")
+
+            assert result is True
+            mock_repo.set_remote.assert_called_once_with("origin", "hub.oxen.ai/new/repo")
+
+    def test_uses_config_module_for_remote(self, tmp_path, monkeypatch):
+        """Given config module has remote, uses it."""
+        monkeypatch.delenv("OXEN_REMOTE_URL", raising=False)
+
+        with patch("dev_agent_lens.storage.oxen_store.os.getenv", return_value=None):
+            with patch("dev_agent_lens.config.get_oxen_remote", return_value="hub.oxen.ai/config/repo"):
+                store = OxenStore(data_path=tmp_path)
+                assert store.oxen_enabled is True
+
 
 class TestOxenStoreRepr:
     """Tests for string representation."""
