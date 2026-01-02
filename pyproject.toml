@@ -23,6 +23,8 @@ dependencies = [
     "arize>=7.0.3",
     "arize-phoenix>=4.0.0",
     "click>=8.0.0",
+    "openai>=2.13.0",
+    "oxenai>=0.42.0",
     "pandas>=2.0.0",
     "python-dotenv>=1.0.0",
 ]
