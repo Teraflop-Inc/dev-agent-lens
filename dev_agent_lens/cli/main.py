@@ -3722,9 +3722,13 @@ def config_oxen(remote: str):
     This is stored in ~/.dal/config.json.
 
     Example:
-        dal config oxen --remote hub.oxen.ai/myteam/sessions
+        dal config oxen --remote https://hub.oxen.ai/myteam/sessions
     """
     from dev_agent_lens.config import set_oxen_remote, get_config_path
+
+    # Ensure URL is fully qualified
+    if not remote.startswith("http://") and not remote.startswith("https://"):
+        remote = f"https://{remote}"
 
     set_oxen_remote(remote)
     click.echo(click.style("Oxen remote configured!", fg="green"))
