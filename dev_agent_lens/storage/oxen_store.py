@@ -402,7 +402,7 @@ class OxenStore:
             message: Commit message.
 
         Returns:
-            True if commit succeeded, False otherwise.
+            True if commit succeeded or nothing to commit, False on error.
         """
         if not self.oxen_enabled:
             return False
@@ -417,9 +417,21 @@ class OxenStore:
             repo = oxen.Repo(str(self._data_path))
             # Only add the unified directory, not raw files
             repo.add(str(self._unified_base.relative_to(self._data_path)))
-            repo.commit(message)
+            try:
+                repo.commit(message)
+            except Exception as e:
+                # "nothing to commit" or "no changes" is not an error
+                err_msg = str(e).lower()
+                if "nothing to commit" in err_msg or "no changes" in err_msg:
+                    return True
+                raise
             return True
-        except (ImportError, Exception):
+        except ImportError:
+            return False
+        except Exception as e:
+            # Log the actual error for debugging
+            import sys
+            print(f"Oxen commit error: {e}", file=sys.stderr)
             return False
 
     def push(self) -> bool:
@@ -438,7 +450,12 @@ class OxenStore:
             repo = oxen.Repo(str(self._data_path))
             repo.push()
             return True
-        except (ImportError, Exception):
+        except ImportError:
+            return False
+        except Exception as e:
+            # Log the actual error for debugging
+            import sys
+            print(f"Oxen push error: {e}", file=sys.stderr)
             return False
 
     def pull(self) -> bool:
