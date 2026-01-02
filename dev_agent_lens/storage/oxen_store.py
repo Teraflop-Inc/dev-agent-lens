@@ -117,9 +117,24 @@ class OxenStore:
         # Track last written file
         self._last_raw_file: Path | None = None
 
-        # Oxen configuration
-        self._oxen_remote_url = os.getenv("OXEN_REMOTE_URL")
+        # Oxen configuration - check config module first, then env var
+        self._oxen_remote_url = self._get_oxen_remote()
         self._oxen_initialized = False
+
+    def _get_oxen_remote(self) -> str | None:
+        """Get Oxen remote URL from config or environment."""
+        # Try config module first
+        try:
+            from dev_agent_lens.config import get_oxen_remote
+
+            remote = get_oxen_remote()
+            if remote:
+                return remote
+        except ImportError:
+            pass
+
+        # Fall back to environment variable
+        return os.getenv("OXEN_REMOTE_URL")
 
     @property
     def data_path(self) -> Path:
@@ -422,6 +437,46 @@ class OxenStore:
 
             repo = oxen.Repo(str(self._data_path))
             repo.push()
+            return True
+        except (ImportError, Exception):
+            return False
+
+    def pull(self) -> bool:
+        """
+        Pull latest from Oxen remote.
+
+        Fetches the latest unified session files from the remote repository.
+
+        Returns:
+            True if pull succeeded, False otherwise.
+        """
+        if not self.oxen_enabled or not self._oxen_remote_url:
+            return False
+
+        try:
+            import oxen
+
+            repo = oxen.Repo(str(self._data_path))
+            repo.pull()
+            return True
+        except (ImportError, Exception):
+            return False
+
+    def set_remote(self, remote_url: str) -> bool:
+        """
+        Set the Oxen remote URL for the repository.
+
+        Args:
+            remote_url: The Oxen remote URL (e.g., hub.oxen.ai/team/repo)
+
+        Returns:
+            True if remote was set successfully, False otherwise.
+        """
+        try:
+            import oxen
+
+            repo = oxen.Repo(str(self._data_path))
+            repo.set_remote("origin", remote_url)
             return True
         except (ImportError, Exception):
             return False
