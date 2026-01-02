@@ -3740,5 +3740,301 @@ def config_oxen(remote: str):
     click.echo("  dal pull    - Pull unified sessions from remote")
 
 
+@main.command("export-parquet")
+@click.option(
+    "--source",
+    "source_name",
+    type=str,
+    required=True,
+    help="Source name to export (e.g., phoenix-local-alex)",
+)
+@click.option(
+    "--output",
+    "-o",
+    "output_dir",
+    type=str,
+    default=None,
+    help="Output directory for Parquet files (default: ~/.dal/data/parquet/)",
+)
+@click.option(
+    "--compression",
+    type=click.Choice(["zstd", "snappy", "gzip", "none"]),
+    default="zstd",
+    help="Parquet compression codec (default: zstd, ~45%% better than snappy)",
+)
+@click.option(
+    "--no-dedupe",
+    is_flag=True,
+    help="Skip deduplication of raw_attributes",
+)
+@click.option(
+    "--no-strip-nulls",
+    is_flag=True,
+    help="Keep null/empty values in raw_attributes",
+)
+def export_parquet(
+    source_name: str,
+    output_dir: str | None,
+    compression: str,
+    no_dedupe: bool,
+    no_strip_nulls: bool,
+) -> None:
+    """Export unified sessions to Parquet format.
+
+    Exports session data to efficient columnar Parquet format with built-in
+    compression. Creates two files:
+    - {source}_sessions.parquet: Session-level aggregates
+    - {source}_spans.parquet: Individual spans with session FK
+
+    By default, deduplicates and strips null values from raw_attributes
+    to minimize file size (typically 80-90% smaller than JSONL).
+
+    Examples:
+
+        dal export-parquet --source phoenix-local-alex
+
+        dal export-parquet --source arize-ax-alex --compression snappy
+
+        dal export-parquet --source phoenix-local-alex --no-dedupe
+    """
+    from pathlib import Path
+
+    from dev_agent_lens.export.parquet import ParquetExporter
+    from dev_agent_lens.storage import get_storage_path
+
+    storage_path = get_storage_path()
+    unified_dir = Path(storage_path) / "unified"
+
+    # Find input file
+    input_file = unified_dir / f"{source_name}_sessions.jsonl"
+    if not input_file.exists():
+        click.echo(
+            click.style(
+                f"Error: Unified sessions file not found: {input_file}\n"
+                f"Run 'dal export-sessions --source {source_name}' first.",
+                fg="red",
+            )
+        )
+        raise SystemExit(1)
+
+    # Determine output directory
+    if output_dir:
+        out_dir = Path(output_dir).expanduser()
+    else:
+        out_dir = Path(storage_path) / "parquet"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    input_size = input_file.stat().st_size
+    click.echo(f"Source: {source_name}")
+    click.echo(f"Input: {input_file} ({input_size / 1024 / 1024:.1f} MB)")
+    click.echo(f"Output: {out_dir}")
+    click.echo(f"Compression: {compression}")
+    click.echo(f"Dedupe: {'no' if no_dedupe else 'yes'}")
+    click.echo(f"Strip nulls: {'no' if no_strip_nulls else 'yes'}")
+    click.echo()
+
+    # Export
+    exporter = ParquetExporter(
+        compression=compression,
+        dedupe=not no_dedupe,
+        strip_nulls=not no_strip_nulls,
+    )
+
+    def progress(n: int) -> None:
+        if n % 100 == 0:
+            click.echo(f"  Processed {n:,} sessions...")
+
+    click.echo("Exporting to Parquet...")
+    stats = exporter.export_source(
+        source=source_name,
+        input_path=input_file,
+        output_dir=out_dir,
+        progress_callback=progress,
+    )
+
+    click.echo()
+    click.echo(click.style("Export complete!", fg="green", bold=True))
+    click.echo(f"  Sessions: {stats['sessions']:,}")
+    click.echo(f"  Spans: {stats['spans']:,}")
+    click.echo(f"  Input size: {stats['input_bytes'] / 1024 / 1024:.1f} MB")
+    click.echo(f"  Output size: {stats['output_bytes'] / 1024 / 1024:.1f} MB")
+    click.echo(
+        f"  Savings: {stats['savings_bytes'] / 1024 / 1024:.1f} MB "
+        f"({stats['savings_percent']:.1f}%)"
+    )
+    click.echo()
+    click.echo("Output files:")
+    click.echo(f"  {stats['sessions_path']}")
+    click.echo(f"  {stats['spans_path']}")
+
+
+@main.command("clean-sessions")
+@click.option(
+    "--source",
+    "source_name",
+    type=str,
+    required=True,
+    help="Source name to clean (e.g., phoenix-local-alex)",
+)
+@click.option(
+    "--output",
+    "-o",
+    "output_path",
+    type=str,
+    default=None,
+    help="Output file path (default: overwrites input)",
+)
+@click.option(
+    "--no-dedupe",
+    is_flag=True,
+    help="Skip deduplication of raw_attributes",
+)
+@click.option(
+    "--no-strip-nulls",
+    is_flag=True,
+    help="Keep null/empty values in raw_attributes",
+)
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    help="Show what would be saved without writing",
+)
+def clean_sessions(
+    source_name: str,
+    output_path: str | None,
+    no_dedupe: bool,
+    no_strip_nulls: bool,
+    dry_run: bool,
+) -> None:
+    """Clean unified sessions by removing duplicates and null values.
+
+    Reduces file size by:
+    1. Removing duplicated fields from raw_attributes (already in normalized form)
+    2. Stripping null/empty/NaN values from raw_attributes
+
+    By default, overwrites the input file. Use --output to write to a new file.
+
+    Examples:
+
+        dal clean-sessions --source phoenix-local-alex
+
+        dal clean-sessions --source arize-ax-alex --output cleaned.jsonl
+
+        dal clean-sessions --source phoenix-local-alex --dry-run
+    """
+    from pathlib import Path
+    import tempfile
+    import shutil
+
+    from dev_agent_lens.export.dedupe import clean_sessions_file
+    from dev_agent_lens.storage import get_storage_path
+
+    storage_path = get_storage_path()
+    unified_dir = Path(storage_path) / "unified"
+
+    # Find input file
+    input_file = unified_dir / f"{source_name}_sessions.jsonl"
+    if not input_file.exists():
+        click.echo(
+            click.style(
+                f"Error: Unified sessions file not found: {input_file}\n"
+                f"Run 'dal export-sessions --source {source_name}' first.",
+                fg="red",
+            )
+        )
+        raise SystemExit(1)
+
+    input_size = input_file.stat().st_size
+    click.echo(f"Source: {source_name}")
+    click.echo(f"Input: {input_file} ({input_size / 1024 / 1024:.1f} MB)")
+    click.echo(f"Dedupe: {'no' if no_dedupe else 'yes'}")
+    click.echo(f"Strip nulls: {'no' if no_strip_nulls else 'yes'}")
+    click.echo()
+
+    if dry_run:
+        # Sample first 100 sessions for estimate
+        import json
+
+        from dev_agent_lens.export.dedupe import clean_session
+
+        sample_original = 0
+        sample_cleaned = 0
+        sample_count = 0
+
+        with open(input_file, "r") as f:
+            for i, line in enumerate(f):
+                if i >= 100:
+                    break
+                line = line.strip()
+                if not line:
+                    continue
+
+                session = json.loads(line)
+                cleaned = clean_session(
+                    session,
+                    dedupe=not no_dedupe,
+                    strip_nulls=not no_strip_nulls,
+                )
+
+                sample_original += len(line)
+                sample_cleaned += len(json.dumps(cleaned))
+                sample_count += 1
+
+        if sample_count > 0:
+            savings_pct = (sample_original - sample_cleaned) / sample_original * 100
+            estimated_output = input_size * (1 - savings_pct / 100)
+            estimated_savings = input_size - estimated_output
+
+            click.echo(click.style("Dry run - estimated savings:", fg="cyan"))
+            click.echo(f"  Sample size: {sample_count} sessions")
+            click.echo(f"  Sample savings: {savings_pct:.1f}%")
+            click.echo(f"  Estimated output: {estimated_output / 1024 / 1024:.1f} MB")
+            click.echo(f"  Estimated savings: {estimated_savings / 1024 / 1024:.1f} MB")
+        return
+
+    # Determine output path
+    overwrite = output_path is None
+    if overwrite:
+        # Write to temp file, then replace
+        temp_fd, temp_path = tempfile.mkstemp(suffix=".jsonl")
+        import os
+        os.close(temp_fd)
+        out_file = Path(temp_path)
+    else:
+        out_file = Path(output_path).expanduser()
+
+    def progress(n: int, saved: int) -> None:
+        if n % 500 == 0:
+            click.echo(f"  Processed {n:,} sessions, saved {saved / 1024 / 1024:.1f} MB...")
+
+    click.echo("Cleaning sessions...")
+    stats = clean_sessions_file(
+        input_path=str(input_file),
+        output_path=str(out_file),
+        dedupe=not no_dedupe,
+        strip_nulls=not no_strip_nulls,
+        progress_callback=progress,
+    )
+
+    if overwrite:
+        # Replace original with cleaned
+        shutil.move(str(out_file), str(input_file))
+        final_path = input_file
+    else:
+        final_path = out_file
+
+    click.echo()
+    click.echo(click.style("Cleaning complete!", fg="green", bold=True))
+    click.echo(f"  Sessions: {stats['sessions_processed']:,}")
+    click.echo(f"  Spans: {stats['spans_processed']:,}")
+    click.echo(f"  Original size: {stats['original_bytes'] / 1024 / 1024:.1f} MB")
+    click.echo(f"  Cleaned size: {stats['cleaned_bytes'] / 1024 / 1024:.1f} MB")
+    click.echo(
+        f"  Savings: {stats['savings_bytes'] / 1024 / 1024:.1f} MB "
+        f"({stats['savings_percent']:.1f}%)"
+    )
+    click.echo(f"  Output: {final_path}")
+
+
 if __name__ == "__main__":
     main()
