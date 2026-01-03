@@ -3008,28 +3008,97 @@ def session_view(session_id: str, output: str) -> None:
                 click.echo(f"       └─ {int(tokens_val):,} tokens")
 
 
+def _display_token_analysis(
+    session_id: str,
+    breakdown,
+    cost: dict,
+    source: str | None = None,
+) -> None:
+    """Display token analysis in text format."""
+    click.echo()
+    title = f"Token Analysis: {session_id}"
+    if source:
+        title += f" (source: {source})"
+    click.echo(click.style(title, fg="cyan", bold=True))
+    click.echo("=" * 60)
+    click.echo()
+    click.echo(click.style("Input Tokens:", bold=True))
+    click.echo(f"  Tool Calls:     {breakdown.tool_tokens:>12,}")
+    click.echo(f"  User Messages:  {breakdown.user_tokens:>12,}")
+    click.echo(f"  System Prompts: {breakdown.system_tokens:>12,}")
+    click.echo(f"  {'-' * 30}")
+    click.echo(f"  Total Input:    {breakdown.total_input_tokens:>12,}")
+    click.echo()
+    click.echo(click.style("Output Tokens:", bold=True))
+    click.echo(f"  Model Output:   {breakdown.model_tokens:>12,}")
+    click.echo()
+    click.echo(click.style("Cost Estimate:", bold=True))
+    click.echo(f"  Input Cost:     ${cost['input_cost_usd']:>11.4f}")
+    click.echo(f"  Output Cost:    ${cost['output_cost_usd']:>11.4f}")
+    click.echo(f"  {'-' * 30}")
+    click.echo(f"  Total Cost:     ${cost['total_cost_usd']:>11.4f}")
+
+
 @main.command("analyze-tokens")
 @click.argument("session_id")
+@click.option("--source", "-s", help="Source name to query (uses Parquet if available)")
+@click.option("--parquet/--no-parquet", default=True, help="Use Parquet backend when available")
 @click.option("--output", type=click.Choice(["text", "json"]), default="text", help="Output format")
-def analyze_tokens_cmd(session_id: str, output: str) -> None:
+def analyze_tokens_cmd(session_id: str, source: str | None, parquet: bool, output: str) -> None:
     """Analyze token breakdown for a session.
 
     Shows tokens by category:
     - Input: tool calls, user messages, system prompts
     - Output: model-generated tokens
 
+    Uses Parquet backend (10-100x faster) when --source is specified
+    and Parquet files exist. Falls back to JSONL otherwise.
+
     Examples:
 
         dal analyze-tokens abc123
 
+        dal analyze-tokens abc123 --source my-project
+
         dal analyze-tokens abc123 --output json
+
+        dal analyze-tokens abc123 --source my-project --no-parquet
     """
     from pathlib import Path
 
     from dev_agent_lens.analysis.tokens import analyze_session_tokens, estimate_cost
-    from dev_agent_lens.query import query
+    from dev_agent_lens.query import query, query_sessions
     from dev_agent_lens.storage import get_storage_path
 
+    # Try Parquet backend if source specified
+    if source:
+        sessions = query_sessions(source=source, session_id=session_id, prefer_parquet=parquet)
+        if sessions:
+            session = sessions[0]
+            spans = session.get("spans", [])
+
+            # Analyze tokens
+            breakdown = analyze_session_tokens(spans)
+            cost = estimate_cost(breakdown)
+
+            if output == "json":
+                import json
+
+                data = {
+                    "session_id": session_id,
+                    "source": source,
+                    "token_breakdown": breakdown.to_dict(),
+                    "cost_estimate": cost,
+                }
+                click.echo(json.dumps(data, indent=2))
+            else:
+                _display_token_analysis(session_id, breakdown, cost, source=source)
+            return
+
+        click.echo(click.style(f"Session not found in source '{source}': {session_id}", fg="red"))
+        raise SystemExit(1)
+
+    # Fall back to JSONL
     storage_path = get_storage_path()
     sessions_file = Path(storage_path) / "sessions" / "sessions_current.jsonl"
 
@@ -3060,39 +3129,30 @@ def analyze_tokens_cmd(session_id: str, output: str) -> None:
         }
         click.echo(json.dumps(data, indent=2))
     else:
-        click.echo()
-        click.echo(click.style(f"Token Analysis: {session_id}", fg="cyan", bold=True))
-        click.echo("=" * 60)
-        click.echo()
-        click.echo(click.style("Input Tokens:", bold=True))
-        click.echo(f"  Tool Calls:     {breakdown.tool_tokens:>12,}")
-        click.echo(f"  User Messages:  {breakdown.user_tokens:>12,}")
-        click.echo(f"  System Prompts: {breakdown.system_tokens:>12,}")
-        click.echo(f"  {'-' * 30}")
-        click.echo(f"  Total Input:    {breakdown.total_input_tokens:>12,}")
-        click.echo()
-        click.echo(click.style("Output Tokens:", bold=True))
-        click.echo(f"  Model Output:   {breakdown.model_tokens:>12,}")
-        click.echo()
-        click.echo(click.style("Cost Estimate:", bold=True))
-        click.echo(f"  Input Cost:     ${cost['input_cost_usd']:>11.4f}")
-        click.echo(f"  Output Cost:    ${cost['output_cost_usd']:>11.4f}")
-        click.echo(f"  {'-' * 30}")
-        click.echo(f"  Total Cost:     ${cost['total_cost_usd']:>11.4f}")
+        _display_token_analysis(session_id, breakdown, cost)
 
 
 @main.command("analyze-duplicates")
+@click.option("--source", "-s", help="Source name to query (uses Parquet if available)")
+@click.option("--parquet/--no-parquet", default=True, help="Use Parquet backend when available")
 @click.option("--output", type=click.Choice(["text", "json"]), default="text", help="Output format")
 @click.option("--min-containment", type=float, default=50.0, help="Minimum containment % to report")
-def analyze_duplicates_cmd(output: str, min_containment: float) -> None:
+def analyze_duplicates_cmd(
+    source: str | None, parquet: bool, output: str, min_containment: float
+) -> None:
     """Analyze duplicate/subset relationships between sessions.
 
     Identifies sessions that are fully or partially contained in other sessions.
     These subset sessions could potentially be deleted to save storage.
 
+    Uses Parquet backend (10-100x faster) when --source is specified
+    and Parquet files exist. Falls back to JSONL otherwise.
+
     Examples:
 
         dal analyze-duplicates
+
+        dal analyze-duplicates --source my-project
 
         dal analyze-duplicates --output json
 
@@ -3101,10 +3161,15 @@ def analyze_duplicates_cmd(output: str, min_containment: float) -> None:
     from dev_agent_lens.analysis.subsets import analyze_coverage
     from dev_agent_lens.query import query_sessions
 
-    click.echo("Analyzing sessions for duplicates...")
+    backend_info = ""
+    if source:
+        backend_info = f" from {source}"
+        if parquet:
+            backend_info += " (Parquet)"
+    click.echo(f"Analyzing sessions for duplicates{backend_info}...")
 
-    # Load sessions using query module which handles session grouping
-    sessions = query_sessions()
+    # Load sessions using query module which handles session grouping and backend detection
+    sessions = query_sessions(source=source, prefer_parquet=parquet)
 
     if not sessions:
         click.echo(click.style("No sessions found. Run 'dal sync' first.", fg="yellow"))
@@ -3163,25 +3228,30 @@ def analyze_duplicates_cmd(output: str, min_containment: float) -> None:
 
 
 @main.command("coverage")
+@click.option("--source", "-s", help="Source name to query (uses Parquet if available)")
+@click.option("--parquet/--no-parquet", default=True, help="Use Parquet backend when available")
 @click.option("--output", type=click.Choice(["text", "json"]), default="text", help="Output format")
-def coverage_cmd(output: str) -> None:
+def coverage_cmd(source: str | None, parquet: bool, output: str) -> None:
     """Show coverage metrics for sessions.
 
     Reports what percentage of sessions are complete vs partial copies.
+
+    Uses Parquet backend (10-100x faster) when --source is specified
+    and Parquet files exist. Falls back to JSONL otherwise.
 
     Examples:
 
         dal coverage
 
+        dal coverage --source my-project
+
         dal coverage --output json
     """
-    from pathlib import Path
-
     from dev_agent_lens.analysis.subsets import analyze_coverage
     from dev_agent_lens.query import query_sessions
 
-    # Load sessions using query module which handles session grouping
-    sessions = query_sessions()
+    # Load sessions using query module which handles session grouping and backend detection
+    sessions = query_sessions(source=source, prefer_parquet=parquet)
 
     if not sessions:
         click.echo(click.style("No sessions found. Run 'dal sync' first.", fg="yellow"))

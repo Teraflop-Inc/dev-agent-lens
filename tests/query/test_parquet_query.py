@@ -563,3 +563,104 @@ class TestCombinedFilters:
 
         # Should find span2 which has ERROR status and mentions ENG2-123
         assert result.total_spans == 1
+
+
+class TestQuerySessionsParquetBackend:
+    """Tests for query_sessions with Parquet backend support."""
+
+    def test_query_sessions_with_source_uses_parquet(self, sample_parquet_source):
+        """query_sessions with source uses Parquet backend when available."""
+        from dev_agent_lens.query.query import query_sessions
+
+        sessions = query_sessions(
+            source="test-source",
+            storage_path=sample_parquet_source,
+        )
+
+        assert len(sessions) == 2
+        session_ids = {s["session_id"] for s in sessions}
+        assert "session_abc123" in session_ids
+        assert "session_xyz789" in session_ids
+
+    def test_query_sessions_with_source_and_session_id(self, sample_parquet_source):
+        """query_sessions with source and session_id filter."""
+        from dev_agent_lens.query.query import query_sessions
+
+        sessions = query_sessions(
+            source="test-source",
+            session_id="session_abc123",
+            storage_path=sample_parquet_source,
+        )
+
+        assert len(sessions) == 1
+        assert sessions[0]["session_id"] == "session_abc123"
+        assert sessions[0]["span_count"] == 2
+
+    def test_query_sessions_with_source_and_search(self, sample_parquet_source):
+        """query_sessions with source and search pattern."""
+        from dev_agent_lens.query.query import query_sessions
+
+        sessions = query_sessions(
+            source="test-source",
+            search=r"ENG2-456",
+            storage_path=sample_parquet_source,
+        )
+
+        # Should find the session with span3 which mentions ENG2-456
+        assert len(sessions) == 1
+        assert sessions[0]["session_id"] == "session_xyz789"
+
+    def test_query_sessions_prefer_parquet_false(self, sample_parquet_source):
+        """query_sessions with prefer_parquet=False falls back to JSONL."""
+        from dev_agent_lens.query.query import query_sessions
+
+        # With prefer_parquet=False, it should try JSONL even if source specified
+        # Since there's no JSONL file, it should return empty
+        sessions = query_sessions(
+            source="test-source",
+            prefer_parquet=False,
+            storage_path=sample_parquet_source,
+        )
+
+        # Falls back to JSONL which doesn't exist, returns empty
+        assert sessions == []
+
+    def test_query_sessions_nonexistent_source(self, tmp_path):
+        """query_sessions with nonexistent source returns empty."""
+        from dev_agent_lens.query.query import query_sessions
+
+        sessions = query_sessions(
+            source="nonexistent-source",
+            storage_path=tmp_path,
+        )
+
+        assert sessions == []
+
+    def test_query_sessions_without_source_uses_jsonl(self, tmp_path):
+        """query_sessions without source uses JSONL backend."""
+        from dev_agent_lens.query.query import query_sessions
+
+        # Without source, tries JSONL which doesn't exist
+        sessions = query_sessions(storage_path=tmp_path)
+
+        assert sessions == []
+
+    def test_query_sessions_returns_spans_in_sessions(self, sample_parquet_source):
+        """query_sessions returns sessions with spans included."""
+        from dev_agent_lens.query.query import query_sessions
+
+        sessions = query_sessions(
+            source="test-source",
+            session_id="session_abc123",
+            storage_path=sample_parquet_source,
+        )
+
+        assert len(sessions) == 1
+        session = sessions[0]
+        assert "spans" in session
+        assert len(session["spans"]) == 2
+
+        # Check span data is present
+        span_ids = {s.get("span_id") for s in session["spans"]}
+        assert "span1" in span_ids
+        assert "span2" in span_ids
