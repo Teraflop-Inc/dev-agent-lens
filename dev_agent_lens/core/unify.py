@@ -84,14 +84,22 @@ def _sort_by_time(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
 
     # Convert start_time to datetime for sorting
+    # Always return timezone-naive UTC for consistent comparison
     def parse_time(val: Any) -> datetime | None:
         if pd.isna(val):
             return None
         if isinstance(val, datetime):
+            # Convert to naive UTC if timezone-aware
+            if val.tzinfo is not None:
+                return val.replace(tzinfo=None)
             return val
         if isinstance(val, str):
             try:
-                return datetime.fromisoformat(val.replace("Z", "+00:00"))
+                dt = datetime.fromisoformat(val.replace("Z", "+00:00"))
+                # Convert to naive UTC for comparison
+                if dt.tzinfo is not None:
+                    return dt.replace(tzinfo=None)
+                return dt
             except (ValueError, AttributeError):
                 return None
         return None
