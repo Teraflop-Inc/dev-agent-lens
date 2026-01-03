@@ -108,6 +108,11 @@ def extract_session_id_from_span(span: dict | pd.Series) -> str | None:
     This is a convenience function that handles both dict and pandas Series
     representations of spans, looking in common metadata fields.
 
+    Session ID extraction priority:
+    1. Explicit session_id patterns in metadata fields (session_xxx)
+    2. trace_id field (used as session grouping in Phoenix/Arize)
+    3. Input value patterns (sometimes embedded in prompts)
+
     Args:
         span: A unified span as a dict or pandas Series.
 
@@ -117,7 +122,7 @@ def extract_session_id_from_span(span: dict | pd.Series) -> str | None:
     if isinstance(span, pd.Series):
         span = span.to_dict()
 
-    # Try various metadata field names
+    # Try various metadata field names for explicit session patterns
     metadata_fields = [
         "metadata",
         "attributes.metadata",
@@ -143,6 +148,13 @@ def extract_session_id_from_span(span: dict | pd.Series) -> str | None:
             session_id = extract_session_id(metadata)
             if session_id:
                 return session_id
+
+    # Fallback to trace_id - this is the standard way Phoenix and Arize group
+    # spans into sessions/traces. The trace_id represents a complete
+    # conversation or agent execution session.
+    trace_id = span.get("trace_id")
+    if trace_id and not (isinstance(trace_id, float) and pd.isna(trace_id)):
+        return str(trace_id)
 
     # Also check input_value for session patterns (sometimes embedded in prompts)
     input_value = span.get("input_value")
