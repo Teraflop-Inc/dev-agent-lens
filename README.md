@@ -260,6 +260,94 @@ docker-compose restart
 - **OAuth issues**: Check logs for OAuth token detection and passthrough messages
 - **API key fallback**: Ensure `ANTHROPIC_API_KEY` is set if not using OAuth
 
+## Querying Trace Data
+
+Dev-Agent-Lens includes a high-performance query API for analyzing synced trace data. The `dal` CLI and Python API support both JSONL and Parquet backends, with automatic backend selection.
+
+### Quick Start
+
+```python
+from dev_agent_lens.query import query_source, query_parquet
+
+# Auto-detect backend (prefers Parquet for 10-100x faster queries)
+result = query_source(source="my-project")
+print(f"Found {result.total_spans} spans in {result.total_sessions} sessions")
+
+# Filter by various criteria
+result = query_source(
+    source="my-project",
+    session_id="abc123",           # Specific session
+    status_code="ERROR",           # Filter by status
+    model_name="claude",           # Case-insensitive partial match
+    pattern=r"TICKET-\d+",         # Regex pattern search
+)
+
+# Export to different formats
+from dev_agent_lens.query import export_csv, export_json, export_markdown
+csv_output = export_csv(result)
+```
+
+### Query Examples
+
+```python
+from dev_agent_lens.query import query_parquet, get_parquet_stats, find_parquet_files
+
+# Discover available data sources
+sources = find_parquet_files()
+# → {'my-project': {'spans': Path(...), 'sessions': Path(...)}, ...}
+
+# Get file statistics without loading data
+stats = get_parquet_stats("~/.dal/data/parquet/my-project_spans.parquet")
+# → {'row_count': 1925899, 'session_count': 21487, 'file_size_bytes': 1879535936}
+
+# Query with filters (uses DuckDB for fast columnar queries)
+result = query_parquet(
+    spans_path="~/.dal/data/parquet/my-project_spans.parquet",
+    status_code="ERROR",
+    model_name="claude",
+    limit=500,
+)
+
+# Regex search across span content
+result = query_parquet(
+    spans_path="~/.dal/data/parquet/my-project_spans.parquet",
+    pattern=r"TODO|FIXME",
+    case_insensitive=True,
+)
+
+# Time range filtering
+result = query_parquet(
+    spans_path="~/.dal/data/parquet/my-project_spans.parquet",
+    start_time="2024-01-01T00:00:00",
+    end_time="2024-01-31T23:59:59",
+)
+```
+
+### Performance
+
+The Parquet backend provides significant performance improvements over JSONL:
+
+| Dataset Size | Rows | Query Time |
+|--------------|------|------------|
+| ~2 MB | 2,500 | 0.03-0.12s |
+| ~30 MB | 22,000 | 0.15-0.22s |
+| ~1.8 GB | 1.9M | 2.5-4.5s |
+
+Parquet files are also 97% smaller than JSONL (52 GB → 1.8 GB with ZSTD compression).
+
+### Available Functions
+
+| Function | Description |
+|----------|-------------|
+| `query_source()` | Auto-select backend, query by source name |
+| `query_parquet()` | Direct Parquet query with DuckDB |
+| `search_parquet()` | Regex search on Parquet data |
+| `find_parquet_files()` | Discover available Parquet sources |
+| `get_parquet_stats()` | Get file statistics without loading |
+| `export_json()` | Export results to JSON |
+| `export_csv()` | Export results to CSV |
+| `export_markdown()` | Export results to Markdown table |
+
 ## Benefits
 
 - **Complete Observability**: Full visibility into Claude Code usage
