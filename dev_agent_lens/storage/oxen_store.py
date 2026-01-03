@@ -33,8 +33,8 @@ Legacy Structure (v1 - flat):
         └── sync_state.json
 
 Oxen Integration:
-    Only the unified/ directory is committed to Oxen. Raw sync files are
-    too large for version control and are kept local-only.
+    The unified/ and parquet/ directories are committed to Oxen. Raw sync
+    files are too large for version control and are kept local-only.
 """
 
 from __future__ import annotations
@@ -393,10 +393,10 @@ class OxenStore:
 
     def commit(self, message: str) -> bool:
         """
-        Commit unified session files to Oxen.
+        Commit unified session files and Parquet exports to Oxen.
 
-        Only commits files from the unified/ directory. Raw sync files
-        are too large for version control and are kept local-only.
+        Commits files from the unified/ and parquet/ directories. Raw sync
+        files are too large for version control and are kept local-only.
 
         Args:
             message: Commit message.
@@ -407,16 +407,24 @@ class OxenStore:
         if not self.oxen_enabled:
             return False
 
-        # Ensure unified directory exists
+        # Ensure directories exist
         if not self._unified_base.exists():
             self._unified_base.mkdir(parents=True, exist_ok=True)
+
+        parquet_dir = self._data_path / "parquet"
 
         try:
             import oxen
 
             repo = oxen.Repo(str(self._data_path))
-            # Only add the unified directory, not raw files
+
+            # Add unified directory
             repo.add(str(self._unified_base.relative_to(self._data_path)))
+
+            # Add parquet directory if it exists and has files
+            if parquet_dir.exists() and any(parquet_dir.iterdir()):
+                repo.add("parquet")
+
             try:
                 repo.commit(message)
             except Exception as e:
