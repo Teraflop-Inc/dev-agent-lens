@@ -203,9 +203,35 @@ class TestExtractSessionIdFromSpan:
         result = extract_session_id_from_span(span)
         assert result == "pandas789"
 
-    def test_span_without_session(self):
-        """Given span without session info, returns None."""
+    def test_span_without_session_or_trace_id(self):
+        """Given span without session info or trace_id, returns None."""
         span = {"span_id": "span1", "name": "test"}
+        result = extract_session_id_from_span(span)
+        assert result is None
+
+    def test_span_with_trace_id_fallback(self):
+        """Given span without session pattern but with trace_id, uses trace_id."""
+        span = {
+            "span_id": "span1",
+            "trace_id": "trace-abc-123-def",
+            "name": "test",
+        }
+        result = extract_session_id_from_span(span)
+        assert result == "trace-abc-123-def"
+
+    def test_span_session_pattern_takes_priority_over_trace_id(self):
+        """Given span with both session pattern and trace_id, session pattern wins."""
+        span = {
+            "span_id": "span1",
+            "trace_id": "trace-abc-123",
+            "metadata": {"user_id": "session_explicit456"},
+        }
+        result = extract_session_id_from_span(span)
+        assert result == "explicit456"
+
+    def test_span_with_nan_trace_id(self):
+        """Given span with NaN trace_id, returns None."""
+        span = {"span_id": "span1", "trace_id": float("nan")}
         result = extract_session_id_from_span(span)
         assert result is None
 

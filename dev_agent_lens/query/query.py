@@ -247,6 +247,59 @@ def query(
     if not spans_list:
         return QueryResult(query_params=query_params)
 
+    # Check if data is already pre-grouped sessions (has 'spans' field with list)
+    is_pregrouped = (
+        spans_list
+        and "spans" in spans_list[0]
+        and isinstance(spans_list[0].get("spans"), list)
+    )
+
+    if is_pregrouped and not flat:
+        # Data is already grouped into sessions, return as-is (with filtering if needed)
+        sessions = []
+        for s in spans_list:
+            session_spans = s.get("spans", [])
+
+            # Apply session filter
+            if session_id is not None:
+                if s.get("session_id") != session_id:
+                    continue
+
+            # Apply status filter to spans
+            if status_code is not None:
+                session_spans = [sp for sp in session_spans if sp.get("status_code") == status_code]
+                if not session_spans:
+                    continue
+
+            # Apply model filter to spans
+            if model_name is not None:
+                model_lower = model_name.lower()
+                session_spans = [
+                    sp for sp in session_spans
+                    if model_lower in (sp.get("llm_model_name") or "").lower()
+                ]
+                if not session_spans:
+                    continue
+
+            # Get time range
+            start_times = [sp.get("start_time") for sp in session_spans if sp.get("start_time")]
+            end_times = [sp.get("end_time") for sp in session_spans if sp.get("end_time")]
+
+            sessions.append({
+                "session_id": s.get("session_id"),
+                "spans": session_spans,
+                "span_count": len(session_spans),
+                "start_time": min(start_times) if start_times else s.get("start_time"),
+                "end_time": max(end_times) if end_times else s.get("end_time"),
+            })
+
+        return QueryResult(
+            sessions=sessions,
+            total_spans=sum(s["span_count"] for s in sessions),
+            total_sessions=len(sessions),
+            query_params=query_params,
+        )
+
     # Apply filters in order (most selective first for efficiency)
 
     # Session filter (usually very selective)
@@ -347,3 +400,119 @@ def query_file(
         flat=flat,
         file_path=file_path,
     )
+
+
+def query_sessions(
+    storage_path: str | Path | None = None,
+    search: str | None = None,
+    session_id: str | None = None,
+    start_time: datetime | str | None = None,
+    end_time: datetime | str | None = None,
+    source: str | None = None,
+    prefer_parquet: bool = True,
+) -> list[dict]:
+    """
+    Query sessions from storage with automatic backend detection.
+
+    This is a high-level convenience function for business-level queries.
+    It automatically uses the configured storage path and returns
+    session dictionaries with their spans.
+
+    The function will automatically use Parquet backend (10-100x faster) when:
+    - A source is specified and Parquet files exist for that source
+    - prefer_parquet=True (default)
+
+    Falls back to JSONL when Parquet is not available.
+
+    Args:
+        storage_path: Optional storage path override. Uses default if None.
+        search: Search string to filter sessions (searches input/output values)
+        session_id: Filter to specific session ID
+        start_time: Filter sessions starting after this time
+        end_time: Filter sessions starting before this time
+        source: Source name to query (e.g., "my-project"). When provided,
+            will look for Parquet files first.
+        prefer_parquet: If True (default), prefer Parquet backend when available.
+            Set to False to force JSONL backend.
+
+    Returns:
+        List of session dictionaries, each with:
+            - session_id: Session identifier
+            - spans: List of span dictionaries
+            - span_count: Number of spans
+            - start_time: Session start time
+            - end_time: Session end time
+
+    Example:
+        >>> # Query from specific source (uses Parquet if available)
+        >>> sessions = query_sessions(source="my-project")
+
+        >>> # Find sessions mentioning a ticket
+        >>> sessions = query_sessions(source="my-project", search="TICKET-123")
+
+        >>> # Get specific session
+        >>> sessions = query_sessions(session_id="abc123")
+
+        >>> # Force JSONL backend
+        >>> sessions = query_sessions(source="my-project", prefer_parquet=False)
+    """
+    from dev_agent_lens.storage import get_storage_path
+
+    if storage_path is None:
+        storage_path = get_storage_path()
+
+    storage_path = Path(storage_path)
+
+    # Try Parquet backend first if source is specified and prefer_parquet=True
+    if source and prefer_parquet:
+        try:
+            from dev_agent_lens.query.parquet_query import find_parquet_files, query_parquet
+
+            parquet_files = find_parquet_files(source=source, data_path=storage_path)
+            if source in parquet_files and "spans" in parquet_files[source]:
+                spans_path = parquet_files[source]["spans"]
+                sessions_path = parquet_files[source].get("sessions")
+
+                result = query_parquet(
+                    spans_path=spans_path,
+                    sessions_path=sessions_path,
+                    pattern=search,
+                    session_id=session_id,
+                    start_time=start_time,
+                    end_time=end_time,
+                    case_insensitive=True,
+                )
+                return result.sessions
+        except ImportError:
+            # DuckDB not available, fall through to JSONL
+            pass
+        except Exception:
+            # Parquet query failed, fall through to JSONL
+            pass
+
+    # Fall back to JSONL
+    # Find sessions file
+    sessions_dir = storage_path / "sessions"
+    if not sessions_dir.exists():
+        return []
+
+    # Try current sessions file first
+    sessions_file = sessions_dir / "sessions_current.jsonl"
+    if not sessions_file.exists():
+        # Find most recent sessions file
+        session_files = list(sessions_dir.glob("sessions_*.jsonl"))
+        if not session_files:
+            return []
+        sessions_file = max(session_files, key=lambda p: p.stat().st_mtime)
+
+    # Use pattern search if search string provided
+    result = query(
+        pattern=search,
+        session_id=session_id,
+        start_time=start_time,
+        end_time=end_time,
+        file_path=sessions_file,
+        case_insensitive=True,
+    )
+
+    return result.sessions
