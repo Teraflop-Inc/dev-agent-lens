@@ -23,9 +23,11 @@ dependencies = [
     "arize>=7.0.3",
     "arize-phoenix>=4.0.0",
     "click>=8.0.0",
+    "duckdb>=1.4.3",
     "openai>=2.13.0",
     "oxenai>=0.42.0",
     "pandas>=2.0.0",
+    "pyarrow>=22.0.0",
     "python-dotenv>=1.0.0",
 ]
 
