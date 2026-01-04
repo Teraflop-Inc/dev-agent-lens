@@ -1887,6 +1887,16 @@ def status() -> None:
     is_flag=True,
     help="Show preview without calling LLM",
 )
+@click.option(
+    "--source",
+    type=str,
+    help="Data source to query (e.g., 'phoenix-local-alex', 'arize-ax-alex')",
+)
+@click.option(
+    "--parquet/--no-parquet",
+    default=True,
+    help="Use Parquet backend when available (default: True)",
+)
 def summarize(
     session_id: str,
     model: str | None,
@@ -1894,6 +1904,8 @@ def summarize(
     output: str,
     prompt_file: str | None,
     preview: bool,
+    source: str | None,
+    parquet: bool,
 ) -> None:
     """Generate an LLM-powered summary of a session.
 
@@ -1908,11 +1920,13 @@ def summarize(
         dal summarize abc123 --preview    # Preview without LLM call
 
         dal summarize abc123 --output json
+
+        dal summarize abc123 --source phoenix-local-alex  # Use specific source
     """
     import json as json_lib
     from pathlib import Path
 
-    from dev_agent_lens.query import query
+    from dev_agent_lens.query import query_sessions
     from dev_agent_lens.llm import (
         NoLLMConfigError,
         check_llm_availability,
@@ -1920,28 +1934,18 @@ def summarize(
         summarize_session_sync,
     )
 
-    store = OxenStore()
+    # Query for the session using query_sessions (supports Parquet)
+    sessions = query_sessions(
+        session_id=session_id,
+        source=source,
+        prefer_parquet=parquet,
+    )
 
-    # Find session
-    current_sessions_file = store.sessions_dir / "sessions_current.jsonl"
-    if not current_sessions_file.exists():
-        session_files = list(store.sessions_dir.glob("sessions_*.jsonl"))
-        if session_files:
-            current_sessions_file = max(session_files, key=lambda p: p.stat().st_mtime)
-        else:
-            click.echo(
-                click.style("No session data found. Run 'dal sync' first.", fg="yellow")
-            )
-            return
-
-    # Query for the session
-    result = query(session_id=session_id, file_path=current_sessions_file)
-
-    if not result.sessions:
+    if not sessions:
         click.echo(click.style(f"Session '{session_id}' not found.", fg="red"))
         return
 
-    session = result.sessions[0]
+    session = sessions[0]
 
     # Apply --max-spans
     original_span_count = len(session.get("spans", []))
@@ -2061,6 +2065,16 @@ def summarize(
     is_flag=True,
     help="Skip LLM label generation",
 )
+@click.option(
+    "--source",
+    type=str,
+    help="Data source to query (e.g., 'phoenix-local-alex', 'arize-ax-alex')",
+)
+@click.option(
+    "--parquet/--no-parquet",
+    default=True,
+    help="Use Parquet backend when available (default: True)",
+)
 def cluster(
     sessions: str | None,
     limit: int | None,
@@ -2072,6 +2086,8 @@ def cluster(
     output: str,
     preview: bool,
     no_labels: bool,
+    source: str | None,
+    parquet: bool,
 ) -> None:
     """Cluster sessions by behavioral similarity.
 
@@ -2088,11 +2104,13 @@ def cluster(
         dal cluster --sample 20         # Randomly sample 20 sessions
 
         dal cluster --preview           # Preview without LLM call
+
+        dal cluster --source phoenix-local-alex  # Use specific source
     """
     import json as json_lib
     from pathlib import Path
 
-    from dev_agent_lens.query import query
+    from dev_agent_lens.query import query, query_sessions
     from dev_agent_lens.llm import (
         NoLLMConfigError,
         check_llm_availability,
@@ -2100,32 +2118,24 @@ def cluster(
         get_cluster_preview,
     )
 
-    store = OxenStore()
-
-    # Load sessions
+    # Load sessions - prefer --source with Parquet, fall back to --sessions file
     if sessions:
+        # Explicit file path provided - use legacy query
         file_path = Path(sessions)
+        result = query(file_path=file_path)
+        if not result.sessions:
+            click.echo(click.style("No sessions found.", fg="yellow"))
+            return
+        sessions_to_process = result.sessions
     else:
-        current_sessions_file = store.sessions_dir / "sessions_current.jsonl"
-        if not current_sessions_file.exists():
-            session_files = list(store.sessions_dir.glob("sessions_*.jsonl"))
-            if session_files:
-                current_sessions_file = max(session_files, key=lambda p: p.stat().st_mtime)
-            else:
-                click.echo(
-                    click.style("No session data found. Run 'dal sync' first.", fg="yellow")
-                )
-                return
-        file_path = current_sessions_file
-
-    # Query all sessions
-    result = query(file_path=file_path)
-
-    if not result.sessions:
-        click.echo(click.style("No sessions found.", fg="yellow"))
-        return
-
-    sessions_to_process = result.sessions
+        # Use query_sessions with Parquet support
+        sessions_to_process = query_sessions(
+            source=source,
+            prefer_parquet=parquet,
+        )
+        if not sessions_to_process:
+            click.echo(click.style("No sessions found. Run 'dal sync' first.", fg="yellow"))
+            return
     original_count = len(sessions_to_process)
 
     # Apply --sample first (random sampling)
@@ -2263,6 +2273,16 @@ def cluster(
     is_flag=True,
     help="Show heuristic suggestions only (no LLM)",
 )
+@click.option(
+    "--source",
+    type=str,
+    help="Data source to query (e.g., 'phoenix-local-alex', 'arize-ax-alex')",
+)
+@click.option(
+    "--parquet/--no-parquet",
+    default=True,
+    help="Use Parquet backend when available (default: True)",
+)
 def suggest(
     session_id: str,
     model: str | None,
@@ -2271,6 +2291,8 @@ def suggest(
     output: str,
     prompt_file: str | None,
     preview: bool,
+    source: str | None,
+    parquet: bool,
 ) -> None:
     """Generate improvement suggestions for a session.
 
@@ -2286,11 +2308,13 @@ def suggest(
         dal suggest abc123 --preview            # Heuristic only
 
         dal suggest abc123 --category error     # Focus on errors
+
+        dal suggest abc123 --source phoenix-local-alex  # Use specific source
     """
     import json as json_lib
     from pathlib import Path
 
-    from dev_agent_lens.query import query
+    from dev_agent_lens.query import query_sessions
     from dev_agent_lens.llm import (
         NoLLMConfigError,
         check_llm_availability,
@@ -2298,28 +2322,18 @@ def suggest(
         suggest_improvements_sync,
     )
 
-    store = OxenStore()
+    # Query for the session using query_sessions (supports Parquet)
+    sessions = query_sessions(
+        session_id=session_id,
+        source=source,
+        prefer_parquet=parquet,
+    )
 
-    # Find session
-    current_sessions_file = store.sessions_dir / "sessions_current.jsonl"
-    if not current_sessions_file.exists():
-        session_files = list(store.sessions_dir.glob("sessions_*.jsonl"))
-        if session_files:
-            current_sessions_file = max(session_files, key=lambda p: p.stat().st_mtime)
-        else:
-            click.echo(
-                click.style("No session data found. Run 'dal sync' first.", fg="yellow")
-            )
-            return
-
-    # Query for the session
-    result = query(session_id=session_id, file_path=current_sessions_file)
-
-    if not result.sessions:
+    if not sessions:
         click.echo(click.style(f"Session '{session_id}' not found.", fg="red"))
         return
 
-    session = result.sessions[0]
+    session = sessions[0]
 
     # Apply --max-spans
     original_span_count = len(session.get("spans", []))
