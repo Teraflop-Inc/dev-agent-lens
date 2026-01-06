@@ -2,6 +2,14 @@
 
 A transparent proxy and analysis toolkit for AI coding agents. Capture traces from Claude Code (or any LLM), store them efficiently, and query your agent's behavior.
 
+## Installation
+
+```bash
+git clone <repo-url>
+cd dev-agent-lens
+uv sync
+```
+
 ## What's Here
 
 **1. LiteLLM Proxy** - Routes Claude Code through a local proxy to capture all API calls with OpenTelemetry, sending traces to Phoenix (local) or Arize (cloud).
@@ -27,18 +35,25 @@ See [docs/proxy-setup.md](docs/proxy-setup.md) for OAuth, project switching, and
 
 ## Quick Start: Syncing Data
 
-Pull historical traces from Phoenix or Arize into local Parquet files:
+If you already have traces in Phoenix or Arize (from the proxy or other instrumentation), pull them into local Parquet files for fast querying:
 
 ```bash
-# Sync from Phoenix
-dal sync-historical --source phoenix --project my-project --start 2024-01-01
+# Set credentials for Arize
+export ARIZE_API_KEY=your-api-key
+export ARIZE_SPACE_KEY=your-space-key
 
 # Sync from Arize
 dal sync-historical --source arize --start 2024-01-01
 
+# Or sync from Phoenix (local)
+export DAL_PHOENIX_URL=http://localhost:6006
+dal sync-historical --source phoenix --project my-project --start 2024-01-01
+
 # Export to optimized Parquet format
 dal export-parquet --source my-project
 ```
+
+Data is stored in `~/.dal/data/parquet/`.
 
 See [docs/sync-historical.md](docs/sync-historical.md) for checkpointing, incremental sync, and configuration.
 
