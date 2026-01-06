@@ -35,22 +35,38 @@ See [docs/proxy-setup.md](docs/proxy-setup.md) for OAuth, project switching, and
 
 ## Quick Start: Syncing Data
 
-If you already have traces in Phoenix or Arize (from the proxy or other instrumentation), pull them into local Parquet files for fast querying:
+If you already have traces in Phoenix or Arize (from the proxy or other instrumentation), pull them into local Parquet files for fast querying.
+
+### 1. Configure a source
 
 ```bash
-# Set credentials for Arize
+# For Phoenix (local)
+dal config add-source my-phoenix --type phoenix \
+    --url http://localhost:6006 --project default
+
+# For Arize (cloud)
 export ARIZE_API_KEY=your-api-key
 export ARIZE_SPACE_KEY=your-space-key
+dal config add-source my-arize --type arize --model-id my-model
+```
 
-# Sync from Arize
-dal sync-historical --source arize --start 2024-01-01
+### 2. Sync historical data
 
-# Or sync from Phoenix (local)
-export DAL_PHOENIX_URL=http://localhost:6006
-dal sync-historical --source phoenix --project my-project --start 2024-01-01
+```bash
+# Sync all available data
+dal sync-historical --source my-phoenix
 
-# Export to optimized Parquet format
-dal export-parquet --source my-project
+# Or sync from a specific date
+dal sync-historical --source my-arize --start-date 2024-01-01
+
+# Check sync status
+dal sync-historical --status
+```
+
+### 3. Export to Parquet
+
+```bash
+dal export-parquet --source my-phoenix
 ```
 
 Data is stored in `~/.dal/data/parquet/`.
