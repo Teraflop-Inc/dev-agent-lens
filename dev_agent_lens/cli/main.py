@@ -312,6 +312,8 @@ def sync(
 
         # Fetch spans in batches
         all_spans = []
+        max_fetched_time = None  # Track max timestamp for accurate state update
+        hit_limit = False  # Track if we hit the limit in any batch
         for i, (batch_start, batch_end) in enumerate(batches):
             if batch_days:
                 click.echo(f"  Batch {i+1}/{len(batches)}: {batch_start.date()} to {batch_end.date()}")
@@ -325,6 +327,22 @@ def sync(
             if not batch_df.empty:
                 all_spans.append(batch_df)
                 click.echo(f"    Got {len(batch_df)} spans")
+
+                # Track max timestamp from fetched spans
+                if "start_time" in batch_df.columns:
+                    batch_max = batch_df["start_time"].max()
+                    if batch_max is not None:
+                        if max_fetched_time is None or batch_max > max_fetched_time:
+                            max_fetched_time = batch_max
+
+                # Warn if we hit the limit - data may be truncated
+                if len(batch_df) >= limit:
+                    hit_limit = True
+                    click.echo(click.style(
+                        f"    ⚠️  Hit limit ({limit}), some spans may be missing. "
+                        f"Use sync-historical for complete data.",
+                        fg="yellow"
+                    ))
             else:
                 click.echo(f"    No spans in this batch")
 
@@ -394,8 +412,22 @@ def sync(
             f"Duplicates removed: {report.duplicates_removed}"
         )
 
-        # Update state
-        state.set_last_sync(source_or_backend_id, datetime.now())
+        # Update state - use max fetched timestamp if we hit limit, otherwise now()
+        # This prevents data loss when more spans exist than the limit
+        if hit_limit and max_fetched_time is not None:
+            # Convert pandas Timestamp to datetime if needed
+            if hasattr(max_fetched_time, 'to_pydatetime'):
+                sync_time = max_fetched_time.to_pydatetime()
+            else:
+                sync_time = max_fetched_time
+            state.set_last_sync(source_or_backend_id, sync_time)
+            click.echo(click.style(
+                f"  ⚠️  State set to max fetched time ({sync_time.isoformat()}) due to limit hit. "
+                f"Run sync again to get remaining data.",
+                fg="yellow"
+            ))
+        else:
+            state.set_last_sync(source_or_backend_id, datetime.now())
         click.echo(click.style(f"  [OK] {display_name} sync complete", fg="green"))
 
         return len(spans_df), len(report.new_sessions), len(report.continued_sessions)
