@@ -310,21 +310,40 @@ def sync(
         else:
             batches = [(start_time, end_time)]
 
-        # Fetch spans in batches
+        # Fetch spans in batches, looping until we get all data
         all_spans = []
-        max_fetched_time = None  # Track max timestamp for accurate state update
-        hit_limit = False  # Track if we hit the limit in any batch
+        max_fetched_time = None  # Track max timestamp for state update
+        total_iterations = 0
+        max_iterations = 100  # Safety limit to prevent infinite loops
+
         for i, (batch_start, batch_end) in enumerate(batches):
             if batch_days:
                 click.echo(f"  Batch {i+1}/{len(batches)}: {batch_start.date()} to {batch_end.date()}")
 
-            click.echo(f"  Fetching spans (limit {limit})...")
-            batch_df = client.get_spans_dataframe(
-                start_time=batch_start,
-                end_time=batch_end,
-                limit=limit,
-            )
-            if not batch_df.empty:
+            # Loop within each batch until we get all spans
+            current_start = batch_start
+            batch_iteration = 0
+            keep_fetching = True
+
+            while keep_fetching and total_iterations < max_iterations:
+                total_iterations += 1
+                batch_iteration += 1
+
+                if batch_iteration > 1:
+                    click.echo(f"    Continuation {batch_iteration}: from {current_start.isoformat()}")
+
+                click.echo(f"  Fetching spans (limit {limit})...")
+                batch_df = client.get_spans_dataframe(
+                    start_time=current_start,
+                    end_time=batch_end,
+                    limit=limit,
+                )
+
+                if batch_df.empty:
+                    click.echo(f"    No spans in this range")
+                    keep_fetching = False
+                    break
+
                 all_spans.append(batch_df)
                 click.echo(f"    Got {len(batch_df)} spans")
 
@@ -335,16 +354,27 @@ def sync(
                         if max_fetched_time is None or batch_max > max_fetched_time:
                             max_fetched_time = batch_max
 
-                # Warn if we hit the limit - data may be truncated
+                # Check if we hit the limit - need to continue fetching
                 if len(batch_df) >= limit:
-                    hit_limit = True
+                    # Convert pandas Timestamp to datetime if needed
+                    if hasattr(batch_max, 'to_pydatetime'):
+                        current_start = batch_max.to_pydatetime()
+                    else:
+                        current_start = batch_max
                     click.echo(click.style(
-                        f"    ⚠️  Hit limit ({limit}), some spans may be missing. "
-                        f"Use sync-historical for complete data.",
+                        f"    Hit limit ({limit}), continuing from {current_start.isoformat()}...",
                         fg="yellow"
                     ))
-            else:
-                click.echo(f"    No spans in this batch")
+                    # keep_fetching stays True
+                else:
+                    # Got all spans in this batch
+                    keep_fetching = False
+
+        if total_iterations >= max_iterations:
+            click.echo(click.style(
+                f"  ⚠️  Reached max iterations ({max_iterations}). Some data may be missing.",
+                fg="red"
+            ))
 
         # Combine all batches
         if all_spans:
@@ -358,7 +388,10 @@ def sync(
             click.echo(click.style("  No new spans found", fg="yellow"))
             return 0, 0, 0
 
-        click.echo(f"  Fetched {len(spans_df)} spans")
+        if total_iterations > 1:
+            click.echo(f"  Fetched {len(spans_df)} spans (after {total_iterations} iterations)")
+        else:
+            click.echo(f"  Fetched {len(spans_df)} spans")
 
         # Normalize spans
         click.echo("  Normalizing...")
@@ -412,21 +445,21 @@ def sync(
             f"Duplicates removed: {report.duplicates_removed}"
         )
 
-        # Update state - use max fetched timestamp if we hit limit, otherwise now()
-        # This prevents data loss when more spans exist than the limit
-        if hit_limit and max_fetched_time is not None:
-            # Convert pandas Timestamp to datetime if needed
+        # Update state - use max fetched timestamp if we hit max iterations, otherwise now()
+        if total_iterations >= max_iterations and max_fetched_time is not None:
+            # We hit the safety limit, save where we got to
             if hasattr(max_fetched_time, 'to_pydatetime'):
                 sync_time = max_fetched_time.to_pydatetime()
             else:
                 sync_time = max_fetched_time
             state.set_last_sync(source_or_backend_id, sync_time)
             click.echo(click.style(
-                f"  ⚠️  State set to max fetched time ({sync_time.isoformat()}) due to limit hit. "
+                f"  ⚠️  State set to max fetched time ({sync_time.isoformat()}) due to iteration limit. "
                 f"Run sync again to get remaining data.",
                 fg="yellow"
             ))
         else:
+            # Normal completion - we got all data up to now
             state.set_last_sync(source_or_backend_id, datetime.now())
         click.echo(click.style(f"  [OK] {display_name} sync complete", fg="green"))
 
