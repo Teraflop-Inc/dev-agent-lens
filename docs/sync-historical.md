@@ -47,7 +47,7 @@ dal sync-historical --source my-phoenix --days 30
 | `--days` | Number of days to sync (alternative to start-date) |
 | `--batch-size` | Days per batch, default: 1 |
 | `--batch-hours` | Hours per batch (overrides --batch-size, for high-volume days) |
-| `--limit` | Max spans per batch, default: 50000 |
+| `--limit` | Max spans per batch (default: 50000 for HTTP, 500000 for SQLite) |
 | `--delay` | Delay between API requests in seconds, default: 2.0 |
 | `--timeout` | Timeout per API request in seconds, default: 120 |
 | `--retries` | Retries per batch on failure, default: 3 |
@@ -280,11 +280,17 @@ Use `--sqlite` when:
 - High-volume days fail repeatedly even with auto-subdivision
 - You want faster sync speeds (SQLite is ~10x faster)
 
+**SQLite mode benefits:**
+- **10x higher default limit**: 500,000 spans per batch vs 50,000 for HTTP
+- **Minimal subdivision**: Most days fit in a single batch, no recursive splitting
+- **Complete data capture**: High-volume days are fetched without truncation
+- **Memory-safe**: 500k limit uses ~2-3GB RAM, safe for most systems
+
 **Performance comparison:**
-| Method | Speed | Reliability |
-|--------|-------|-------------|
-| HTTP API | ~50 spans/sec | Can timeout on large queries |
-| SQLite | ~500 spans/sec | Direct database access, no timeouts |
+| Method | Speed | Reliability | Default Limit |
+|--------|-------|-------------|---------------|
+| HTTP API | ~50 spans/sec | Can timeout on large queries | 50,000 |
+| SQLite | ~500 spans/sec | Direct database access, no timeouts | 500,000 |
 
 ### Limitations
 

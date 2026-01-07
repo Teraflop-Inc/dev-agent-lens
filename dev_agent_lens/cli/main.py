@@ -687,8 +687,8 @@ def sync(
 @click.option(
     "--limit",
     type=int,
-    default=50000,
-    help="Maximum spans per batch (default: 50000)",
+    default=None,
+    help="Maximum spans per batch (default: 50000 for HTTP, 500000 for SQLite)",
 )
 @click.option(
     "--timeout",
@@ -784,7 +784,7 @@ def sync_historical(
     end_date: str | None,
     batch_size: int,
     batch_hours: int | None,
-    limit: int,
+    limit: int | None,
     timeout: int,
     backend: str | None,
     retries: int,
@@ -1140,6 +1140,25 @@ def sync_historical(
             fg="cyan",
         ))
 
+    # Set effective limit based on mode
+    # SQLite can handle large queries efficiently, but we still need a memory-safe limit
+    # HTTP API needs lower limits to avoid timeouts and for subdivision to work
+    effective_limit: int | None
+    if limit is not None:
+        # User explicitly specified a limit, use it
+        effective_limit = limit
+    elif use_sqlite:
+        # SQLite mode: high limit (500k) to avoid OOM on very high volume days
+        # ~500k spans ≈ 2-3GB memory, safe for most systems
+        # User can override with --limit if needed
+        effective_limit = 500_000
+    else:
+        # HTTP mode: default to 50000 for safe batching and subdivision
+        effective_limit = 50000
+
+    # Update sync_config with effective limit for state tracking
+    sync_config.limit = effective_limit
+
     # Calculate estimated batches (may increase with auto-subdivision)
     total_duration = sync_end_time - sync_start_time
     estimated_batches = max(1, int(total_duration / batch_duration) + 1)
@@ -1151,7 +1170,7 @@ def sync_historical(
         click.echo(f"Backends (legacy): {', '.join(backends_to_sync)}")
     click.echo(f"Date range: {sync_start_time.strftime('%Y-%m-%d')} to {sync_end_time.strftime('%Y-%m-%d')}")
     click.echo(f"Batch size: {batch_description} (~{estimated_batches} batches)")
-    click.echo(f"Limit per batch: {limit:,}")
+    click.echo(f"Limit per batch: {'unlimited' if effective_limit is None else f'{effective_limit:,}'}")
     click.echo(f"Auto-subdivide: {'disabled' if no_auto_subdivide else 'enabled'}")
     click.echo(f"Timeout: {timeout}s")
     click.echo(f"Retries per batch: {retries}")
@@ -1242,7 +1261,7 @@ def sync_historical(
                 batch_df = client.get_spans_dataframe(
                     start_time=batch_start,
                     end_time=batch_end,
-                    limit=limit,
+                    limit=effective_limit,
                 )
                 break  # Success
             except Exception as e:
@@ -1263,7 +1282,8 @@ def sync_historical(
         batch_count = len(batch_df)
 
         # Check if we hit the limit and should subdivide
-        if batch_count >= limit and not no_auto_subdivide:
+        # (skip subdivision check if effective_limit is None - unlimited mode)
+        if effective_limit is not None and batch_count >= effective_limit and not no_auto_subdivide:
             window_size = batch_end - batch_start
             if window_size > MIN_SUBDIVISION:
                 # Subdivide into two halves
