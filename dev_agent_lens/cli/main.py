@@ -14,6 +14,7 @@ Commands:
 
 from __future__ import annotations
 
+import logging
 import os
 import time
 from datetime import datetime
@@ -21,8 +22,12 @@ from typing import Any
 
 import click
 
+# Set up logging for the CLI module
+logger = logging.getLogger(__name__)
+
 from dev_agent_lens.clients.arize import ArizeClient
 from dev_agent_lens.clients.phoenix import PhoenixClient
+from dev_agent_lens.clients.phoenix_sqlite import PhoenixSQLiteClient
 from dev_agent_lens.core.schema import (
     normalize_arize,
     normalize_phoenix,
@@ -107,9 +112,9 @@ def main():
     help="Push to Oxen remote after sync (requires OXEN_REMOTE_URL)",
 )
 @click.option(
-    "--skip-annotations",
+    "--with-annotations",
     is_flag=True,
-    help="Skip fetching annotations (faster sync)",
+    help="Also fetch annotations (slower, disabled by default)",
 )
 @click.option(
     "--limit",
@@ -135,17 +140,37 @@ def main():
     default=30,
     help="Timeout in seconds for each API request (default: 30, increase for large batches)",
 )
+@click.option(
+    "--start-date",
+    type=str,
+    default=None,
+    help="Start date for sync (YYYY-MM-DD). Overrides --days and last sync state.",
+)
+@click.option(
+    "--end-date",
+    type=str,
+    default=None,
+    help="End date for sync (YYYY-MM-DD). Default: now.",
+)
+@click.option(
+    "--no-update-state",
+    is_flag=True,
+    help="Don't update last_sync state after sync. Useful for filling gaps without affecting incremental sync.",
+)
 def sync(
     full: bool,
     source_name: str | None,
     backend: str | None,
     all_sources: bool,
     push: bool,
-    skip_annotations: bool,
+    with_annotations: bool,
     limit: int,
     days: int,
     batch_days: int | None,
     timeout: int,
+    start_date: str | None,
+    end_date: str | None,
+    no_update_state: bool,
 ) -> None:
     """Sync trace data from configured sources or backends.
 
@@ -162,7 +187,9 @@ def sync(
 
         dal sync --full                 # Full sync, ignore state
 
-        dal sync --backend arize        # [Deprecated] Use --source instead
+        dal sync --start-date 2024-12-01 --end-date 2024-12-05  # Sync specific range
+
+        dal sync --start-date 2024-12-01 --no-update-state      # Fill gap without updating state
 
         dal sync --push                 # Sync and push to Oxen remote
     """
@@ -245,8 +272,8 @@ def sync(
     click.echo(f"Time range: {days} days")
     if batch_days:
         click.echo(f"Batch size: {batch_days} days per batch")
-    if skip_annotations:
-        click.echo("Annotations: skipped")
+    if with_annotations:
+        click.echo("Annotations: enabled")
     click.echo()
 
     # Initialize components
@@ -265,6 +292,36 @@ def sync(
     from datetime import timedelta
     import pandas as pd
 
+    # Parse date range parameters
+    parsed_start_date: datetime | None = None
+    parsed_end_date: datetime | None = None
+
+    if start_date:
+        try:
+            parsed_start_date = datetime.strptime(start_date, "%Y-%m-%d")
+            click.echo(f"Using start date: {start_date}")
+        except ValueError:
+            click.echo(click.style(f"Error: Invalid start-date format '{start_date}'. Use YYYY-MM-DD.", fg="red"))
+            raise SystemExit(1)
+
+    if end_date:
+        try:
+            end_date_parsed = datetime.strptime(end_date, "%Y-%m-%d")
+            # If end date is today, use now() to get current time
+            if end_date_parsed.date() == datetime.now().date():
+                parsed_end_date = datetime.now()
+                click.echo(f"Using end date: today (now)")
+            else:
+                # For past dates, use end of day
+                parsed_end_date = end_date_parsed.replace(hour=23, minute=59, second=59)
+                click.echo(f"Using end date: {end_date} (end of day)")
+        except ValueError:
+            click.echo(click.style(f"Error: Invalid end-date format '{end_date}'. Use YYYY-MM-DD.", fg="red"))
+            raise SystemExit(1)
+
+    if no_update_state:
+        click.echo(click.style("State will NOT be updated after sync", fg="yellow"))
+
     # Helper function to sync a single source/backend
     def sync_single(
         source_or_backend_id: str,
@@ -279,8 +336,14 @@ def sync(
         click.echo(f"[{display_name}] Starting sync...")
 
         # Calculate time range
-        end_time = datetime.now()
-        if full:
+        # Priority: --start-date/--end-date > --full > last_sync > --days
+        end_time = parsed_end_date if parsed_end_date else datetime.now()
+
+        if parsed_start_date:
+            # Explicit date range overrides everything
+            start_time = parsed_start_date
+            click.echo(f"  Date range: {start_time.date()} to {end_time.date()}")
+        elif full:
             start_time = end_time - timedelta(days=days)
             click.echo(f"  Full sync: last {days} days")
         else:
@@ -402,8 +465,8 @@ def sync(
         raw_file = source_store.append_spans(normalized, backend=source_or_backend_id)
         click.echo(f"  Saved to: {raw_file.name}")
 
-        # Fetch annotations for Phoenix
-        if not skip_annotations and is_phoenix:
+        # Fetch annotations for Phoenix (opt-in)
+        if with_annotations and is_phoenix:
             click.echo("  Fetching annotations...")
             try:
                 annotations_df = client.get_span_annotations_dataframe(
@@ -446,7 +509,12 @@ def sync(
         )
 
         # Update state - use max fetched timestamp if we hit max iterations, otherwise now()
-        if total_iterations >= max_iterations and max_fetched_time is not None:
+        if no_update_state:
+            click.echo(click.style(
+                f"  State NOT updated (--no-update-state flag)",
+                fg="yellow"
+            ))
+        elif total_iterations >= max_iterations and max_fetched_time is not None:
             # We hit the safety limit, save where we got to
             if hasattr(max_fetched_time, 'to_pydatetime'):
                 sync_time = max_fetched_time.to_pydatetime()
@@ -666,10 +734,48 @@ def sync(
     help="Clear any existing checkpoint and start fresh",
 )
 @click.option(
+    "--force-resume",
+    is_flag=True,
+    help="Resume existing checkpoint regardless of date range specified",
+)
+@click.option(
+    "--clean",
+    is_flag=True,
+    help="Clean up completed sync state files (use with --status to see what would be cleaned)",
+)
+@click.option(
     "--status",
     "show_status",
     is_flag=True,
     help="Show status of in-progress historical syncs without syncing",
+)
+@click.option(
+    "--history",
+    "show_history",
+    is_flag=True,
+    help="Include completed syncs in --status output (shows last sync times from SyncState)",
+)
+@click.option(
+    "--with-annotations",
+    is_flag=True,
+    help="Also fetch annotations (slower, disabled by default)",
+)
+@click.option(
+    "--verbose", "-v",
+    is_flag=True,
+    help="Enable verbose logging for debugging sync issues",
+)
+@click.option(
+    "--sqlite",
+    is_flag=True,
+    help="Use direct SQLite access instead of HTTP API (Phoenix only, requires local Docker)",
+)
+@click.option(
+    "--sqlite-container",
+    type=str,
+    default=None,
+    help="Docker container name for SQLite access (e.g., 'dev-agent-lens-phoenix-1'). "
+         "Overrides source config sqlite_container setting.",
 )
 def sync_historical(
     source_name: str | None,
@@ -687,7 +793,14 @@ def sync_historical(
     delay: float,
     resume: bool,
     reset: bool,
+    force_resume: bool,
+    clean: bool,
     show_status: bool,
+    show_history: bool,
+    with_annotations: bool,
+    verbose: bool,
+    sqlite: bool,
+    sqlite_container: str | None,
 ) -> None:
     """Sync all historical trace data from a source.
 
@@ -705,6 +818,12 @@ def sync_historical(
     - Progress tracking: See ETA and percentage complete
     - State integration: After completion, regular 'dal sync' picks up from here
 
+    Phoenix Tips (high-volume sources):
+    - Use --limit 10000 for more frequent checkpoints and reliable syncing
+    - Use --delay 5 to avoid overwhelming the Phoenix server
+    - Auto-subdivide handles busy days automatically (splits time windows recursively)
+    - If you see connection errors, reduce --limit and increase --delay
+
     Examples:
 
         dal sync-historical --source arize-ax-alex      # Sync everything (simplest)
@@ -716,6 +835,9 @@ def sync_historical(
         dal sync-historical --source arize-ax-alex --reset  # Start over
 
         dal sync-historical --start-date 2025-11-01     # From specific date
+
+        # Phoenix with high volume - use lower limit and delay
+        dal sync-historical --source my-phoenix --limit 10000 --delay 5
     """
     from datetime import timedelta
     import pandas as pd
@@ -723,38 +845,129 @@ def sync_historical(
     from dev_agent_lens.core.historical_sync import (
         HistoricalSyncState,
         SyncConfig,
+        SyncStatus,
         list_historical_syncs,
         clear_historical_sync,
     )
 
-    # Handle --status flag: show status and exit
-    if show_status:
+    # Configure logging based on --verbose flag
+    if verbose:
+        logging.basicConfig(
+            level=logging.DEBUG,
+            format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+            datefmt="%H:%M:%S",
+        )
+        # Also enable debug for our modules
+        logging.getLogger("dev_agent_lens").setLevel(logging.DEBUG)
+        click.echo(click.style("Verbose logging enabled", fg="cyan"))
+        click.echo()
+
+    # Handle --clean flag: delete completed sync state files
+    if clean:
         syncs = list_historical_syncs()
-        if not syncs:
-            click.echo("No historical syncs in progress.")
+        completed_syncs = [s for s in syncs if s.get_status() == SyncStatus.COMPLETE]
+
+        if not completed_syncs:
+            click.echo("No completed syncs to clean up.")
             return
 
-        click.echo(click.style("Historical Sync Status", bold=True))
-        click.echo()
-        for sync_state in syncs:
-            progress = sync_state.progress_percent
-            eta = sync_state.get_eta()
-            eta_str = f" (ETA: {eta})" if eta else ""
-
-            if sync_state.is_complete:
-                status = click.style("complete", fg="green")
-            elif sync_state.current_batch:
-                status = click.style("in progress", fg="yellow")
+        for sync_state in completed_syncs:
+            if sync_state.delete():
+                click.echo(f"Cleaned up: {sync_state.source}")
             else:
-                status = click.style("paused", fg="cyan")
+                click.echo(f"Failed to clean: {sync_state.source}")
 
-            click.echo(f"  {sync_state.source}: {progress:.1f}% {status}{eta_str}")
-            click.echo(f"    Range: {sync_state.target_start.strftime('%Y-%m-%d')} to {sync_state.target_end.strftime('%Y-%m-%d')}")
-            click.echo(f"    Spans: {sync_state.stats.total_spans:,}")
-            click.echo(f"    Batches: {sync_state.stats.batches_completed} completed, {sync_state.stats.batches_failed} failed")
-            if sync_state.stats.subdivisions > 0:
-                click.echo(f"    Subdivisions: {sync_state.stats.subdivisions}")
+        click.echo(f"\nCleaned {len(completed_syncs)} completed sync state file(s).")
+        return
+
+    # Handle --status flag: show status and exit
+    if show_status or show_history:
+        syncs = list_historical_syncs()
+        has_in_progress = bool(syncs)
+
+        if has_in_progress:
+            click.echo(click.style("Historical Sync Status", bold=True))
             click.echo()
+            for sync_state in syncs:
+                progress = sync_state.progress_percent
+                eta = sync_state.get_eta()
+                eta_str = f" (ETA: {eta})" if eta else ""
+
+                # Use the new get_status() method for better status detection
+                status_code = sync_state.get_status()
+                if status_code == SyncStatus.COMPLETE:
+                    status = click.style("complete", fg="green")
+                elif status_code == SyncStatus.INCOMPLETE:
+                    status = click.style("incomplete", fg="red")
+                elif status_code == SyncStatus.IN_PROGRESS:
+                    status = click.style("in progress", fg="yellow")
+                elif status_code == SyncStatus.STALE:
+                    status = click.style("stale (process died)", fg="red")
+                else:
+                    status = click.style("paused", fg="cyan")
+
+                click.echo(f"  {sync_state.source}: {progress:.1f}% {status}{eta_str}")
+                click.echo(f"    Range: {sync_state.target_start.strftime('%Y-%m-%d')} to {sync_state.target_end.strftime('%Y-%m-%d')}")
+                click.echo(f"    Spans: {sync_state.stats.total_spans:,}")
+
+                # Show run info if available (for in_progress or stale syncs)
+                if sync_state.current_run:
+                    run_info = f"    Run: {sync_state.current_run.run_id}"
+                    if status_code == SyncStatus.IN_PROGRESS:
+                        run_info += f" (PID: {sync_state.current_run.pid})"
+                    elif status_code == SyncStatus.STALE:
+                        run_info += f" (PID: {sync_state.current_run.pid} - dead)"
+                    click.echo(run_info)
+
+                # Show remaining ranges count for clearer progress
+                remaining_ranges = sync_state.get_remaining_ranges()
+                click.echo(f"    Batches: {sync_state.stats.batches_completed} completed, {sync_state.stats.batches_failed} failed")
+                if remaining_ranges:
+                    click.echo(f"    Remaining gaps: {len(remaining_ranges)}")
+                if sync_state.failed_ranges:
+                    click.echo(f"    Failed ranges pending retry: {len(sync_state.failed_ranges)}")
+                if sync_state.stats.subdivisions > 0:
+                    click.echo(f"    Subdivisions: {sync_state.stats.subdivisions}")
+                click.echo()
+
+        # Show completed syncs from SyncState if --history is specified
+        if show_history:
+            from dev_agent_lens.core.state import SyncState
+            from dev_agent_lens.core.sources import SourceManager
+
+            sync_state_obj = SyncState()
+            source_manager = SourceManager()
+            all_sources = source_manager.list_sources()
+
+            # Get sources with completed syncs (have last_sync but no in-progress checkpoint)
+            in_progress_sources = {s.source for s in syncs}
+            completed_sources = []
+
+            for source in all_sources:
+                last_sync = sync_state_obj.get_last_sync(source.name)
+                if last_sync and source.name not in in_progress_sources:
+                    completed_sources.append((source, last_sync))
+
+            if completed_sources:
+                if has_in_progress:
+                    click.echo()
+                click.echo(click.style("Completed Historical Syncs", bold=True))
+                click.echo()
+                for source, last_sync in sorted(completed_sources, key=lambda x: x[1], reverse=True):
+                    status = click.style("completed", fg="green")
+                    click.echo(f"  {source.name}: {status}")
+                    click.echo(f"    Last sync: {last_sync.strftime('%Y-%m-%d %H:%M:%S')}")
+                    click.echo(f"    Type: {source.source_type.value}")
+                    click.echo(f"    Backend: {source.get_display_info()}")
+                    click.echo()
+            elif not has_in_progress:
+                click.echo("No historical syncs found (in-progress or completed).")
+                click.echo("Use 'dal sync-historical --source <name>' to start a sync.")
+                return
+
+        if not has_in_progress and not show_history:
+            click.echo("No historical syncs in progress.")
+            click.echo("Tip: Use --history to see completed syncs.")
         return
 
     sync_start = time.time()
@@ -812,7 +1025,13 @@ def sync_historical(
     # Parse date range
     if end_date:
         try:
-            sync_end_time = datetime.strptime(end_date, "%Y-%m-%d").replace(hour=23, minute=59, second=59)
+            end_date_parsed = datetime.strptime(end_date, "%Y-%m-%d")
+            # If end date is today, use now() to get current time
+            if end_date_parsed.date() == datetime.now().date():
+                sync_end_time = datetime.now()
+            else:
+                # For past dates, use end of day
+                sync_end_time = end_date_parsed.replace(hour=23, minute=59, second=59)
         except ValueError:
             click.echo(click.style(f"Error: Invalid end-date format '{end_date}'. Use YYYY-MM-DD.", fg="red"))
             raise SystemExit(1)
@@ -871,6 +1090,56 @@ def sync_historical(
         delay=delay,
     )
 
+    # Handle --sqlite flag: validate and resolve container name
+    use_sqlite = False
+    resolved_sqlite_container: str | None = None
+
+    if sqlite or sqlite_container:
+        # SQLite mode requested - validate
+        if use_legacy_mode:
+            click.echo(click.style(
+                "Error: --sqlite is not supported with legacy backends. Use --source instead.",
+                fg="red",
+            ))
+            raise SystemExit(1)
+
+        if len(sources_to_sync) > 1:
+            click.echo(click.style(
+                "Error: --sqlite only supports a single source at a time.",
+                fg="red",
+            ))
+            raise SystemExit(1)
+
+        source = sources_to_sync[0]
+
+        if source.source_type != SourceType.PHOENIX:
+            click.echo(click.style(
+                f"Error: --sqlite only works with Phoenix sources ('{source.name}' is {source.source_type.value}).",
+                fg="red",
+            ))
+            raise SystemExit(1)
+
+        # Resolve container name: CLI flag > source config > error
+        resolved_sqlite_container = sqlite_container or source.sqlite_container
+
+        if not resolved_sqlite_container:
+            click.echo(click.style(
+                f"Error: --sqlite requires a Docker container name.\n"
+                f"  Either:\n"
+                f"    1. Use --sqlite-container <name> (e.g., --sqlite-container dev-agent-lens-phoenix-1)\n"
+                f"    2. Add sqlite_container to source config:\n"
+                f"       dal config add-source {source.name} phoenix --url {source.url or 'URL'} "
+                f"--sqlite-container CONTAINER_NAME",
+                fg="red",
+            ))
+            raise SystemExit(1)
+
+        use_sqlite = True
+        click.echo(click.style(
+            f"SQLite mode: Using direct database access via container '{resolved_sqlite_container}'",
+            fg="cyan",
+        ))
+
     # Calculate estimated batches (may increase with auto-subdivision)
     total_duration = sync_end_time - sync_start_time
     estimated_batches = max(1, int(total_duration / batch_duration) + 1)
@@ -898,21 +1167,68 @@ def sync_historical(
     # Minimum subdivision window (1 hour) to prevent infinite recursion
     MIN_SUBDIVISION = timedelta(hours=1)
 
-    # Helper function to fetch with auto-subdivision
+    def pre_subdivide_ranges(
+        ranges: list[tuple[datetime, datetime]],
+        initial_window: timedelta,
+    ) -> list[tuple[datetime, datetime]]:
+        """Pre-subdivide ranges into smaller chunks for aggressive querying.
+
+        When a batch has failed multiple times, we pre-subdivide into smaller
+        time windows before making any Phoenix queries. This helps Phoenix
+        handle high-volume days by never asking for the full 24h at once.
+
+        Args:
+            ranges: List of (start, end) tuples to subdivide
+            initial_window: The maximum window size for each chunk
+
+        Returns:
+            List of (start, end) tuples, each no larger than initial_window
+        """
+        if initial_window <= timedelta(0):
+            return ranges
+
+        result = []
+        for range_start, range_end in ranges:
+            range_duration = range_end - range_start
+            if range_duration <= initial_window:
+                # Already small enough
+                result.append((range_start, range_end))
+            else:
+                # Subdivide into chunks of initial_window size
+                current = range_start
+                while current < range_end:
+                    chunk_end = min(current + initial_window, range_end)
+                    result.append((current, chunk_end))
+                    current = chunk_end
+
+        return result
+
+    # Helper function to fetch with auto-subdivision and incremental persistence
     def fetch_with_subdivision(
         client,
         batch_start: datetime,
         batch_end: datetime,
         depth: int = 0,
         is_first_request: bool = True,
-    ) -> tuple[list, int]:
+        # Incremental persistence context (optional - if provided, saves immediately)
+        store: OxenStore | None = None,
+        checkpoint_state: HistoricalSyncState | None = None,
+        normalizer: callable | None = None,
+        backend_name: str | None = None,
+        batch_key: str | None = None,
+    ) -> tuple[list, int, int]:
         """Fetch spans, auto-subdividing if limit is hit.
 
-        Returns (list of dataframes, subdivision_count)
+        When incremental persistence context is provided (store, checkpoint_state, etc.),
+        each successful sub-batch is saved immediately to disk and recorded in state.
+        This prevents data loss when later sub-batches fail.
+
+        Returns (list of dataframes, subdivision_count, spans_saved_incrementally)
         """
         nonlocal total_subdivisions
 
         indent = "    " * depth if depth > 0 else ""
+        incremental_mode = store is not None and checkpoint_state is not None
 
         # Add delay between requests (except for the very first one)
         if not is_first_request and delay > 0:
@@ -939,10 +1255,10 @@ def sync_historical(
         if batch_df is None:
             if last_error:
                 raise last_error
-            return [], 0
+            return [], 0, 0
 
         if hasattr(batch_df, "empty") and batch_df.empty:
-            return [], 0
+            return [], 0, 0
 
         batch_count = len(batch_df)
 
@@ -961,10 +1277,19 @@ def sync_historical(
                               click.style(f"hit limit, subdividing...", fg="yellow"))
 
                 # Fetch both halves recursively (neither is first request anymore)
-                left_dfs, left_subs = fetch_with_subdivision(client, batch_start, midpoint, depth + 1, is_first_request=False)
-                right_dfs, right_subs = fetch_with_subdivision(client, midpoint, batch_end, depth + 1, is_first_request=False)
+                # Pass incremental persistence context down
+                left_dfs, left_subs, left_saved = fetch_with_subdivision(
+                    client, batch_start, midpoint, depth + 1, is_first_request=False,
+                    store=store, checkpoint_state=checkpoint_state, normalizer=normalizer,
+                    backend_name=backend_name, batch_key=batch_key,
+                )
+                right_dfs, right_subs, right_saved = fetch_with_subdivision(
+                    client, midpoint, batch_end, depth + 1, is_first_request=False,
+                    store=store, checkpoint_state=checkpoint_state, normalizer=normalizer,
+                    backend_name=backend_name, batch_key=batch_key,
+                )
 
-                return left_dfs + right_dfs, left_subs + right_subs + 1
+                return left_dfs + right_dfs, left_subs + right_subs + 1, left_saved + right_saved
             else:
                 # Can't subdivide further, warn user
                 if depth == 0:
@@ -972,13 +1297,47 @@ def sync_historical(
                 else:
                     click.echo(f"{indent}→ {batch_start.strftime('%H:%M')}-{batch_end.strftime('%H:%M')}: " +
                               click.style(f"{batch_count:,} spans (at limit)", fg="yellow"))
-                return [batch_df], 0
 
-        # Normal case: didn't hit limit
+                # In incremental mode, save this sub-batch immediately
+                if incremental_mode and batch_key:
+                    try:
+                        if normalizer:
+                            try:
+                                normalized = normalizer(batch_df)
+                                store.append_spans(normalized, backend=backend_name)
+                            except Exception:
+                                store.append_spans(batch_df, backend=f"{backend_name}-raw")
+                        else:
+                            store.append_spans(batch_df, backend=backend_name)
+                        checkpoint_state.add_partial_range(batch_key, batch_start, batch_end, batch_count)
+                        return [], 0, batch_count  # Return empty list since data is saved
+                    except Exception as save_err:
+                        click.echo(click.style(f" WARN: failed to save partial: {save_err}", fg="yellow"))
+
+                return [batch_df], 0, 0
+
+        # Normal case: didn't hit limit (this is a leaf sub-batch)
         if depth > 0:
             click.echo(f"{indent}→ {batch_start.strftime('%H:%M')}-{batch_end.strftime('%H:%M')}: " +
                       click.style(f"{batch_count:,} spans", fg="green"))
-        return [batch_df], 0
+
+            # In incremental mode, save this sub-batch immediately
+            if incremental_mode and batch_key:
+                try:
+                    if normalizer:
+                        try:
+                            normalized = normalizer(batch_df)
+                            store.append_spans(normalized, backend=backend_name)
+                        except Exception:
+                            store.append_spans(batch_df, backend=f"{backend_name}-raw")
+                    else:
+                        store.append_spans(batch_df, backend=backend_name)
+                    checkpoint_state.add_partial_range(batch_key, batch_start, batch_end, batch_count)
+                    return [], 0, batch_count  # Return empty list since data is saved
+                except Exception as save_err:
+                    click.echo(click.style(f" WARN: failed to save partial: {save_err}", fg="yellow"))
+
+        return [batch_df], 0, 0
 
     # Helper function to process a single source/backend
     def process_historical_sync(
@@ -988,6 +1347,7 @@ def sync_historical(
         normalizer: callable,
         store: OxenStore,
         is_phoenix: bool = False,
+        sqlite_client=None,  # Pre-created SQLite client (overrides client_class if provided)
     ) -> tuple[int, int, int]:
         """Process historical sync and return (spans, completed, failed)."""
 
@@ -997,6 +1357,7 @@ def sync_historical(
             target_start=sync_start_time,
             target_end=sync_end_time,
             config=sync_config,
+            force_resume=force_resume,
         )
 
         if is_resuming and resume:
@@ -1006,9 +1367,12 @@ def sync_historical(
         else:
             click.echo(f"[{display_name}] Starting historical sync...")
 
-        # Create client with timeout
+        # Create client with timeout (or use pre-created SQLite client)
         try:
-            if is_phoenix:
+            if sqlite_client is not None:
+                client = sqlite_client
+                click.echo(f"  Using SQLite direct access")
+            elif is_phoenix:
                 client = client_class(timeout=float(timeout))
             else:
                 client = client_class()
@@ -1037,11 +1401,19 @@ def sync_historical(
         # Sort by end time descending (most recent first)
         batches.sort(key=lambda x: x[1], reverse=True)
 
-        if not batches:
+        # Also get previously failed batches from checkpoint for retry
+        persisted_failed_ranges = [
+            (r.start, r.end) for r in checkpoint_state.failed_ranges
+        ]
+
+        if not batches and not persisted_failed_ranges:
             click.echo(click.style(f"  No batches to process.", fg="yellow"))
             return checkpoint_state.stats.total_spans, checkpoint_state.stats.batches_completed, 0
 
-        click.echo(f"  Processing {len(batches)} batches sequentially...")
+        if batches:
+            click.echo(f"  Processing {len(batches)} batches sequentially...")
+        if persisted_failed_ranges:
+            click.echo(click.style(f"  {len(persisted_failed_ranges)} previously failed batches to retry", fg="cyan"))
 
         # Show ETA if resuming
         if is_resuming and resume:
@@ -1069,59 +1441,170 @@ def sync_historical(
             overall_progress = checkpoint_state.progress_percent
             retry_tag = click.style(" [retry]", fg="cyan") if is_retry else ""
 
+            # Check for existing partial ranges (from previous interrupted subdivisions)
+            batch_key = batch_start.strftime("%Y-%m-%d %H:%M:%S")
+            partial_spans = checkpoint_state.get_partial_spans_count(batch_key)
+            unfetched_ranges = checkpoint_state.get_unfetched_ranges(batch_start, batch_end)
+
+            # If we have partial progress, show it
+            partial_tag = ""
+            if partial_spans > 0:
+                partial_tag = click.style(f" [resuming, {partial_spans:,} spans already saved]", fg="cyan")
+
             click.echo(
                 f"  [{overall_progress:.0f}%] Batch {batch_num}/{total}: "
-                f"{batch_start.strftime(time_format)} to {batch_end.strftime(time_format)}{retry_tag}",
+                f"{batch_start.strftime(time_format)} to {batch_end.strftime(time_format)}{retry_tag}{partial_tag}",
                 nl=False,
             )
+
+            # If all ranges are already fetched, complete immediately
+            if not unfetched_ranges:
+                logger.info(f"Batch {batch_key}: All ranges already fetched, completing from partials")
+                total_spans = checkpoint_state.complete_partial_day(batch_key, batch_start, batch_end)
+                source_spans += total_spans
+                click.echo(click.style(f" {total_spans:,} spans (from partial ranges)", fg="green"))
+                completed += 1
+                return True
 
             try:
                 # Mark batch as started in checkpoint
                 checkpoint_state.mark_batch_started(batch_start, batch_end)
+                logger.debug(f"Batch {batch_key}: Starting with {len(unfetched_ranges)} unfetched range(s)")
 
-                # Fetch with auto-subdivision
-                dataframes, subdivisions = fetch_with_subdivision(client, batch_start, batch_end)
+                # Backend name for storage
+                backend_name = f"{name}-historical"
 
-                if not dataframes:
-                    click.echo(click.style(" (no data)", fg="yellow"))
-                    # Mark as completed even if no data (we've processed this range)
-                    checkpoint_state.mark_batch_completed(batch_start, batch_end, 0)
-                    completed += 1
-                    return True
+                # Check failure history for aggressive pre-subdivision
+                failure_count = checkpoint_state.get_failure_count(batch_key)
+                batch_duration = batch_end - batch_start
+                recommended_window = checkpoint_state.get_recommended_initial_window(batch_key, batch_duration)
 
-                # Combine all dataframes from this batch (including subdivisions)
-                if len(dataframes) == 1:
-                    combined_df = dataframes[0]
-                else:
-                    combined_df = pd.concat(dataframes, ignore_index=True)
-
-                batch_count = len(combined_df)
-                source_spans += batch_count
-
-                # Save results
-                if skip_normalize:
-                    store.append_spans(combined_df, backend=f"{name}-historical")
-                else:
-                    try:
-                        normalized = normalizer(combined_df)
-                        store.append_spans(normalized, backend=f"{name}-historical")
-                    except Exception as e:
+                # If we need aggressive subdivision, pre-split ranges before querying
+                ranges_to_fetch = unfetched_ranges
+                if failure_count > 0 and recommended_window < batch_duration:
+                    ranges_to_fetch = pre_subdivide_ranges(unfetched_ranges, recommended_window)
+                    if len(ranges_to_fetch) > len(unfetched_ranges):
+                        click.echo()
                         click.echo(
-                            click.style(f" WARN: normalize failed, saving raw - {e}", fg="yellow")
+                            f"    {click.style('Aggressive mode:', fg='cyan')} "
+                            f"{failure_count} failures → pre-splitting into {len(ranges_to_fetch)} chunks "
+                            f"(max {recommended_window.total_seconds() / 3600:.1f}h each)"
                         )
-                        store.append_spans(combined_df, backend=f"{name}-historical-raw")
 
-                # Show result (if we didn't subdivide, show count here)
-                if subdivisions == 0:
-                    click.echo(click.style(f" {batch_count:,} spans", fg="green"))
+                # Process each unfetched range
+                all_dataframes = []
+                total_subdivisions_batch = 0
+                total_saved_incrementally = partial_spans  # Start with already-saved spans
+
+                # In aggressive mode, save each chunk immediately to prevent data loss
+                aggressive_mode = failure_count > 0 and len(ranges_to_fetch) > len(unfetched_ranges)
+
+                for chunk_idx, (range_start, range_end) in enumerate(ranges_to_fetch):
+                    logger.debug(f"Fetching range: {range_start.strftime('%Y-%m-%d %H:%M')} to {range_end.strftime('%Y-%m-%d %H:%M')}")
+                    # Fetch with auto-subdivision and incremental persistence
+                    # Pass context so sub-batches are saved immediately
+                    dataframes, subdivisions, saved_incrementally = fetch_with_subdivision(
+                        client, range_start, range_end,
+                        store=store,
+                        checkpoint_state=checkpoint_state,
+                        normalizer=None if skip_normalize else normalizer,
+                        backend_name=backend_name,
+                        batch_key=batch_key,
+                    )
+                    total_subdivisions_batch += subdivisions
+                    total_saved_incrementally += saved_incrementally
+
+                    # In aggressive mode, save each chunk's DataFrames immediately
+                    # This ensures we don't lose progress if a later chunk fails
+                    if aggressive_mode and dataframes:
+                        for df in dataframes:
+                            try:
+                                df_count = len(df)
+                                if skip_normalize:
+                                    store.append_spans(df, backend=backend_name)
+                                else:
+                                    try:
+                                        normalized = normalizer(df)
+                                        store.append_spans(normalized, backend=backend_name)
+                                    except Exception:
+                                        store.append_spans(df, backend=f"{backend_name}-raw")
+                                checkpoint_state.add_partial_range(batch_key, range_start, range_end, df_count)
+                                total_saved_incrementally += df_count
+                                click.echo(
+                                    f"    [chunk {chunk_idx + 1}/{len(ranges_to_fetch)}] "
+                                    f"{range_start.strftime('%H:%M')}-{range_end.strftime('%H:%M')}: "
+                                    + click.style(f"{df_count:,} spans saved", fg="green")
+                                )
+                            except Exception as save_err:
+                                click.echo(click.style(f"    WARN: failed to save chunk: {save_err}", fg="yellow"))
+                                all_dataframes.extend(dataframes)  # Keep for later attempt
+                    else:
+                        all_dataframes.extend(dataframes)
+
+                # Handle any remaining dataframes not saved incrementally (non-subdivided data)
+                if all_dataframes:
+                    if len(all_dataframes) == 1:
+                        combined_df = all_dataframes[0]
+                    else:
+                        combined_df = pd.concat(all_dataframes, ignore_index=True)
+
+                    batch_count = len(combined_df)
+
+                    # Save results (only the non-incrementally-saved portion)
+                    if skip_normalize:
+                        store.append_spans(combined_df, backend=backend_name)
+                    else:
+                        try:
+                            normalized = normalizer(combined_df)
+                            store.append_spans(normalized, backend=backend_name)
+                        except Exception as e:
+                            click.echo(
+                                click.style(f" WARN: normalize failed, saving raw - {e}", fg="yellow")
+                            )
+                            store.append_spans(combined_df, backend=f"{backend_name}-raw")
+
+                    total_saved_incrementally += batch_count
+
+                # Total spans for this batch (incremental + final)
+                batch_total = total_saved_incrementally
+                source_spans += batch_total - partial_spans  # Don't double-count partial_spans
+
+                # Fetch annotations for Phoenix (opt-in) - only for non-incrementally saved data
+                annotations_count = 0
+                if with_annotations and is_phoenix and all_dataframes:
+                    try:
+                        combined_for_annotations = pd.concat(all_dataframes, ignore_index=True) if len(all_dataframes) > 1 else all_dataframes[0]
+                        annotations_df = client.get_span_annotations_dataframe(
+                            spans_dataframe=combined_for_annotations,
+                        )
+                        if not annotations_df.empty:
+                            normalized_annotations = normalize_phoenix_annotations(annotations_df)
+                            store.append_spans(
+                                normalized_annotations,
+                                backend=f"{name}-historical-annotations",
+                            )
+                            annotations_count = len(annotations_df)
+                    except Exception as ann_err:
+                        click.echo(
+                            click.style(f" WARN: annotations fetch failed - {ann_err}", fg="yellow")
+                        )
+
+                # Clear partial ranges and mark batch as completed
+                checkpoint_state.clear_partial_ranges(batch_key)
+
+                # Show result
+                annotations_suffix = f", {annotations_count:,} annotations" if annotations_count > 0 else ""
+                if total_subdivisions_batch == 0 and partial_spans == 0:
+                    click.echo(click.style(f" {batch_total:,} spans{annotations_suffix}", fg="green"))
                 else:
-                    click.echo(f"    Total: " + click.style(f"{batch_count:,} spans", fg="green") +
-                              f" (from {subdivisions + 1} sub-batches)")
+                    sub_count = total_subdivisions_batch + (1 if partial_spans > 0 else 0)
+                    click.echo(f"    Total: " + click.style(f"{batch_total:,} spans{annotations_suffix}", fg="green") +
+                              f" (from {sub_count + 1} sub-batches)")
 
                 # Mark batch as completed in checkpoint
-                checkpoint_state.mark_batch_completed(batch_start, batch_end, batch_count)
-                if subdivisions > 0:
-                    for _ in range(subdivisions):
+                checkpoint_state.mark_batch_completed(batch_start, batch_end, batch_total)
+                if total_subdivisions_batch > 0:
+                    for _ in range(total_subdivisions_batch):
                         checkpoint_state.add_subdivision()
 
                 completed += 1
@@ -1132,10 +1615,13 @@ def sync_historical(
 
             except Exception as e:
                 error_str = str(e).lower()
+                partial_saved = checkpoint_state.get_partial_spans_count(batch_key)
                 if "rate" in error_str or "limit" in error_str or "exhausted" in error_str:
                     click.echo(click.style(f" RATE LIMITED - will retry later", fg="yellow"))
+                    logger.warning(f"Batch {batch_key}: Rate limited, {partial_saved:,} spans saved before failure")
                 else:
                     click.echo(click.style(f" FAILED: {e}", fg="red"))
+                    logger.error(f"Batch {batch_key}: Failed with error: {e}, {partial_saved:,} spans saved before failure", exc_info=True)
                 checkpoint_state.mark_batch_failed()
                 failed += 1
                 return False
@@ -1195,6 +1681,44 @@ def sync_historical(
                 if len(still_failed) > 5:
                     click.echo(f"    ... and {len(still_failed) - 5} more")
 
+        # Retry pass for previously failed batches (from earlier runs)
+        if persisted_failed_ranges:
+            click.echo()
+            click.echo(click.style(f"  Retrying {len(persisted_failed_ranges)} previously failed batches...", fg="cyan"))
+            persisted_retry_delay = max(delay * 5, 10.0)  # At least 10 seconds between retries
+
+            persisted_still_failed = []
+            try:
+                for i, (batch_start, batch_end) in enumerate(persisted_failed_ranges):
+                    # Wait before each retry
+                    if i > 0:
+                        time.sleep(persisted_retry_delay)
+                    else:
+                        time.sleep(persisted_retry_delay)  # Also wait before first retry
+
+                    # Clear from failed_ranges to mark retry attempt
+                    checkpoint_state.clear_failed_range(batch_start, batch_end)
+
+                    success = process_batch(batch_start, batch_end, i + 1, len(persisted_failed_ranges), is_retry=True)
+                    if not success:
+                        persisted_still_failed.append((batch_start, batch_end))
+
+            except KeyboardInterrupt:
+                click.echo()
+                click.echo(click.style("  Interrupted during persisted retry! Progress saved.", fg="yellow"))
+                click.echo(f"  Resume with: dal sync-historical --source {name}")
+                raise SystemExit(130)
+
+            if persisted_still_failed:
+                click.echo()
+                click.echo(click.style(f"  {len(persisted_still_failed)} previously failed batches still failed:", fg="red"))
+                for batch_start, batch_end in persisted_still_failed[:5]:
+                    click.echo(f"    - {batch_start.strftime('%Y-%m-%d')} to {batch_end.strftime('%Y-%m-%d')}")
+                if len(persisted_still_failed) > 5:
+                    click.echo(f"    ... and {len(persisted_still_failed) - 5} more")
+            else:
+                click.echo(click.style(f"  All {len(persisted_failed_ranges)} previously failed batches recovered!", fg="green"))
+
         click.echo()
         click.echo(f"  [{display_name}] Total: {source_spans:,} spans")
 
@@ -1210,11 +1734,36 @@ def sync_historical(
         source_store = OxenStore.for_source(source.name)
 
         # Set up environment and determine client/normalizer
+        sqlite_client = None  # Pre-created SQLite client if using SQLite mode
+
         if source.source_type == SourceType.PHOENIX:
             if source.url:
                 os.environ["DAL_PHOENIX_URL"] = source.url
             if source.project:
                 os.environ["DAL_PHOENIX_PROJECT"] = source.project
+
+            # Use SQLite client if enabled
+            if use_sqlite and resolved_sqlite_container:
+                db_path = f"docker://{resolved_sqlite_container}:/root/.phoenix/phoenix.db"
+                sqlite_client = PhoenixSQLiteClient(
+                    db_path=db_path,
+                    project=source.project or os.getenv("DAL_PHOENIX_PROJECT", "dev-agent-lens"),
+                )
+                # Test connection before proceeding
+                try:
+                    if not sqlite_client.test_connection():
+                        click.echo(click.style(
+                            f"Error: Could not connect to Phoenix SQLite database in container '{resolved_sqlite_container}'",
+                            fg="red",
+                        ))
+                        raise SystemExit(1)
+                except Exception as e:
+                    click.echo(click.style(
+                        f"Error: SQLite connection test failed: {e}",
+                        fg="red",
+                    ))
+                    raise SystemExit(1)
+
             client_class = PhoenixClient
             normalizer = normalize_phoenix
             is_phoenix = True
@@ -1234,6 +1783,7 @@ def sync_historical(
             normalizer,
             source_store,
             is_phoenix=is_phoenix,
+            sqlite_client=sqlite_client,
         )
         total_spans += spans
         total_batches_completed += completed
@@ -1406,6 +1956,10 @@ def config_show() -> None:
     default=True,
     help="Mark as local-only (won't sync to Oxen) or shared",
 )
+@click.option(
+    "--sqlite-container",
+    help="Docker container name for direct SQLite access (Phoenix only)",
+)
 def config_add_source(
     name: str,
     source_type: str,
@@ -1414,6 +1968,7 @@ def config_add_source(
     space_key: str | None,
     model_id: str | None,
     local_only: bool,
+    sqlite_container: str | None,
 ) -> None:
     """Add a new named source.
 
@@ -1422,6 +1977,8 @@ def config_add_source(
         dal config add-source phoenix-local --type phoenix --url localhost:6006
 
         dal config add-source arize-team --type arize --space-key ABC --model-id my-model --shared
+
+        dal config add-source phoenix-docker --type phoenix --url localhost:6006 --sqlite-container dev-agent-lens-phoenix-1
     """
     from dev_agent_lens.core.sources import SourceConfig, SourceManager, SourceType
 
@@ -1432,6 +1989,7 @@ def config_add_source(
         local_only=local_only,
         url=url,
         project=project,
+        sqlite_container=sqlite_container,
         space_key=space_key,
         model_id=model_id,
     )
@@ -4183,6 +4741,349 @@ def clean_sessions(
         f"({stats['savings_percent']:.1f}%)"
     )
     click.echo(f"  Output: {final_path}")
+
+
+@main.command("purge")
+@click.option(
+    "--source",
+    "source_name",
+    type=str,
+    default=None,
+    help="Source name to purge (e.g., phoenix-local-alex)",
+)
+@click.option(
+    "--all",
+    "all_sources",
+    is_flag=True,
+    help="Purge all sources",
+)
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    help="Show what would be deleted without actually deleting",
+)
+@click.option(
+    "--force",
+    "-f",
+    is_flag=True,
+    help="Skip confirmation prompt",
+)
+def purge(
+    source_name: str | None,
+    all_sources: bool,
+    dry_run: bool,
+    force: bool,
+) -> None:
+    """Delete all data files for a source.
+
+    Shows files that would be deleted and their sizes. By default, prompts
+    for confirmation before deleting. Use --dry-run to preview without
+    deleting, or --force to skip the confirmation prompt.
+
+    Data locations purged:
+    - ~/.dal/state/historical-sync-{source}.json (sync state)
+    - ~/.dal/data/raw/{source}/ (raw JSONL data)
+    - ~/.dal/data/parquet/{source}_*.parquet (Parquet exports)
+    - ~/.dal/data/unified/{source}_*.jsonl (unified format)
+
+    Examples:
+
+        dal purge --source phoenix-local-alex --dry-run
+
+        dal purge --source phoenix-local-alex
+
+        dal purge --all --dry-run
+    """
+    from dataclasses import dataclass
+    from pathlib import Path
+    import shutil
+
+    from dev_agent_lens.storage import get_storage_path
+
+    @dataclass
+    class FileInfo:
+        path: Path
+        size: int
+        category: str
+
+        @property
+        def size_str(self) -> str:
+            if self.size >= 1024 * 1024 * 1024:
+                return f"{self.size / 1024 / 1024 / 1024:.1f}GB"
+            elif self.size >= 1024 * 1024:
+                return f"{self.size / 1024 / 1024:.1f}MB"
+            elif self.size >= 1024:
+                return f"{self.size / 1024:.1f}KB"
+            return f"{self.size}B"
+
+    def discover_source_files(source: str) -> list[FileInfo]:
+        """Discover all files associated with a source."""
+        files: list[FileInfo] = []
+        storage_path = get_storage_path()
+        dal_home = Path.home() / ".dal"
+
+        # State files: ~/.dal/state/historical-sync-{source}.json
+        state_dir = dal_home / "state"
+        state_file = state_dir / f"historical-sync-{source}.json"
+        if state_file.exists():
+            files.append(FileInfo(
+                path=state_file,
+                size=state_file.stat().st_size,
+                category="State files",
+            ))
+
+        # Raw data: ~/.dal/data/raw/{source}/
+        raw_dir = storage_path / "raw" / source
+        if raw_dir.exists() and raw_dir.is_dir():
+            for raw_file in raw_dir.iterdir():
+                if raw_file.is_file():
+                    files.append(FileInfo(
+                        path=raw_file,
+                        size=raw_file.stat().st_size,
+                        category="Raw data",
+                    ))
+
+        # Parquet files: ~/.dal/data/parquet/{source}_*.parquet
+        parquet_dir = storage_path / "parquet"
+        if parquet_dir.exists():
+            for parquet_file in parquet_dir.glob(f"{source}_*.parquet"):
+                files.append(FileInfo(
+                    path=parquet_file,
+                    size=parquet_file.stat().st_size,
+                    category="Parquet files",
+                ))
+
+        # Unified files: ~/.dal/data/unified/{source}_*.jsonl
+        unified_dir = storage_path / "unified"
+        if unified_dir.exists():
+            for unified_file in unified_dir.glob(f"{source}_*.jsonl"):
+                files.append(FileInfo(
+                    path=unified_file,
+                    size=unified_file.stat().st_size,
+                    category="Unified files",
+                ))
+
+        return files
+
+    def get_all_sources() -> set[str]:
+        """Discover all sources with data."""
+        sources: set[str] = set()
+        storage_path = get_storage_path()
+        dal_home = Path.home() / ".dal"
+
+        # From state files
+        state_dir = dal_home / "state"
+        if state_dir.exists():
+            for state_file in state_dir.glob("historical-sync-*.json"):
+                # Extract source name from filename
+                name = state_file.stem.replace("historical-sync-", "")
+                sources.add(name)
+
+        # From raw directories
+        raw_dir = storage_path / "raw"
+        if raw_dir.exists():
+            for subdir in raw_dir.iterdir():
+                if subdir.is_dir() and not subdir.name.startswith("."):
+                    sources.add(subdir.name)
+
+        # From parquet files
+        parquet_dir = storage_path / "parquet"
+        if parquet_dir.exists():
+            for parquet_file in parquet_dir.glob("*_sessions.parquet"):
+                name = parquet_file.stem.replace("_sessions", "")
+                sources.add(name)
+            for parquet_file in parquet_dir.glob("*_spans.parquet"):
+                name = parquet_file.stem.replace("_spans", "")
+                sources.add(name)
+
+        # From unified files
+        unified_dir = storage_path / "unified"
+        if unified_dir.exists():
+            for unified_file in unified_dir.glob("*_sessions.jsonl"):
+                name = unified_file.stem.replace("_sessions", "")
+                sources.add(name)
+
+        return sources
+
+    def display_files(source: str, files: list[FileInfo]) -> int:
+        """Display files grouped by category, return total size."""
+        if not files:
+            click.echo(f"  No files found for source '{source}'")
+            return 0
+
+        # Group by category
+        by_category: dict[str, list[FileInfo]] = {}
+        for f in files:
+            if f.category not in by_category:
+                by_category[f.category] = []
+            by_category[f.category].append(f)
+
+        total_size = 0
+        for category in ["State files", "Raw data", "Parquet files", "Unified files"]:
+            if category not in by_category:
+                continue
+            click.echo(f"\n  {category}:")
+            for f in sorted(by_category[category], key=lambda x: x.path.name):
+                # Show path relative to home
+                rel_path = str(f.path).replace(str(Path.home()), "~")
+                click.echo(f"    {rel_path} ({f.size_str})")
+                total_size += f.size
+
+        return total_size
+
+    # Validation
+    if not source_name and not all_sources:
+        click.echo(
+            click.style(
+                "Error: Must specify --source or --all",
+                fg="red",
+            )
+        )
+        raise SystemExit(1)
+
+    if source_name and all_sources:
+        click.echo(
+            click.style(
+                "Error: Cannot use both --source and --all",
+                fg="red",
+            )
+        )
+        raise SystemExit(1)
+
+    # Determine sources to process
+    if all_sources:
+        sources = sorted(get_all_sources())
+        if not sources:
+            click.echo("No sources found with data.")
+            return
+    else:
+        sources = [source_name]
+
+    # Discover files for all sources
+    all_files: dict[str, list[FileInfo]] = {}
+    grand_total = 0
+    file_count = 0
+
+    for source in sources:
+        files = discover_source_files(source)
+        if files:
+            all_files[source] = files
+            for f in files:
+                grand_total += f.size
+                file_count += 1
+
+    if not all_files:
+        if all_sources:
+            click.echo("No data files found for any source.")
+        else:
+            click.echo(f"No data files found for source '{source_name}'.")
+        return
+
+    # Display what would be deleted
+    if dry_run:
+        click.echo(
+            click.style(
+                "Files that would be deleted:",
+                fg="cyan",
+                bold=True,
+            )
+        )
+    else:
+        click.echo(
+            click.style(
+                "Files to be deleted:",
+                fg="yellow",
+                bold=True,
+            )
+        )
+
+    for source in sorted(all_files.keys()):
+        click.echo(f"\nSource: {click.style(source, fg='white', bold=True)}")
+        display_files(source, all_files[source])
+
+    # Summary
+    click.echo()
+    if grand_total >= 1024 * 1024 * 1024:
+        total_str = f"{grand_total / 1024 / 1024 / 1024:.1f}GB"
+    elif grand_total >= 1024 * 1024:
+        total_str = f"{grand_total / 1024 / 1024:.1f}MB"
+    elif grand_total >= 1024:
+        total_str = f"{grand_total / 1024:.1f}KB"
+    else:
+        total_str = f"{grand_total}B"
+
+    click.echo(f"Total: {file_count} files, {total_str}")
+
+    if dry_run:
+        click.echo()
+        if all_sources:
+            click.echo("To delete these files, run: dal purge --all")
+        else:
+            click.echo(f"To delete these files, run: dal purge --source {source_name}")
+        return
+
+    # Confirmation
+    if not force:
+        click.echo()
+        if not click.confirm(
+            click.style("Are you sure you want to delete these files?", fg="yellow"),
+            default=False,
+        ):
+            click.echo("Aborted.")
+            return
+
+    # Delete files
+    click.echo()
+    deleted_count = 0
+    deleted_size = 0
+    errors: list[str] = []
+
+    for source in sorted(all_files.keys()):
+        for f in all_files[source]:
+            try:
+                if f.path.is_dir():
+                    shutil.rmtree(f.path)
+                else:
+                    f.path.unlink()
+                deleted_count += 1
+                deleted_size += f.size
+            except OSError as e:
+                errors.append(f"  {f.path}: {e}")
+
+        # Also remove empty raw directory
+        storage_path = get_storage_path()
+        raw_dir = storage_path / "raw" / source
+        if raw_dir.exists() and raw_dir.is_dir():
+            try:
+                # Only remove if empty
+                if not any(raw_dir.iterdir()):
+                    raw_dir.rmdir()
+            except OSError:
+                pass  # Ignore if not empty or other errors
+
+    # Report results
+    if deleted_size >= 1024 * 1024 * 1024:
+        deleted_str = f"{deleted_size / 1024 / 1024 / 1024:.1f}GB"
+    elif deleted_size >= 1024 * 1024:
+        deleted_str = f"{deleted_size / 1024 / 1024:.1f}MB"
+    elif deleted_size >= 1024:
+        deleted_str = f"{deleted_size / 1024:.1f}KB"
+    else:
+        deleted_str = f"{deleted_size}B"
+
+    click.echo(
+        click.style(
+            f"Deleted {deleted_count} files ({deleted_str})",
+            fg="green",
+            bold=True,
+        )
+    )
+
+    if errors:
+        click.echo()
+        click.echo(click.style("Errors:", fg="red"))
+        for error in errors:
+            click.echo(error)
 
 
 if __name__ == "__main__":
