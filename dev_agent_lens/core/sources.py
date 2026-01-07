@@ -66,6 +66,7 @@ class SourceConfig:
     # Phoenix-specific
     url: str | None = None
     project: str | None = None
+    sqlite_container: str | None = None  # Docker container name for direct SQLite access
 
     # Arize-specific
     space_key: str | None = None
@@ -86,6 +87,8 @@ class SourceConfig:
                 data["url"] = self.url
             if self.project:
                 data["project"] = self.project
+            if self.sqlite_container:
+                data["sqlite_container"] = self.sqlite_container
         elif self.source_type == SourceType.ARIZE:
             if self.space_key:
                 data["space_key"] = self.space_key
@@ -108,6 +111,7 @@ class SourceConfig:
             local_only=data.get("local_only", True),
             url=data.get("url"),
             project=data.get("project"),
+            sqlite_container=data.get("sqlite_container"),
             space_key=data.get("space_key"),
             model_id=data.get("model_id"),
             api_key_env=data.get("api_key_env"),
