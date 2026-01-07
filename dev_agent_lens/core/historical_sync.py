@@ -149,7 +149,7 @@ class SyncConfig:
 
     batch_hours: int | None = None
     batch_days: int = 7
-    limit: int = 50000
+    limit: int | None = 50000  # None means unlimited (SQLite mode)
     timeout: int = 60
     delay: float = 1.0
 
@@ -167,7 +167,7 @@ class SyncConfig:
         return cls(
             batch_hours=data.get("batch_hours"),
             batch_days=data.get("batch_days", 7),
-            limit=data.get("limit", 50000),
+            limit=data.get("limit", 50000),  # Default to 50000 for backward compat
             timeout=data.get("timeout", 60),
             delay=data.get("delay", 1.0),
         )
