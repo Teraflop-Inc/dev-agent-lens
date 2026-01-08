@@ -664,3 +664,124 @@ class TestQuerySessionsParquetBackend:
         span_ids = {s.get("span_id") for s in session["spans"]}
         assert "span1" in span_ids
         assert "span2" in span_ids
+
+
+class TestSearchAllParquetSources:
+    """Tests for the _search_all_parquet_sources auto-detect functionality."""
+
+    def test_search_all_sources_finds_session(self, sample_parquet_source):
+        """Auto-detect finds session without specifying source."""
+        from dev_agent_lens.query.query import _search_all_parquet_sources
+
+        sessions = _search_all_parquet_sources(
+            session_id="session_abc123",
+            data_path=sample_parquet_source,
+        )
+
+        assert len(sessions) == 1
+        assert sessions[0]["session_id"] == "session_abc123"
+        assert sessions[0]["span_count"] == 2
+
+    def test_search_all_sources_not_found(self, sample_parquet_source):
+        """Auto-detect returns empty when session not found."""
+        from dev_agent_lens.query.query import _search_all_parquet_sources
+
+        sessions = _search_all_parquet_sources(
+            session_id="nonexistent_session",
+            data_path=sample_parquet_source,
+        )
+
+        assert sessions == []
+
+    def test_search_all_sources_no_parquet_files(self, tmp_path):
+        """Auto-detect returns empty when no Parquet files exist."""
+        from dev_agent_lens.query.query import _search_all_parquet_sources
+
+        sessions = _search_all_parquet_sources(
+            session_id="any_session",
+            data_path=tmp_path,
+        )
+
+        assert sessions == []
+
+    def test_search_all_sources_with_search_pattern(self, sample_parquet_source):
+        """Auto-detect with search pattern filters results."""
+        from dev_agent_lens.query.query import _search_all_parquet_sources
+
+        sessions = _search_all_parquet_sources(
+            session_id="session_abc123",
+            data_path=sample_parquet_source,
+            search=r"ENG2-\d+",
+        )
+
+        assert len(sessions) == 1
+        assert sessions[0]["session_id"] == "session_abc123"
+
+
+class TestQuerySessionsAutoDetect:
+    """Tests for query_sessions auto-detect functionality."""
+
+    def test_query_sessions_auto_detect_finds_session(self, sample_parquet_source):
+        """query_sessions auto-detects source when only session_id provided."""
+        from dev_agent_lens.query.query import query_sessions
+
+        sessions = query_sessions(
+            session_id="session_abc123",
+            storage_path=sample_parquet_source,
+        )
+
+        assert len(sessions) == 1
+        assert sessions[0]["session_id"] == "session_abc123"
+        assert sessions[0]["span_count"] == 2
+
+    def test_query_sessions_auto_detect_not_found_falls_back(self, sample_parquet_source):
+        """query_sessions falls back to JSONL when session not in Parquet."""
+        from dev_agent_lens.query.query import query_sessions
+
+        # Session not in Parquet, will fall back to JSONL (which doesn't exist)
+        sessions = query_sessions(
+            session_id="nonexistent_session",
+            storage_path=sample_parquet_source,
+        )
+
+        # Falls back to JSONL which doesn't exist, returns empty
+        assert sessions == []
+
+    def test_query_sessions_auto_detect_disabled(self, sample_parquet_source):
+        """query_sessions skips auto-detect when prefer_parquet=False."""
+        from dev_agent_lens.query.query import query_sessions
+
+        sessions = query_sessions(
+            session_id="session_abc123",
+            prefer_parquet=False,
+            storage_path=sample_parquet_source,
+        )
+
+        # With prefer_parquet=False, skips auto-detect, falls back to JSONL
+        assert sessions == []
+
+    def test_query_sessions_auto_detect_with_search(self, sample_parquet_source):
+        """query_sessions auto-detect works with search pattern."""
+        from dev_agent_lens.query.query import query_sessions
+
+        sessions = query_sessions(
+            session_id="session_xyz789",
+            search=r"ENG2-456",
+            storage_path=sample_parquet_source,
+        )
+
+        assert len(sessions) == 1
+        assert sessions[0]["session_id"] == "session_xyz789"
+
+    def test_query_sessions_explicit_source_still_works(self, sample_parquet_source):
+        """query_sessions with explicit source bypasses auto-detect."""
+        from dev_agent_lens.query.query import query_sessions
+
+        sessions = query_sessions(
+            source="test-source",
+            session_id="session_abc123",
+            storage_path=sample_parquet_source,
+        )
+
+        assert len(sessions) == 1
+        assert sessions[0]["session_id"] == "session_abc123"
