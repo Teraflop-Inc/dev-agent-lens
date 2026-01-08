@@ -402,6 +402,77 @@ def query_file(
     )
 
 
+def _search_all_parquet_sources(
+    session_id: str,
+    data_path: Path,
+    search: str | None = None,
+    start_time: datetime | str | None = None,
+    end_time: datetime | str | None = None,
+) -> list[dict]:
+    """
+    Search all available Parquet sources in parallel for a session.
+
+    This enables fast session lookups without requiring users to specify
+    which source contains the session. Uses ThreadPoolExecutor to search
+    sources concurrently, returning as soon as a match is found.
+
+    Args:
+        session_id: The session ID to search for
+        data_path: Base data path (e.g., ~/.dal/data)
+        search: Optional search pattern to filter spans
+        start_time: Optional start time filter
+        end_time: Optional end time filter
+
+    Returns:
+        List of session dictionaries if found, empty list otherwise
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    try:
+        from dev_agent_lens.query.parquet_query import find_parquet_files, query_parquet
+    except ImportError:
+        # DuckDB not available
+        return []
+
+    sources = find_parquet_files(data_path=data_path)
+    if not sources:
+        return []
+
+    def search_source(source_name: str, paths: dict) -> list[dict]:
+        """Search a single source for the session."""
+        if "spans" not in paths:
+            return []
+        try:
+            result = query_parquet(
+                spans_path=paths["spans"],
+                sessions_path=paths.get("sessions"),
+                pattern=search,
+                session_id=session_id,
+                start_time=start_time,
+                end_time=end_time,
+                case_insensitive=True,
+            )
+            return result.sessions if result.sessions else []
+        except Exception:
+            return []
+
+    # Search all sources in parallel
+    with ThreadPoolExecutor(max_workers=min(len(sources), 8)) as executor:
+        futures = {
+            executor.submit(search_source, name, paths): name
+            for name, paths in sources.items()
+        }
+        for future in as_completed(futures):
+            sessions = future.result()
+            if sessions:
+                # Cancel remaining futures (best effort)
+                for f in futures:
+                    f.cancel()
+                return sessions
+
+    return []
+
+
 def query_sessions(
     storage_path: str | Path | None = None,
     search: str | None = None,
@@ -420,6 +491,7 @@ def query_sessions(
 
     The function will automatically use Parquet backend (10-100x faster) when:
     - A source is specified and Parquet files exist for that source
+    - A session_id is provided (searches all Parquet sources in parallel)
     - prefer_parquet=True (default)
 
     Falls back to JSONL when Parquet is not available.
@@ -427,11 +499,13 @@ def query_sessions(
     Args:
         storage_path: Optional storage path override. Uses default if None.
         search: Search string to filter sessions (searches input/output values)
-        session_id: Filter to specific session ID
+        session_id: Filter to specific session ID. When provided without a source,
+            will search all available Parquet sources in parallel for fast lookup.
         start_time: Filter sessions starting after this time
         end_time: Filter sessions starting before this time
         source: Source name to query (e.g., "my-project"). When provided,
-            will look for Parquet files first.
+            will look for Parquet files first. If None and session_id is provided,
+            all Parquet sources are searched automatically.
         prefer_parquet: If True (default), prefer Parquet backend when available.
             Set to False to force JSONL backend.
 
@@ -450,7 +524,7 @@ def query_sessions(
         >>> # Find sessions mentioning a ticket
         >>> sessions = query_sessions(source="my-project", search="TICKET-123")
 
-        >>> # Get specific session
+        >>> # Get specific session (auto-searches all Parquet sources)
         >>> sessions = query_sessions(session_id="abc123")
 
         >>> # Force JSONL backend
@@ -462,6 +536,19 @@ def query_sessions(
         storage_path = get_storage_path()
 
     storage_path = Path(storage_path)
+
+    # Auto-detect: search all Parquet sources when session_id provided but no source
+    if source is None and session_id is not None and prefer_parquet:
+        sessions = _search_all_parquet_sources(
+            session_id=session_id,
+            data_path=storage_path,
+            search=search,
+            start_time=start_time,
+            end_time=end_time,
+        )
+        if sessions:
+            return sessions
+        # Fall through to JSONL if not found in any Parquet source
 
     # Try Parquet backend first if source is specified and prefer_parquet=True
     if source and prefer_parquet:

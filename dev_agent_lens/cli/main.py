@@ -3699,32 +3699,25 @@ def session_view(session_id: str, output: str) -> None:
 
     Shows all spans in a session with chronological ordering.
 
+    Automatically searches all Parquet sources for the session (10-100x faster
+    than JSONL). Falls back to JSONL if not found in Parquet.
+
     Examples:
 
         dal session abc123
 
         dal session abc123 --output json
     """
-    from pathlib import Path
+    from dev_agent_lens.query import query_sessions
 
-    from dev_agent_lens.query import query
-    from dev_agent_lens.storage import get_storage_path
+    # Use query_sessions which auto-detects Parquet sources
+    sessions = query_sessions(session_id=session_id)
 
-    storage_path = get_storage_path()
-    sessions_file = Path(storage_path) / "sessions" / "sessions_current.jsonl"
-
-    if not sessions_file.exists():
-        click.echo(click.style("No session data found. Run 'dal sync' first.", fg="red"))
-        raise SystemExit(1)
-
-    # Query for the session
-    result = query(file_path=sessions_file, session_id=session_id)
-
-    if not result.sessions:
+    if not sessions:
         click.echo(click.style(f"Session not found: {session_id}", fg="red"))
         raise SystemExit(1)
 
-    session = result.sessions[0]
+    session = sessions[0]
     spans = session.get("spans", [])
 
     if output == "json":
@@ -3796,7 +3789,7 @@ def _display_token_analysis(
 
 @main.command("analyze-tokens")
 @click.argument("session_id")
-@click.option("--source", "-s", help="Source name to query (uses Parquet if available)")
+@click.option("--source", "-s", help="Source name to query (optional, auto-detects if not specified)")
 @click.option("--parquet/--no-parquet", default=True, help="Use Parquet backend when available")
 @click.option("--output", type=click.Choice(["text", "json"]), default="text", help="Output format")
 def analyze_tokens_cmd(session_id: str, source: str | None, parquet: bool, output: str) -> None:
@@ -3806,8 +3799,8 @@ def analyze_tokens_cmd(session_id: str, source: str | None, parquet: bool, outpu
     - Input: tool calls, user messages, system prompts
     - Output: model-generated tokens
 
-    Uses Parquet backend (10-100x faster) when --source is specified
-    and Parquet files exist. Falls back to JSONL otherwise.
+    Automatically searches all Parquet sources for the session (10-100x faster
+    than JSONL). Falls back to JSONL if not found in Parquet.
 
     Examples:
 
@@ -3817,57 +3810,19 @@ def analyze_tokens_cmd(session_id: str, source: str | None, parquet: bool, outpu
 
         dal analyze-tokens abc123 --output json
 
-        dal analyze-tokens abc123 --source my-project --no-parquet
+        dal analyze-tokens abc123 --no-parquet
     """
-    from pathlib import Path
-
     from dev_agent_lens.analysis.tokens import analyze_session_tokens, estimate_cost
-    from dev_agent_lens.query import query, query_sessions
-    from dev_agent_lens.storage import get_storage_path
+    from dev_agent_lens.query import query_sessions
 
-    # Try Parquet backend if source specified
-    if source:
-        sessions = query_sessions(source=source, session_id=session_id, prefer_parquet=parquet)
-        if sessions:
-            session = sessions[0]
-            spans = session.get("spans", [])
+    # Use query_sessions which auto-detects Parquet sources
+    sessions = query_sessions(source=source, session_id=session_id, prefer_parquet=parquet)
 
-            # Analyze tokens
-            breakdown = analyze_session_tokens(spans)
-            cost = estimate_cost(breakdown)
-
-            if output == "json":
-                import json
-
-                data = {
-                    "session_id": session_id,
-                    "source": source,
-                    "token_breakdown": breakdown.to_dict(),
-                    "cost_estimate": cost,
-                }
-                click.echo(json.dumps(data, indent=2))
-            else:
-                _display_token_analysis(session_id, breakdown, cost, source=source)
-            return
-
-        click.echo(click.style(f"Session not found in source '{source}': {session_id}", fg="red"))
-        raise SystemExit(1)
-
-    # Fall back to JSONL
-    storage_path = get_storage_path()
-    sessions_file = Path(storage_path) / "sessions" / "sessions_current.jsonl"
-
-    if not sessions_file.exists():
-        click.echo(click.style("No session data found. Run 'dal sync' first.", fg="red"))
-        raise SystemExit(1)
-
-    result = query(file_path=sessions_file, session_id=session_id)
-
-    if not result.sessions:
+    if not sessions:
         click.echo(click.style(f"Session not found: {session_id}", fg="red"))
         raise SystemExit(1)
 
-    session = result.sessions[0]
+    session = sessions[0]
     spans = session.get("spans", [])
 
     # Analyze tokens
