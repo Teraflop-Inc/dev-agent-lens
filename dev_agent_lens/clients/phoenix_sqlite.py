@@ -14,7 +14,7 @@ import sqlite3
 import subprocess
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 import pandas as pd
 
@@ -188,6 +188,59 @@ class PhoenixSQLiteClient:
             ) from e
         except Exception as e:
             raise PhoenixSQLiteQueryError(f"Docker exec failed: {e}") from e
+
+    def _execute_in_docker_streaming(
+        self,
+        container: str,
+        python_code: str,
+        timeout: int = 600,
+    ) -> Iterator[str]:
+        """Execute Python code inside Docker container and stream stdout line by line.
+
+        Args:
+            container: Docker container name
+            python_code: Python code to execute (should print NDJSON)
+            timeout: Timeout in seconds (default: 600 = 10 minutes)
+
+        Yields:
+            Each line of stdout as it's produced
+
+        Raises:
+            PhoenixSQLiteQueryError: If execution fails
+        """
+        try:
+            process = subprocess.Popen(
+                ["docker", "exec", container, "python3", "-u", "-c", python_code],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                bufsize=1,  # Line buffered
+            )
+
+            # Stream stdout line by line
+            for line in process.stdout:  # type: ignore
+                line = line.strip()
+                if line:
+                    yield line
+
+            # Wait for process to complete
+            process.wait(timeout=timeout)
+
+            if process.returncode != 0:
+                stderr = process.stderr.read() if process.stderr else ""  # type: ignore
+                raise PhoenixSQLiteQueryError(
+                    f"Docker exec failed (exit code {process.returncode}): {stderr}"
+                )
+
+        except subprocess.TimeoutExpired as e:
+            process.kill()
+            raise PhoenixSQLiteQueryError(
+                f"Docker exec timed out after {timeout} seconds"
+            ) from e
+        except FileNotFoundError as e:
+            raise PhoenixSQLiteConnectionError(
+                "Docker command not found. Is Docker installed and in PATH?"
+            ) from e
 
     def _execute_query(
         self,
@@ -379,6 +432,136 @@ conn.close()
             except json.JSONDecodeError:
                 return value
         return value
+
+    def get_spans_dataframe_streaming(
+        self,
+        start_time: datetime | None = None,
+        end_time: datetime | None = None,
+        chunk_size: int = 10000,
+    ) -> Iterator[pd.DataFrame]:
+        """Fetch spans as DataFrames in chunks, using streaming to avoid OOM.
+
+        This method is designed for fetching large numbers of spans from Docker
+        without running out of memory. It streams rows one at a time via NDJSON
+        and yields DataFrames in chunks.
+
+        Args:
+            start_time: Filter spans starting at or after this time
+            end_time: Filter spans starting before this time
+            chunk_size: Number of rows per DataFrame chunk (default: 10000)
+
+        Yields:
+            DataFrame chunks with the same schema as get_spans_dataframe()
+
+        Raises:
+            PhoenixSQLiteQueryError: If query execution fails
+        """
+        if not self._is_docker:
+            # For local mode, just use regular method (no streaming needed)
+            df = self.get_spans_dataframe(start_time=start_time, end_time=end_time)
+            if not df.empty:
+                yield df
+            return
+
+        # Build query (no LIMIT/OFFSET - we stream everything)
+        query = """
+            SELECT
+                s.span_id as "context.span_id",
+                t.trace_id as "context.trace_id",
+                s.parent_id,
+                s.name,
+                s.span_kind,
+                s.start_time,
+                s.end_time,
+                s.status_code,
+                s.status_message,
+                s.attributes,
+                s.events,
+                s.cumulative_error_count,
+                s.cumulative_llm_token_count_prompt,
+                s.cumulative_llm_token_count_completion,
+                s.llm_token_count_prompt,
+                s.llm_token_count_completion
+            FROM spans s
+            JOIN traces t ON s.trace_rowid = t.id
+            JOIN projects p ON t.project_rowid = p.id
+            WHERE p.name = ?
+        """
+
+        params: list[Any] = [self.project]
+
+        if start_time is not None:
+            query += " AND s.start_time >= ?"
+            params.append(start_time.isoformat())
+
+        if end_time is not None:
+            query += " AND s.start_time < ?"
+            params.append(end_time.isoformat())
+
+        query += " ORDER BY s.start_time ASC"
+
+        # Build Python code that streams NDJSON (one JSON object per line)
+        python_code = f'''
+import sqlite3
+import json
+import sys
+
+conn = sqlite3.connect({json.dumps(self._container_db_path)})
+cursor = conn.cursor()
+cursor.execute({json.dumps(query)}, {json.dumps(params)})
+
+columns = [desc[0] for desc in cursor.description]
+
+# Stream one row at a time as NDJSON (memory-efficient)
+for row in cursor:
+    record = dict(zip(columns, row))
+    print(json.dumps(record, default=str))
+    sys.stdout.flush()
+
+conn.close()
+'''
+
+        # Collect rows in chunks and yield DataFrames
+        chunk: list[dict[str, Any]] = []
+
+        for line in self._execute_in_docker_streaming(
+            self._container_name,  # type: ignore
+            python_code,
+        ):
+            try:
+                row = json.loads(line)
+                chunk.append(row)
+
+                if len(chunk) >= chunk_size:
+                    yield self._rows_to_dataframe(chunk)
+                    chunk = []
+
+            except json.JSONDecodeError:
+                logger.warning(f"Failed to parse NDJSON line: {line[:100]}...")
+                continue
+
+        # Yield remaining rows
+        if chunk:
+            yield self._rows_to_dataframe(chunk)
+
+    def _rows_to_dataframe(self, rows: list[dict[str, Any]]) -> pd.DataFrame:
+        """Convert list of row dicts to DataFrame with proper type conversion."""
+        if not rows:
+            return pd.DataFrame()
+
+        df = pd.DataFrame(rows)
+
+        # Parse JSON columns
+        for col in ["attributes", "events"]:
+            if col in df.columns:
+                df[col] = df[col].apply(self._parse_json_column)
+
+        # Convert timestamp strings to datetime
+        for col in ["start_time", "end_time"]:
+            if col in df.columns:
+                df[col] = pd.to_datetime(df[col])
+
+        return df
 
     def get_span_annotations_dataframe(
         self,

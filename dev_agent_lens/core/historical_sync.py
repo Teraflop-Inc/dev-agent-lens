@@ -563,8 +563,8 @@ class HistoricalSyncState:
         shrink_factor = 2 ** min(failures, 4)
         recommended = batch_duration / shrink_factor
 
-        # Minimum window of 1 hour
-        min_window = timedelta(hours=1)
+        # Minimum window of 15 minutes (for very high-volume periods)
+        min_window = timedelta(minutes=15)
         if recommended < min_window:
             return min_window
 

@@ -680,9 +680,9 @@ def sync(
 )
 @click.option(
     "--batch-hours",
-    type=int,
+    type=float,
     default=None,
-    help="Hours per batch (overrides --batch-size). Use for high-volume days.",
+    help="Hours per batch (overrides --batch-size). Use 0.25 for 15-min batches.",
 )
 @click.option(
     "--limit",
@@ -783,7 +783,7 @@ def sync_historical(
     start_date: str | None,
     end_date: str | None,
     batch_size: int,
-    batch_hours: int | None,
+    batch_hours: float | None,
     limit: int | None,
     timeout: int,
     backend: str | None,
@@ -1183,8 +1183,8 @@ def sync_historical(
     total_subdivisions = 0
     all_errors = []
 
-    # Minimum subdivision window (1 hour) to prevent infinite recursion
-    MIN_SUBDIVISION = timedelta(hours=1)
+    # Minimum subdivision window (1 minute) to handle extremely dense time periods
+    MIN_SUBDIVISION = timedelta(minutes=1)
 
     def pre_subdivide_ranges(
         ranges: list[tuple[datetime, datetime]],
@@ -1311,30 +1311,128 @@ def sync_historical(
 
                 return left_dfs + right_dfs, left_subs + right_subs + 1, left_saved + right_saved
             else:
-                # Can't subdivide further, warn user
+                # Can't subdivide further by time - use streaming to get all spans
+                # Streaming fetches row-by-row via NDJSON to avoid Docker OOM
                 if depth == 0:
-                    click.echo(click.style(f" {batch_count:,} spans (at limit, window too small to subdivide)", fg="yellow"))
+                    click.echo(click.style(f" {batch_count:,} spans (at limit, streaming all)...", fg="yellow"))
                 else:
                     click.echo(f"{indent}→ {batch_start.strftime('%H:%M')}-{batch_end.strftime('%H:%M')}: " +
-                              click.style(f"{batch_count:,} spans (at limit)", fg="yellow"))
+                              click.style(f"{batch_count:,} spans (at limit, streaming)...", fg="yellow"))
 
-                # In incremental mode, save this sub-batch immediately
-                if incremental_mode and batch_key:
+                # Check if client supports streaming (SQLite client does)
+                has_streaming = hasattr(client, 'get_spans_dataframe_streaming')
+
+                if has_streaming and incremental_mode:
+                    # Use streaming - memory efficient, saves each chunk
+                    total_fetched = 0
+                    chunk_num = 0
+
                     try:
-                        if normalizer:
-                            try:
-                                normalized = normalizer(batch_df)
-                                store.append_spans(normalized, backend=backend_name)
-                            except Exception:
-                                store.append_spans(batch_df, backend=f"{backend_name}-raw")
-                        else:
-                            store.append_spans(batch_df, backend=backend_name)
-                        checkpoint_state.add_partial_range(batch_key, batch_start, batch_end, batch_count)
-                        return [], 0, batch_count  # Return empty list since data is saved
-                    except Exception as save_err:
-                        click.echo(click.style(f" WARN: failed to save partial: {save_err}", fg="yellow"))
+                        for chunk_df in client.get_spans_dataframe_streaming(
+                            start_time=batch_start,
+                            end_time=batch_end,
+                            chunk_size=effective_limit,
+                        ):
+                            chunk_num += 1
+                            chunk_count = len(chunk_df)
+                            total_fetched += chunk_count
 
-                return [batch_df], 0, 0
+                            # Save chunk immediately
+                            try:
+                                if normalizer:
+                                    try:
+                                        normalized = normalizer(chunk_df)
+                                        store.append_spans(normalized, backend=backend_name)
+                                    except Exception:
+                                        store.append_spans(chunk_df, backend=f"{backend_name}-raw")
+                                else:
+                                    store.append_spans(chunk_df, backend=backend_name)
+                            except Exception as save_err:
+                                click.echo(click.style(f" WARN: failed to save chunk {chunk_num}: {save_err}", fg="yellow"))
+
+                            click.echo(f"{indent}  [chunk {chunk_num}] +{chunk_count:,} spans (total: {total_fetched:,})")
+
+                    except Exception as e:
+                        click.echo(click.style(f" WARN: streaming failed: {e}", fg="yellow"))
+                        # Fall through with whatever we got
+
+                    click.echo(f"{indent}  → Total from streaming: {total_fetched:,} spans")
+
+                    if batch_key:
+                        checkpoint_state.add_partial_range(batch_key, batch_start, batch_end, total_fetched)
+                    return [], 0, total_fetched
+
+                else:
+                    # Fallback: offset-based pagination (may OOM on very large sets)
+                    # Save first page immediately
+                    total_fetched = batch_count
+                    if incremental_mode and batch_key:
+                        try:
+                            if normalizer:
+                                try:
+                                    normalized = normalizer(batch_df)
+                                    store.append_spans(normalized, backend=backend_name)
+                                except Exception:
+                                    store.append_spans(batch_df, backend=f"{backend_name}-raw")
+                            else:
+                                store.append_spans(batch_df, backend=backend_name)
+                        except Exception as save_err:
+                            click.echo(click.style(f" WARN: failed to save page 1: {save_err}", fg="yellow"))
+                    else:
+                        all_dfs = [batch_df]
+
+                    offset = effective_limit
+                    page_num = 2
+
+                    while batch_count >= effective_limit:
+                        if delay > 0:
+                            time.sleep(delay)
+
+                        try:
+                            next_df = client.get_spans_dataframe(
+                                start_time=batch_start,
+                                end_time=batch_end,
+                                limit=effective_limit,
+                                offset=offset,
+                            )
+                        except Exception as e:
+                            click.echo(click.style(f" WARN: pagination failed at offset {offset}: {e}", fg="yellow"))
+                            break
+
+                        if next_df is None or (hasattr(next_df, "empty") and next_df.empty) or len(next_df) == 0:
+                            break
+
+                        batch_count = len(next_df)
+                        total_fetched += batch_count
+
+                        if incremental_mode and batch_key:
+                            try:
+                                if normalizer:
+                                    try:
+                                        normalized = normalizer(next_df)
+                                        store.append_spans(normalized, backend=backend_name)
+                                    except Exception:
+                                        store.append_spans(next_df, backend=f"{backend_name}-raw")
+                                else:
+                                    store.append_spans(next_df, backend=backend_name)
+                            except Exception as save_err:
+                                click.echo(click.style(f" WARN: failed to save page {page_num}: {save_err}", fg="yellow"))
+                        else:
+                            all_dfs.append(next_df)
+
+                        offset += effective_limit
+                        page_num += 1
+                        click.echo(f"{indent}  [page {page_num}] +{batch_count:,} spans (total: {total_fetched:,})")
+
+                    click.echo(f"{indent}  → Total from pagination: {total_fetched:,} spans")
+
+                    if incremental_mode and batch_key:
+                        checkpoint_state.add_partial_range(batch_key, batch_start, batch_end, total_fetched)
+                        return [], 0, total_fetched
+
+                    import pandas as pd
+                    combined_df = pd.concat(all_dfs, ignore_index=True) if len(all_dfs) > 1 else all_dfs[0]
+                    return [combined_df], 0, 0
 
         # Normal case: didn't hit limit (this is a leaf sub-batch)
         if depth > 0:
