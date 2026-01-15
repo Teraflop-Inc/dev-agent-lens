@@ -144,6 +144,33 @@ def extract_session_id_from_span(span: dict | pd.Series) -> str | None:
                     session_id = extract_session_id(metadata["attributes"])
                     if session_id:
                         return session_id
+                # =============================================================
+                # CLAUDE CODE SPECIFIC SESSION EXTRACTION
+                # =============================================================
+                # Claude Code traces (via LiteLLM proxy) store session metadata
+                # in dotted key formats within raw_attributes. The session ID is
+                # embedded in a user_id string like:
+                #   "user_<hash>_account_<uuid>_session_<uuid>"
+                #
+                # Other coding agents (e.g., Cursor, Windsurf, custom agents)
+                # may use different schemas. Add new extraction logic below
+                # with clear comments about which agent it supports.
+                # =============================================================
+
+                # Claude Code via LiteLLM: attributes.metadata.user_api_key_end_user_id
+                # Contains the full user_account_session string from LiteLLM proxy
+                if "attributes.metadata" in metadata:
+                    session_id = extract_session_id(metadata["attributes.metadata"])
+                    if session_id:
+                        return session_id
+
+                # Claude Code via Anthropic SDK: attributes.llm.None.metadata.user_id
+                # Same session format but stored in a different location when
+                # using direct Anthropic API calls with metadata passthrough
+                if "attributes.llm.None.metadata" in metadata:
+                    session_id = extract_session_id(metadata["attributes.llm.None.metadata"])
+                    if session_id:
+                        return session_id
                 # Fall through to try the raw_attributes dict itself
             session_id = extract_session_id(metadata)
             if session_id:
