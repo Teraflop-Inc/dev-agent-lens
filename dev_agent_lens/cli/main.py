@@ -36,6 +36,12 @@ from dev_agent_lens.core.schema import (
 from dev_agent_lens.core.state import SyncState
 from dev_agent_lens.core.unify import unify_sessions
 from dev_agent_lens.storage.oxen_store import OxenStore
+from dev_agent_lens.analysis.chains import (
+    build_conversation_chains,
+    export_chain_to_markdown,
+    export_chain_to_file,
+    ConversationChain,
+)
 
 
 # Available backends
@@ -4648,6 +4654,238 @@ def export_parquet(
     click.echo(f"  {stats['spans_path']}")
 
 
+@main.command("reconstruct")
+@click.option(
+    "--source",
+    "source_name",
+    type=str,
+    required=True,
+    help="Source name to reconstruct (e.g., phoenix-local-alex)",
+)
+@click.option(
+    "--session-id",
+    "session_id",
+    type=str,
+    default=None,
+    help="Specific session ID to reconstruct (optional)",
+)
+@click.option(
+    "--output",
+    "-o",
+    "output_path",
+    type=click.Path(),
+    help="Output file path (default: stdout)",
+)
+@click.option(
+    "--format",
+    "output_format",
+    type=click.Choice(["json", "summary"]),
+    default="json",
+    help="Output format (default: json)",
+)
+@click.option(
+    "--parquet/--jsonl",
+    "use_parquet",
+    default=True,
+    help="Use Parquet (default) or JSONL source",
+)
+def reconstruct(
+    source_name: str,
+    session_id: str | None,
+    output_path: str | None,
+    output_format: str,
+    use_parquet: bool,
+) -> None:
+    """Reconstruct conversations with thread classification.
+
+    Reads unified session data and classifies spans into conversation threads:
+    - main_thread: Primary user <-> agent conversation (Sonnet/Opus)
+    - ancillary: Status line, topic detection (Haiku models)
+    - sub_agent: Task tool invocations and execution spans
+
+    This separates the main conversation flow from background operations,
+    making it easier to analyze conversation structure.
+
+    Classification is specific to Claude Code traces. Other coding agents
+    may require different classification rules.
+
+    Examples:
+
+        # Reconstruct all sessions from a source (summary view)
+        dal reconstruct --source phoenix-local-alex --format summary
+
+        # Reconstruct a specific session (JSON output)
+        dal reconstruct --source phoenix-local-alex --session-id abc123
+
+        # Export to file
+        dal reconstruct --source arize-ax-alex -o ~/exports/classified.json
+    """
+    import json
+    from pathlib import Path
+
+    from dev_agent_lens.analysis.threads import (
+        classify_session_threads,
+        get_thread_summary,
+    )
+    from dev_agent_lens.storage import get_storage_path
+
+    storage_path = get_storage_path()
+
+    # Load session data
+    if use_parquet:
+        parquet_dir = Path(storage_path) / "parquet"
+        spans_file = parquet_dir / f"{source_name}_spans.parquet"
+
+        if not spans_file.exists():
+            click.echo(
+                click.style(
+                    f"Error: Parquet file not found: {spans_file}\n"
+                    f"Run 'dal export-parquet --source {source_name}' first.",
+                    fg="red",
+                )
+            )
+            raise SystemExit(1)
+
+        click.echo(f"Loading from Parquet: {spans_file}")
+
+        import duckdb
+
+        conn = duckdb.connect()
+
+        if session_id:
+            # Load specific session
+            query = f"""
+                SELECT * FROM '{spans_file}'
+                WHERE session_id = ?
+                ORDER BY start_time
+            """
+            df = conn.execute(query, [session_id]).fetchdf()
+            if df.empty:
+                click.echo(click.style(f"Session not found: {session_id}", fg="red"))
+                raise SystemExit(1)
+
+            sessions_data = [{
+                "session_id": session_id,
+                "spans": df.to_dict(orient="records"),
+            }]
+        else:
+            # Load all spans at once (much faster than per-session queries)
+            click.echo("Loading all spans...")
+            all_spans_df = conn.execute(f"""
+                SELECT * FROM '{spans_file}'
+                ORDER BY session_id, start_time
+            """).fetchdf()
+            click.echo(f"Loaded {len(all_spans_df):,} spans")
+
+            # Group by session in Python
+            click.echo("Grouping by session...")
+            sessions_data = []
+            for sid, group in all_spans_df.groupby("session_id", sort=False):
+                sessions_data.append({
+                    "session_id": sid,
+                    "spans": group.to_dict(orient="records"),
+                })
+            click.echo(f"Found {len(sessions_data):,} sessions")
+    else:
+        # Load from JSONL
+        unified_dir = Path(storage_path) / "unified"
+        jsonl_file = unified_dir / f"{source_name}_sessions.jsonl"
+
+        if not jsonl_file.exists():
+            click.echo(
+                click.style(
+                    f"Error: JSONL file not found: {jsonl_file}\n"
+                    f"Run 'dal export-sessions --source {source_name}' first.",
+                    fg="red",
+                )
+            )
+            raise SystemExit(1)
+
+        click.echo(f"Loading from JSONL: {jsonl_file}")
+
+        sessions_data = []
+        with open(jsonl_file) as f:
+            for line in f:
+                if line.strip():
+                    try:
+                        session = json.loads(line)
+                        if session_id and session.get("session_id") != session_id:
+                            continue
+                        sessions_data.append(session)
+                    except json.JSONDecodeError:
+                        continue
+
+        if session_id and not sessions_data:
+            click.echo(click.style(f"Session not found: {session_id}", fg="red"))
+            raise SystemExit(1)
+
+        click.echo(f"Loaded {len(sessions_data):,} sessions")
+
+    # Classify sessions
+    click.echo("Classifying spans by conversation thread...")
+
+    if output_format == "summary":
+        # Summary output
+        results = []
+        total_stats = {"main_thread": 0, "ancillary": 0, "sub_agent": 0, "unknown": 0}
+
+        for session in sessions_data:
+            summary = get_thread_summary(session)
+            results.append({
+                "session_id": session.get("session_id"),
+                "span_count": len(session.get("spans", [])),
+                "thread_counts": summary,
+            })
+            for k, v in summary.items():
+                total_stats[k] += v
+
+        click.echo()
+        click.echo(click.style("Classification Summary", fg="cyan", bold=True))
+        click.echo(f"  Sessions:     {len(results):,}")
+        click.echo(f"  Main thread:  {total_stats['main_thread']:,} spans")
+        click.echo(f"  Ancillary:    {total_stats['ancillary']:,} spans")
+        click.echo(f"  Sub-agents:   {total_stats['sub_agent']:,} spans")
+        click.echo(f"  Unknown:      {total_stats['unknown']:,} spans")
+
+        if output_path:
+            with open(output_path, "w") as f:
+                json.dump({"sessions": results, "totals": total_stats}, f, indent=2)
+            click.echo(f"\nWritten to: {output_path}")
+        else:
+            click.echo()
+            # Show top 5 sessions by span count
+            results.sort(key=lambda x: x["span_count"], reverse=True)
+            click.echo("Top 5 sessions by span count:")
+            for r in results[:5]:
+                tc = r["thread_counts"]
+                click.echo(
+                    f"  {r['session_id'][:40]}... "
+                    f"({r['span_count']:,} spans: "
+                    f"main={tc['main_thread']}, "
+                    f"ancillary={tc['ancillary']}, "
+                    f"sub_agent={tc['sub_agent']})"
+                )
+    else:
+        # Full JSON output with classified spans
+        classified_sessions = []
+        for session in sessions_data:
+            classified = classify_session_threads(session)
+            classified_sessions.append(classified.to_dict())
+
+        output_data = {
+            "source": source_name,
+            "session_count": len(classified_sessions),
+            "sessions": classified_sessions,
+        }
+
+        if output_path:
+            with open(output_path, "w") as f:
+                json.dump(output_data, f, indent=2, default=str)
+            click.echo(f"Written to: {output_path}")
+        else:
+            click.echo(json.dumps(output_data, indent=2, default=str))
+
+
 @main.command("clean-sessions")
 @click.option(
     "--source",
@@ -5157,6 +5395,362 @@ def purge(
         click.echo(click.style("Errors:", fg="red"))
         for error in errors:
             click.echo(error)
+
+
+def _load_sessions_from_parquet(source_name: str) -> list[dict] | None:
+    """Load sessions from parquet file with raw_attributes_json for chain detection."""
+    import pandas as pd
+    from dev_agent_lens.storage import get_storage_path
+
+    storage_path = get_storage_path()
+    parquet_file = storage_path / "parquet" / f"{source_name}_spans.parquet"
+
+    if not parquet_file.exists():
+        return None
+
+    df = pd.read_parquet(parquet_file)
+
+    # Group spans by session_id
+    sessions = []
+    for session_id, group in df.groupby("session_id"):
+        spans = group.to_dict("records")
+        sessions.append({"session_id": session_id, "spans": spans})
+
+    return sessions
+
+
+@main.command("chain-list")
+@click.option(
+    "--source",
+    "source_name",
+    type=str,
+    required=True,
+    help="Source name to list chains from",
+)
+@click.option(
+    "--min-sessions",
+    type=int,
+    default=2,
+    help="Minimum sessions per chain to display (default: 2)",
+)
+@click.option(
+    "--format",
+    "output_format",
+    type=click.Choice(["table", "json"]),
+    default="table",
+    help="Output format (default: table)",
+)
+def chain_list_cmd(source_name: str, min_sessions: int, output_format: str) -> None:
+    """List conversation chains (linked sessions across compactions).
+
+    Shows chains of sessions that are linked by compaction events,
+    representing conversations that have been continued across
+    context window limits.
+
+    Example:
+        dal chain-list --source phoenix-local-alex
+        dal chain-list --source phoenix-local-alex --min-sessions 5
+    """
+    import json as json_module
+
+    # Load sessions from parquet (has raw_attributes_json for compaction detection)
+    sessions = _load_sessions_from_parquet(source_name)
+    if sessions is None:
+        click.echo(
+            click.style(
+                f"No parquet data found for '{source_name}'. Run 'dal sync --source {source_name}' first.",
+                fg="red",
+            )
+        )
+        return
+
+    click.echo(f"Loaded {len(sessions)} sessions from parquet...")
+
+    click.echo(f"Building chains from {len(sessions)} sessions...")
+
+    # Build chains
+    chains = build_conversation_chains(sessions)
+
+    # Filter by min sessions
+    chains = [c for c in chains if c.session_count >= min_sessions]
+
+    if not chains:
+        click.echo(
+            click.style(
+                f"No chains with {min_sessions}+ sessions found.",
+                fg="yellow",
+            )
+        )
+        return
+
+    # Sort by session count descending
+    chains.sort(key=lambda c: c.session_count, reverse=True)
+
+    if output_format == "json":
+        output = []
+        for chain in chains:
+            duration_hours = chain.duration_minutes / 60.0 if chain.duration_minutes else 0.0
+            output.append({
+                "chain_id": chain.chain_id,
+                "session_count": chain.session_count,
+                "compaction_count": chain.compaction_count,
+                "total_spans": chain.total_spans,
+                "start_time": chain.start_time.isoformat() if chain.start_time else None,
+                "end_time": chain.end_time.isoformat() if chain.end_time else None,
+                "duration_hours": round(duration_hours, 2),
+                "session_ids": chain.session_ids,
+            })
+        click.echo(json_module.dumps(output, indent=2))
+    else:
+        # Table format
+        click.echo()
+        click.echo(
+            click.style(
+                f"Found {len(chains)} conversation chains",
+                fg="cyan",
+                bold=True,
+            )
+        )
+        click.echo()
+
+        # Header
+        click.echo(
+            f"{'Chain ID':<36}  {'Sessions':>8}  {'Compactions':>11}  {'Spans':>8}  {'Duration':>10}"
+        )
+        click.echo("-" * 85)
+
+        for chain in chains:
+            duration_hours = chain.duration_minutes / 60.0 if chain.duration_minutes else 0.0
+            duration_str = f"{duration_hours:.1f}h" if duration_hours else "N/A"
+            click.echo(
+                f"{chain.chain_id:<36}  {chain.session_count:>8}  "
+                f"{chain.compaction_count:>11}  {chain.total_spans:>8}  {duration_str:>10}"
+            )
+
+        click.echo()
+        click.echo(
+            f"Total: {sum(c.session_count for c in chains)} sessions "
+            f"across {len(chains)} chains"
+        )
+
+
+@main.command("chain-export")
+@click.option(
+    "--source",
+    "source_name",
+    type=str,
+    required=True,
+    help="Source name to export from",
+)
+@click.option(
+    "--chain-id",
+    type=str,
+    help="Specific chain ID to export (from 'dal chain-list')",
+)
+@click.option(
+    "--index",
+    type=int,
+    help="Chain index to export (0 = longest chain)",
+)
+@click.option(
+    "--output",
+    "-o",
+    "output_file",
+    type=click.Path(),
+    help="Output file path (default: auto-named file)",
+)
+@click.option(
+    "--format",
+    "output_format",
+    type=click.Choice(["markdown", "jsonl", "json"]),
+    default="markdown",
+    help="Output format: markdown (LLM-friendly), jsonl (canonical, streamable), json (single file)",
+)
+@click.option(
+    "--include-tool-calls/--no-tool-calls",
+    default=True,
+    help="Include tool call details in markdown (default: True)",
+)
+@click.option(
+    "--no-raw-attributes",
+    is_flag=True,
+    default=False,
+    help="Exclude raw_attributes_json from JSON output (smaller files)",
+)
+@click.option(
+    "--include-ancillary",
+    is_flag=True,
+    default=False,
+    help="Include ancillary turns (tool results, system reminders). Default: main thread only.",
+)
+def chain_export_cmd(
+    source_name: str,
+    chain_id: str | None,
+    index: int | None,
+    output_file: str | None,
+    output_format: str,
+    include_tool_calls: bool,
+    no_raw_attributes: bool,
+    include_ancillary: bool,
+) -> None:
+    """Export a conversation chain to markdown, JSONL, or JSON.
+
+    Exports a linked conversation chain (sessions connected by compactions)
+    to:
+    - markdown: LLM-friendly, readable format for analysis
+    - jsonl: Canonical, streamable format (one JSON object per line) - RECOMMENDED
+    - json: Single JSON file with all data
+
+    Example:
+        dal chain-export --source phoenix-local-alex --index 0
+        dal chain-export --source phoenix-local-alex --index 0 --format jsonl
+        dal chain-export --source phoenix-local-alex --chain-id abc123 -o conversation.md
+    """
+    from pathlib import Path
+
+    # Load sessions from parquet (has raw_attributes_json for compaction detection)
+    sessions = _load_sessions_from_parquet(source_name)
+    if sessions is None:
+        click.echo(
+            click.style(
+                f"No parquet data found for '{source_name}'. Run 'dal sync --source {source_name}' first.",
+                fg="red",
+            )
+        )
+        return
+
+    click.echo(f"Loaded {len(sessions)} sessions from parquet...")
+    click.echo(f"Building chains from {len(sessions)} sessions...")
+
+    # Build chains
+    chains = build_conversation_chains(sessions)
+
+    # Filter to multi-session chains and sort
+    chains = [c for c in chains if c.session_count >= 2]
+    chains.sort(key=lambda c: c.session_count, reverse=True)
+
+    if not chains:
+        click.echo(
+            click.style("No multi-session chains found.", fg="yellow")
+        )
+        return
+
+    # Find the target chain
+    target_chain = None
+    if chain_id:
+        for chain in chains:
+            if chain.chain_id == chain_id:
+                target_chain = chain
+                break
+        if not target_chain:
+            click.echo(
+                click.style(f"Chain '{chain_id}' not found.", fg="red")
+            )
+            return
+    elif index is not None:
+        if index < 0 or index >= len(chains):
+            click.echo(
+                click.style(
+                    f"Index {index} out of range. Found {len(chains)} chains.",
+                    fg="red",
+                )
+            )
+            return
+        target_chain = chains[index]
+    else:
+        # Default to longest chain
+        target_chain = chains[0]
+        click.echo(f"Using longest chain (index 0, {target_chain.session_count} sessions)")
+
+    click.echo(
+        f"Exporting chain {target_chain.chain_id} "
+        f"({target_chain.session_count} sessions, {target_chain.compaction_count} compactions)..."
+    )
+
+    # Export based on format
+    if output_format == "jsonl":
+        from dev_agent_lens.analysis.chains import export_chain_to_jsonl
+        import json as json_module
+
+        records = export_chain_to_jsonl(
+            target_chain,
+            sessions,
+            include_raw_attributes=not no_raw_attributes,
+            include_ancillary=include_ancillary,
+        )
+        # JSONL: one JSON object per line
+        content = "\n".join(json_module.dumps(record, default=str) for record in records)
+        ext = ".jsonl"
+        turn_count = sum(1 for r in records if r.get("record_type") == "turn")
+        mode = "with ancillary" if include_ancillary else "main thread only"
+        click.echo(f"Exported {turn_count} turns as JSONL ({mode}, {len(records)} total records)")
+    elif output_format == "json":
+        from dev_agent_lens.analysis.chains import export_chain_to_json
+        import json as json_module
+
+        json_data = export_chain_to_json(
+            target_chain,
+            sessions,
+            include_raw_attributes=not no_raw_attributes,
+            include_ancillary=include_ancillary,
+        )
+        content = json_module.dumps(json_data, indent=2, default=str)
+        ext = ".json"
+        mode = "with ancillary" if include_ancillary else "main thread only"
+        click.echo(f"Exported {json_data.get('turn_count', 0)} turns as JSON ({mode})")
+    else:
+        # Markdown format - use export_chain_to_file which handles subagent files
+        ext = ".md"
+        main_file = output_file if output_file else f"chain_{target_chain.chain_id[:8]}{ext}"
+
+        written_files = export_chain_to_file(
+            target_chain,
+            sessions,
+            main_file,
+            include_tool_calls=include_tool_calls,
+        )
+
+        # Report main file
+        main_content_size = Path(written_files[0]).stat().st_size
+        click.echo(
+            click.style(
+                f"Exported to {written_files[0]} ({main_content_size:,} bytes)",
+                fg="green",
+                bold=True,
+            )
+        )
+
+        # Report subagent files if any
+        if len(written_files) > 1:
+            subagent_count = len(written_files) - 1
+            click.echo(f"  + {subagent_count} subagent file(s):")
+            for subagent_file in written_files[1:]:
+                subagent_size = Path(subagent_file).stat().st_size
+                click.echo(f"    - {Path(subagent_file).name} ({subagent_size:,} bytes)")
+
+        return  # Already wrote files
+
+    # For JSONL and JSON formats
+    if output_file:
+        Path(output_file).write_text(content)
+        click.echo(
+            click.style(
+                f"Exported to {output_file} ({len(content):,} characters)",
+                fg="green",
+                bold=True,
+            )
+        )
+    else:
+        # Generate auto filename
+        auto_file = f"chain_{target_chain.chain_id[:8]}{ext}"
+        Path(auto_file).write_text(content)
+        click.echo(
+            click.style(
+                f"Exported to {auto_file} ({len(content):,} characters)",
+                fg="green",
+                bold=True,
+            )
+        )
 
 
 if __name__ == "__main__":

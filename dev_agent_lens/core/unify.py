@@ -64,15 +64,69 @@ class MatchReport:
 
 
 def _extract_session_ids(df: pd.DataFrame) -> pd.DataFrame:
-    """Add session_id column to DataFrame by extracting from span metadata."""
+    """Add session_id column to DataFrame by extracting from span metadata.
+
+    Session metadata is typically only present on certain span types (e.g.,
+    litellm_request, raw_gen_ai_request). This function extracts session IDs
+    from spans that have metadata and propagates them to all spans with the
+    same trace_id.
+
+    Priority:
+    1. Extract explicit session_id from metadata (session_xxx pattern)
+    2. Propagate session_id to all spans sharing the same trace_id
+    3. Fall back to trace_id for traces without any session metadata
+
+    Agent-Specific Notes:
+    ---------------------
+    CLAUDE CODE: Session metadata is only present on LLM request spans
+    (litellm_request, raw_gen_ai_request), not on tool spans (Claude_Code_Tool_*).
+    A single multi-turn conversation generates many trace_ids (one per API call),
+    but they all share the same session_id in the metadata. This function
+    propagates the session_id from spans that have it to all sibling spans.
+
+    OTHER AGENTS: When adding support for new coding agents (Cursor, Windsurf,
+    etc.), check if they have similar patterns where session metadata is only
+    on certain span types. The propagation logic should work generically, but
+    the extraction in extract_session_id_from_span() may need agent-specific
+    handling.
+    """
     if df.empty:
         df["session_id"] = pd.Series(dtype=str)
         return df
 
     df = df.copy()
-    df["session_id"] = df.apply(
+
+    # First pass: extract session_id from each span
+    df["_raw_session_id"] = df.apply(
         lambda row: extract_session_id_from_span(row.to_dict()), axis=1
     )
+
+    # Build a mapping of trace_id -> proper session_id (from spans that have metadata)
+    # A "proper" session_id is one that differs from the trace_id
+    trace_to_session = {}
+    if "trace_id" in df.columns:
+        for _, row in df.iterrows():
+            trace_id = row.get("trace_id")
+            raw_session = row.get("_raw_session_id")
+            # If this span has a proper session_id (not just trace_id fallback)
+            if raw_session and trace_id and raw_session != trace_id:
+                trace_to_session[trace_id] = raw_session
+
+    # Second pass: propagate proper session_ids to all spans in the same trace
+    def get_final_session_id(row):
+        trace_id = row.get("trace_id")
+        raw_session = row.get("_raw_session_id")
+
+        # If this trace has a known proper session_id, use it
+        if trace_id and trace_id in trace_to_session:
+            return trace_to_session[trace_id]
+
+        # Otherwise use whatever was extracted (may be trace_id fallback)
+        return raw_session
+
+    df["session_id"] = df.apply(get_final_session_id, axis=1)
+    df = df.drop(columns=["_raw_session_id"])
+
     return df
 
 
