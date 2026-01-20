@@ -1,6 +1,6 @@
 # dev-agent-lens Status Report
 
-**Generated**: 2026-01-14
+**Generated**: 2026-01-19
 **Last Push**: 46 commits ahead of origin/main
 
 ---
@@ -50,11 +50,11 @@ The dev-agent-lens project has undergone significant development since the last 
 
 ## Active Work Areas
 
-### 1. Markdown Export Pipeline (UNSTABLE - Needs Redesign)
+### 1. Markdown Export Pipeline (UNSTABLE - Recent Fixes Pending Review)
 
-**Location**: `dev_agent_lens/analysis/chains.py` (85,468 bytes)
+**Location**: `dev_agent_lens/analysis/chains.py` (101,138 bytes)
 
-**Status**: ⚠️ LARGELY UNUSABLE - Requires coherent acceptance criteria before continuing
+**Status**: ⚠️ FIXES ATTEMPTED - Awaiting user acceptance testing
 
 **Things We've Learned**:
 - "Warmup" messages are legitimate session initialization events that must be accounted for
@@ -63,12 +63,21 @@ The dev-agent-lens project has undergone significant development since the last 
 - Code ordering matters - filters must run in correct sequence
 - Ancillary messages (routing signals) were leaking into main thread
 - Raw JSON/Python literals in user messages need parsing fallbacks
+- (2026-01-19) Subagent traces are **independent** - they run in separate traces, NOT as children of the Task span. Span traversal to find subagent content doesn't work; must use `tool_result` instead
+- (2026-01-19) Haiku safety check responses were leaking into exports - Claude Code uses Haiku for bash command validation, producing short outputs that looked like conversation turns
+- (2026-01-19) `raw_attributes_json` gets renamed to `raw_attributes` by `parquet_query.py` after parsing
 
-**Example of Current State**:
-```
-v10 (broken): Assistant greeting appears first, compaction immediately after
-v11 (partial): User "*[Session initialization]*" appears - but still incomplete
-```
+**Recent Changes (2026-01-19)** - Pending acceptance:
+- Added Haiku safety check filtering (short <50 char non-JSON outputs from Haiku model)
+- Changed subagent export to use `tool_result` instead of span traversal
+- Cleaned up subagent filenames (e.g., `subagent_explore_1.md` instead of `subagent_toolu_...`)
+- Test export file size reduced from ~8MB to ~6.3MB; subagent files increased from 615 bytes to 8KB+
+
+**Test outputs for review**:
+- `/tmp/verification_test/654c9707_export_3391.md` - Main export
+- `/tmp/verification_test/654c9707_export_3391_subagent_explore_1.md` - Sample subagent file
+- `/tmp/verification_test/findings_3391.md` - Investigation notes (subagent fix)
+- `/tmp/verification_test/findings_7742.md` - Investigation notes (Haiku fix)
 
 ---
 
@@ -213,7 +222,32 @@ dal sync-historical --source phoenix-local-alex --history
 ## Known Issues
 
 ### Critical (P0)
-- None currently - major export bugs have been fixed
+1. **Task tool prompts displayed as User messages** (2026-01-16) ⚠️ FIXES ATTEMPTED - PENDING ACCEPTANCE
+   - **File**: `/tmp/verification_test/654c9707_export.md` lines 41-48
+   - **Problem**: When Opus spawns a Haiku subagent via the Task tool, the prompt Opus constructed appears as "👤 User" instead of being attributed to the assistant
+   - **Root Cause**: `export_chain_to_markdown()` displayed ALL `input_value` text as "User" without checking if the span is from a subagent execution
+   - **Fix Applied** (2026-01-16):
+     - Added `_is_subagent_llm_span()` function to detect subagent spans by checking for subagent-specific system prompt markers
+     - Added `SUBAGENT_SYSTEM_MARKERS` list with patterns like "file search specialist", "READ-ONLY exploration task"
+     - Pre-compute `subagent_trace_ids` set before processing spans
+     - Filter out spans where `trace_id in subagent_trace_ids` from main conversation display
+     - Subagent invocations now appear as "📦 **Subagent**" links instead of fake "👤 User" messages
+   - **Observation**: File size reduced from 8MB to 6.3MB as subagent content appears to be filtered
+
+2. **Haiku safety check responses leaking into export** (2026-01-19) ⚠️ FIX ATTEMPTED - PENDING ACCEPTANCE
+   - **Problem**: "git log" appearing as standalone Haiku assistant message (line 41 in earlier export)
+   - **Root Cause Hypothesis**: Claude Code uses Haiku for bash command safety validation; these short responses were passing through `_is_main_thread_span()` filter
+   - **Fix Applied**: Added filter in `_is_main_thread_span()` to exclude Haiku spans with short (<50 char) non-JSON outputs
+   - **Test output**: `/tmp/verification_test/654c9707_export_3391.md`
+   - **Investigation notes**: `/tmp/verification_test/findings_7742.md`
+
+3. **Subagent files showing empty content** (2026-01-19) ⚠️ FIX ATTEMPTED - PENDING ACCEPTANCE
+   - **Problem**: Subagent markdown files showed "*No detailed conversation data available*" and had ugly `toolu_` filenames
+   - **Root Cause Hypothesis**: Code attempted to find subagent execution by traversing child spans of Task span, but subagent traces are independent (not nested)
+   - **Fix Applied**: Use `tool_result` from the Task tool response instead of span traversal; clean up filenames to use subagent type
+   - **Observation**: Subagent files increased from 615 bytes to ~8KB with response content
+   - **Test output**: `/tmp/verification_test/654c9707_export_3391_subagent_explore_1.md`
+   - **Investigation notes**: `/tmp/verification_test/findings_3391.md`
 
 ### High Priority (P1)
 1. **User message filtering may be over-aggressive** - 84% of messages were filtered in initial tests; Warmup fix improves this but deduplication may still remove legitimate repeated questions
@@ -340,7 +374,7 @@ We tested the markdown export pipeline against real Phoenix trace data and ident
 | Tool responses | ⚠️ PARTIAL | Results shown but may be truncated |
 | Thinking spans | ❓ UNTESTED | Need test data with extended thinking |
 | Subagent requests | ✅ PASS | Referenced with links |
-| Subagent responses | ⚠️ PARTIAL | Response text shown but full trace not linked |
+| Subagent responses | ⚠️ FIX ATTEMPTED | Now using `tool_result` - pending acceptance |
 | Compactions | ✅ PASS | Markers shown correctly |
 | Warmup messages | ❓ FILTERED | Currently filtered - need to decide if this is correct |
 
@@ -437,6 +471,128 @@ We tested the markdown export pipeline against real Phoenix trace data and ident
 1. [ ] Create "verbose" export mode for debugging
 2. [ ] Consider including ancillary threads in separate section
 3. [ ] Document analysis module API
+
+---
+
+## Critical Issue: Chain Detection Discrepancy (2026-01-16)
+
+### Problem Statement
+
+Chain detection works for `phoenix-lambda2-dal` (1891 chains found) but **fails entirely** for `phoenix-local-alex` (0 chains found despite 476 sessions).
+
+### Investigation Findings
+
+| Source | Sessions | Chains Found | Sessions with Compaction Markers |
+|--------|----------|--------------|----------------------------------|
+| `phoenix-lambda2-dal` | ~5000+ | 1891 | Many |
+| `phoenix-local-alex` | 476 | **0** | 26 |
+
+### Root Cause Analysis
+
+The chain detection code in `dev_agent_lens/analysis/chains.py` links sessions using the **Claude session UUID** embedded in span metadata:
+
+```
+user_{user_hash}_account_{account_uuid}_session_{session_uuid}
+```
+
+**The problem**: In `phoenix-local-alex`, the `session_uuid` part is **unique per session**, not per conversation. When a conversation compacts and continues:
+- Lambda2: Same `session_uuid` persists → chains link correctly
+- Local-alex: New `session_uuid` generated → each session becomes orphaned
+
+### Evidence
+
+1. **26 sessions** in phoenix-local-alex have compaction continuation markers (correctly detected)
+2. But each of these 26 sessions has a **different** extracted Claude UUID
+3. Result: 113 unique UUIDs, each belonging to exactly 1 session → no chains
+
+### Why Lambda2-DAL Works
+
+The lambda2 deployment appears to preserve the Claude session UUID across compactions. This may be due to:
+- Different LiteLLM proxy configuration
+- Different Phoenix instrumentation version
+- Different Claude Code version/settings
+
+### Possible Cause: Recent Export Code Changes
+
+**IMPORTANT**: The `export-sessions` command was recently modified. The discrepancy may be caused by a bug introduced in those changes rather than a fundamental data structure difference.
+
+- Lambda2-dal may have been exported with an older version of the code
+- Phoenix-local-alex was exported with the newer version
+- **Action**: Check git history for `export-sessions` and related session unification code
+- **Action**: Re-export phoenix-local-alex with the same code version used for lambda2
+
+**Investigation (2026-01-16)**: Both files were exported on the SAME day with the SAME code:
+- `phoenix-local-alex_sessions.jsonl` - Jan 15 18:15
+- `phoenix-lambda2-dal_sessions.jsonl` - Jan 15 20:42
+- Last relevant commit: `059241f` at 15:35 (before both exports)
+
+**ROOT CAUSE IDENTIFIED (2026-01-16)**: This is a **UUID EXTRACTION BUG**, not a chain linking logic issue.
+
+### The Real Problem
+
+Claude session UUIDs **DO persist across compactions** - the data is there and correct. The bug is that we're **not extracting the UUID from the right location**.
+
+**Evidence found:**
+- Chain of **10 compaction sessions** (100k+ tokens each) all share UUID: `51a9b124-91d2-4ec6-9d56-f6d2f5802817`
+- Chain of **4 sessions** over 34 minutes all share UUID: `8d6d0d33-fb80-43ed-81a5-1602f2a87d33`
+
+### The Extraction Bug
+
+**File**: `dev_agent_lens/analysis/chains.py`
+**Function**: `extract_claude_session_info()` (lines 147-170)
+
+| Current (incorrect) | Should be |
+|---------------------|-----------|
+| `attributes.llm.*.metadata.user_id` | `attributes.metadata.requester_metadata.user_id` |
+
+The data formats also differ between sources:
+- **Lambda2:** Dotted keys (`"attributes.metadata"`)
+- **Local-alex:** Nested dicts (`{"attributes": {"metadata": {...}}}`)
+
+### Why Lambda2 "Works"
+
+Lambda2 doesn't actually extract UUIDs either - it falls back to temporal linking which happens to work. But this is fragile and unnecessary. With proper UUID extraction, both sources would link directly.
+
+### Recommended Fix
+
+Update `extract_claude_session_info()` to check both metadata formats:
+1. Dotted key: `attributes.metadata.requester_metadata.user_id`
+2. Nested dict: `attributes -> metadata -> requester_metadata -> user_id`
+3. Also check: `attributes.metadata.user_api_key_end_user_id`
+
+**After fixing UUID extraction, temporal fallback becomes unnecessary** for Claude Code sessions - the UUID directly links all compaction sessions.
+
+### Investigation Scripts
+
+Test scripts and findings in `/tmp/`:
+- `compaction_linking_investigation.md` - Complete findings with proof of UUID persistence
+
+### Open Questions
+
+1. **Is this a data capture issue or a data structure issue?**
+   - Re-exporting phoenix-local-alex won't help if the raw Phoenix data lacks persistent UUIDs
+
+2. **What causes the UUID to persist in lambda2 but not local-alex?**
+   - Need to compare raw span metadata between the two sources
+
+3. **Can we implement fallback chain linking?**
+   - The code has temporal fallback logic (lines 441-516 in chains.py)
+   - But it requires sessions WITHOUT UUIDs, which don't exist in local-alex
+
+### Recommended Next Steps
+
+1. [ ] Compare raw span metadata structure between lambda2 and local-alex
+2. [ ] Check if compaction_summary field is populated differently
+3. [ ] Investigate if title generation spans exist in lambda2 but not local-alex
+4. [ ] Consider adding session-based (not UUID-based) chain linking as fallback
+5. [ ] Document expected metadata format for chain linking to work
+
+### Code Locations
+
+- Chain building: `dev_agent_lens/analysis/chains.py:327-521`
+- UUID extraction: `dev_agent_lens/analysis/chains.py:124-172`
+- Compaction detection: `dev_agent_lens/analysis/chains.py:215-270`
+- Chain list command: `dev_agent_lens/cli/main.py:5422-5534`
 
 ---
 

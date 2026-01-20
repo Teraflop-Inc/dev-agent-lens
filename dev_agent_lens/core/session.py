@@ -134,6 +134,64 @@ def extract_session_id_from_span(span: dict | pd.Series) -> str | None:
             metadata = span[field]
             # If this is raw_attributes, look for metadata/attributes inside it
             if field == "raw_attributes" and isinstance(metadata, dict):
+                # =============================================================
+                # CLAUDE CODE SPECIFIC SESSION EXTRACTION (check FIRST!)
+                # =============================================================
+                # Claude Code traces store session metadata in nested dicts.
+                # The session ID is embedded in a user_id string like:
+                #   "user_<hash>_account_<uuid>_session_<uuid>"
+                #
+                # We check these BEFORE the generic extract_session_id() calls
+                # because those will fallback to trace_id if they can't find
+                # a session pattern, preventing us from reaching this code.
+                # =============================================================
+
+                # Claude Code via LiteLLM: attributes.metadata.user_api_key_end_user_id
+                # Contains the full user_account_session string from LiteLLM proxy
+                # Check nested dict path (raw_attributes.attributes.metadata)
+                if "attributes" in metadata and isinstance(metadata["attributes"], dict):
+                    attrs_metadata = metadata["attributes"].get("metadata")
+                    if isinstance(attrs_metadata, dict):
+                        # Try user_api_key_end_user_id first (LiteLLM proxy format)
+                        end_user_id = attrs_metadata.get("user_api_key_end_user_id")
+                        if end_user_id:
+                            session_id = _extract_from_string(str(end_user_id))
+                            if session_id:
+                                return session_id
+                        # Also try requester_metadata.user_id
+                        req_meta = attrs_metadata.get("requester_metadata")
+                        if isinstance(req_meta, dict):
+                            user_id = req_meta.get("user_id")
+                            if user_id:
+                                session_id = _extract_from_string(str(user_id))
+                                if session_id:
+                                    return session_id
+
+                # Also check for dotted key format (some Phoenix versions)
+                if "attributes.metadata" in metadata:
+                    session_id = extract_session_id(metadata["attributes.metadata"])
+                    if session_id:
+                        return session_id
+
+                # Claude Code via nested dicts: attributes.llm.*.metadata.user_id
+                # The structure is: attributes -> llm -> {model_key} -> metadata -> user_id
+                # where model_key can be "None", a model name, or other values
+                if "attributes" in metadata and isinstance(metadata["attributes"], dict):
+                    llm_data = metadata["attributes"].get("llm")
+                    if isinstance(llm_data, dict):
+                        # Iterate through all model keys in the llm dict
+                        for model_key in llm_data:
+                            model_data = llm_data[model_key]
+                            if isinstance(model_data, dict):
+                                model_metadata = model_data.get("metadata")
+                                if model_metadata:
+                                    session_id = extract_session_id(model_metadata)
+                                    if session_id:
+                                        return session_id
+
+                # =============================================================
+                # GENERIC EXTRACTION (fallback paths)
+                # =============================================================
                 # Try nested metadata key (Phoenix format)
                 if "metadata" in metadata:
                     session_id = extract_session_id(metadata["metadata"])
@@ -142,33 +200,6 @@ def extract_session_id_from_span(span: dict | pd.Series) -> str | None:
                 # Try nested attributes key (Arize format)
                 if "attributes" in metadata:
                     session_id = extract_session_id(metadata["attributes"])
-                    if session_id:
-                        return session_id
-                # =============================================================
-                # CLAUDE CODE SPECIFIC SESSION EXTRACTION
-                # =============================================================
-                # Claude Code traces (via LiteLLM proxy) store session metadata
-                # in dotted key formats within raw_attributes. The session ID is
-                # embedded in a user_id string like:
-                #   "user_<hash>_account_<uuid>_session_<uuid>"
-                #
-                # Other coding agents (e.g., Cursor, Windsurf, custom agents)
-                # may use different schemas. Add new extraction logic below
-                # with clear comments about which agent it supports.
-                # =============================================================
-
-                # Claude Code via LiteLLM: attributes.metadata.user_api_key_end_user_id
-                # Contains the full user_account_session string from LiteLLM proxy
-                if "attributes.metadata" in metadata:
-                    session_id = extract_session_id(metadata["attributes.metadata"])
-                    if session_id:
-                        return session_id
-
-                # Claude Code via Anthropic SDK: attributes.llm.None.metadata.user_id
-                # Same session format but stored in a different location when
-                # using direct Anthropic API calls with metadata passthrough
-                if "attributes.llm.None.metadata" in metadata:
-                    session_id = extract_session_id(metadata["attributes.llm.None.metadata"])
                     if session_id:
                         return session_id
                 # Fall through to try the raw_attributes dict itself

@@ -5430,8 +5430,9 @@ def _load_sessions_from_parquet(source_name: str) -> list[dict] | None:
 @click.option(
     "--min-sessions",
     type=int,
-    default=2,
-    help="Minimum sessions per chain to display (default: 2)",
+    default=1,
+    help="Minimum sessions per chain to display (default: 1). Note: when sessions are "
+         "already unified by Claude UUID, each conversation appears as a single session.",
 )
 @click.option(
     "--format",
@@ -5625,13 +5626,13 @@ def chain_export_cmd(
     # Build chains
     chains = build_conversation_chains(sessions)
 
-    # Filter to multi-session chains and sort
-    chains = [c for c in chains if c.session_count >= 2]
-    chains.sort(key=lambda c: c.session_count, reverse=True)
+    # Sort by session count descending (single-session chains are now included
+    # since sessions may already be unified by Claude UUID)
+    chains.sort(key=lambda c: (c.session_count, c.total_spans), reverse=True)
 
     if not chains:
         click.echo(
-            click.style("No multi-session chains found.", fg="yellow")
+            click.style("No chains found.", fg="yellow")
         )
         return
 
@@ -5751,6 +5752,90 @@ def chain_export_cmd(
                 bold=True,
             )
         )
+
+
+@main.command("claude-session-logs-to-markdown")
+@click.argument("session_file", type=click.Path(exists=True))
+@click.option(
+    "--output-dir",
+    "-o",
+    type=click.Path(),
+    default=".",
+    help="Output directory for markdown files (default: current directory)",
+)
+@click.option(
+    "--max-result-length",
+    type=int,
+    default=1000,
+    help="Maximum length for tool result content (default: 1000)",
+)
+@click.option(
+    "--include-timestamps/--no-timestamps",
+    default=True,
+    help="Include timestamps on messages (default: yes)",
+)
+@click.option(
+    "--include-snapshots/--no-snapshots",
+    default=False,
+    help="Include file-history-snapshot entries (default: no)",
+)
+def session_to_markdown(
+    session_file: str,
+    output_dir: str,
+    max_result_length: int,
+    include_timestamps: bool,
+    include_snapshots: bool,
+) -> None:
+    """Export a Claude Code session JSONL file to readable markdown.
+
+    Converts raw ~/.claude/projects/**/*.jsonl session files into LLM-friendly
+    markdown format with flat structure and reference-based subagent handling.
+
+    Examples:
+
+        dal claude-session-logs-to-markdown ~/.claude/projects/-Users-me-myproject/abc123.jsonl
+
+        dal claude-session-logs-to-markdown session.jsonl -o ./exports/
+
+        dal claude-session-logs-to-markdown session.jsonl --max-result-length 2000
+    """
+    from dev_agent_lens.export.markdown import (
+        export_session_to_markdown,
+        export_to_files,
+    )
+
+    click.echo(f"Exporting: {session_file}")
+
+    try:
+        export = export_session_to_markdown(
+            session_file,
+            max_tool_result_length=max_result_length,
+            include_file_snapshots=include_snapshots,
+            include_timestamps=include_timestamps,
+        )
+
+        files = export_to_files(export, output_dir)
+
+        click.echo(
+            click.style(
+                f"Exported {len(files)} file(s) to {output_dir}",
+                fg="green",
+                bold=True,
+            )
+        )
+
+        for f in files:
+            size = f.stat().st_size
+            click.echo(f"  - {f.name} ({size:,} bytes)")
+
+        click.echo()
+        click.echo(click.style("Stats:", bold=True))
+        for key, value in export.stats.items():
+            click.echo(f"  {key}: {value}")
+
+    except Exception as e:
+        click.echo(click.style(f"Error: {e}", fg="red"))
+        raise
 
 
 if __name__ == "__main__":
