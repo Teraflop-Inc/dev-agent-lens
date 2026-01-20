@@ -125,8 +125,14 @@ def extract_claude_session_info(span: dict[str, Any]) -> tuple[str | None, str |
     """
     Extract Claude session UUID and user hash from span metadata.
 
-    The metadata is embedded in raw_attributes_json at:
-    attributes.llm.*.metadata.user_id
+    The metadata can be in multiple locations depending on the source:
+    1. attributes.metadata.requester_metadata.user_id (preferred - lambda2/local-alex)
+    2. attributes.metadata.user_api_key_end_user_id (alternative location)
+    3. attributes.llm.*.metadata.user_id (legacy format)
+
+    Formats also vary:
+    - Dotted keys: {"attributes.metadata": {...}} (lambda2)
+    - Nested dicts: {"attributes": {"metadata": {...}}} (local-alex)
 
     The user_id format is:
     'user_{user_hash}_account_{account_uuid}_session_{session_uuid}'
@@ -136,6 +142,9 @@ def extract_claude_session_info(span: dict[str, Any]) -> tuple[str | None, str |
     """
     raw_attrs = span.get("raw_attributes_json")
     if not raw_attrs:
+        # Also check raw_attributes directly (unified sessions)
+        raw_attrs = span.get("raw_attributes")
+    if not raw_attrs:
         return None, None
 
     try:
@@ -144,8 +153,73 @@ def extract_claude_session_info(span: dict[str, Any]) -> tuple[str | None, str |
         else:
             attrs = raw_attrs
 
-        llm_section = attrs.get("attributes", {}).get("llm", {})
+        # Helper to extract session info from a user_id string
+        def extract_from_user_id(user_id: str) -> tuple[str | None, str | None]:
+            if not user_id:
+                return None, None
+            # Extract session UUID (36-char UUID after 'session_')
+            session_match = re.search(r"session_([a-f0-9\-]{36})", user_id)
+            session_uuid = session_match.group(1) if session_match else None
+            # Extract user hash (between 'user_' and '_account')
+            user_match = re.search(r"user_([a-zA-Z0-9]+)_account", user_id)
+            user_hash = user_match.group(1) if user_match else None
+            return session_uuid, user_hash
 
+        # =============================================================
+        # PATH 1: Dotted key format (lambda2-dal)
+        # {"attributes.metadata": "{...json string...}"}
+        # =============================================================
+        dotted_metadata = attrs.get("attributes.metadata")
+        if dotted_metadata:
+            try:
+                if isinstance(dotted_metadata, str):
+                    metadata_dict = json.loads(dotted_metadata)
+                else:
+                    metadata_dict = dotted_metadata
+
+                # Try requester_metadata.user_id first
+                req_meta = metadata_dict.get("requester_metadata", {})
+                if isinstance(req_meta, dict):
+                    user_id = req_meta.get("user_id", "")
+                    result = extract_from_user_id(user_id)
+                    if result[0]:
+                        return result
+
+                # Try user_api_key_end_user_id
+                user_id = metadata_dict.get("user_api_key_end_user_id", "")
+                result = extract_from_user_id(user_id)
+                if result[0]:
+                    return result
+            except (json.JSONDecodeError, TypeError, ValueError):
+                pass
+
+        # =============================================================
+        # PATH 2: Nested dict format (local-alex)
+        # {"attributes": {"metadata": {...}}}
+        # =============================================================
+        attributes = attrs.get("attributes", {})
+        if isinstance(attributes, dict):
+            metadata = attributes.get("metadata", {})
+            if isinstance(metadata, dict):
+                # Try requester_metadata.user_id
+                req_meta = metadata.get("requester_metadata", {})
+                if isinstance(req_meta, dict):
+                    user_id = req_meta.get("user_id", "")
+                    result = extract_from_user_id(user_id)
+                    if result[0]:
+                        return result
+
+                # Try user_api_key_end_user_id
+                user_id = metadata.get("user_api_key_end_user_id", "")
+                result = extract_from_user_id(user_id)
+                if result[0]:
+                    return result
+
+        # =============================================================
+        # PATH 3: Legacy llm.*.metadata format
+        # {"attributes": {"llm": {"model_name": {"metadata": "..."}}}}
+        # =============================================================
+        llm_section = attributes.get("llm", {}) if isinstance(attributes, dict) else {}
         for key, llm_data in llm_section.items():
             if isinstance(llm_data, dict) and "metadata" in llm_data:
                 metadata_str = llm_data["metadata"]
@@ -153,19 +227,12 @@ def extract_claude_session_info(span: dict[str, Any]) -> tuple[str | None, str |
                     # Metadata is a Python literal string, not JSON
                     metadata_dict = ast.literal_eval(metadata_str)
                     user_id = metadata_dict.get("user_id", "")
-
-                    # Extract session UUID (36-char UUID after 'session_')
-                    session_match = re.search(r"session_([a-f0-9\-]{36})", user_id)
-                    session_uuid = session_match.group(1) if session_match else None
-
-                    # Extract user hash (between 'user_' and '_account')
-                    user_match = re.search(r"user_([a-zA-Z0-9]+)_account", user_id)
-                    user_hash = user_match.group(1) if user_match else None
-
-                    if session_uuid or user_hash:
-                        return session_uuid, user_hash
+                    result = extract_from_user_id(user_id)
+                    if result[0]:
+                        return result
                 except (ValueError, SyntaxError):
                     pass
+
     except (json.JSONDecodeError, TypeError, AttributeError):
         pass
 
@@ -268,6 +335,32 @@ def identify_compaction_sessions(
                 break
 
     return compaction_sessions
+
+
+def count_compaction_events(spans: list[dict[str, Any]]) -> int:
+    """
+    Count the number of compaction events (boundaries) within a list of spans.
+
+    This counts actual compaction markers in the spans, useful for unified sessions
+    where all spans from multiple compaction cycles are already grouped under
+    one session_id.
+
+    For compaction TASKS (generating summary), use is_compaction_task().
+    For compaction CONTINUATIONS (resuming after compaction), use has_compaction_marker().
+
+    We count compaction tasks as they mark distinct compaction boundaries.
+
+    Args:
+        spans: List of span dictionaries.
+
+    Returns:
+        Number of compaction events found in the spans.
+    """
+    count = 0
+    for span in spans:
+        if is_compaction_task(span):
+            count += 1
+    return count
 
 
 def build_session_links(
@@ -395,11 +488,6 @@ def build_conversation_chains(
                 user_hash = session_to_user_hash[sid]
                 break
 
-        # Identify compaction sessions for counting
-        compaction_sessions = identify_compaction_sessions(
-            [session_lookup.get(sid, {}) for sid in sorted_session_ids]
-        )
-
         for sid in sorted_session_ids:
             session = session_lookup.get(sid, {})
             spans = session.get("spans", [])
@@ -420,9 +508,10 @@ def build_conversation_chains(
                 except (ValueError, TypeError):
                     pass
 
-            # Count compactions
-            if sid in compaction_sessions:
-                compaction_count += 1
+            # Count compaction events WITHIN each session
+            # This handles unified sessions where spans from multiple
+            # compaction cycles are already grouped under one session_id
+            compaction_count += count_compaction_events(spans)
 
         chain = ConversationChain(
             chain_id=sorted_session_ids[0],  # Use first session ID as chain ID
@@ -707,7 +796,74 @@ def _is_main_thread_span(span: dict[str, Any]) -> bool:
     if stripped_output in ('#', '{', '[{"type": "text", "text": "{"}]'):
         return False
 
+    # Filter out Haiku safety check responses
+    # These are very short responses (typically just echoing a command) from Haiku
+    # that are used for bash command safety validation
+    model = _extract_model(span)
+    if model and 'haiku' in model.lower():
+        # Haiku responses that are just short command fragments or validation outputs
+        # These appear between Opus assistant messages as safety checks
+        if len(stripped_output) < 50 and not output_val.startswith('['):
+            # Very short output from Haiku that's not a JSON array - likely a safety check
+            return False
+
     return True
+
+
+# System prompt markers that indicate subagent LLM calls
+# These are specialized prompts given to subagents for specific tasks
+SUBAGENT_SYSTEM_MARKERS = [
+    "file search specialist",  # Explore subagent
+    "READ-ONLY exploration task",  # Explore subagent
+    "READ-ONLY MODE - NO FILE MODIFICATIONS",  # Explore subagent
+    "You excel at thoroughly navigating and exploring codebases",  # Explore subagent
+    "general-purpose agent",  # General-purpose subagent
+    "research complex questions",  # General-purpose subagent
+]
+
+
+def _is_subagent_llm_span(span: dict[str, Any]) -> bool:
+    """
+    Check if an LLM span is from a subagent execution (not the main thread).
+
+    Subagent LLM calls are identified by specialized system prompts that include
+    markers like "file search specialist" (Explore subagent) or role-specific
+    instructions that differ from the main Claude Code system prompt.
+
+    This is used to prevent subagent prompts from being displayed as "👤 User"
+    messages in markdown exports.
+
+    Args:
+        span: A span dictionary with raw_attributes or raw_attributes_json.
+
+    Returns:
+        True if this span appears to be a subagent LLM call.
+    """
+    # Try both field names - raw_attributes_json is the original, but
+    # parquet_query.py renames it to raw_attributes after parsing
+    raw_attrs = span.get("raw_attributes") or span.get("raw_attributes_json")
+    if not raw_attrs:
+        return False
+
+    try:
+        if isinstance(raw_attrs, str):
+            attrs = json.loads(raw_attrs)
+        else:
+            attrs = raw_attrs
+
+        # Extract system prompt from llm.None.system path
+        llm_attrs = attrs.get("attributes", {}).get("llm", {}).get("None", {})
+        system_prompt = str(llm_attrs.get("system", ""))
+
+        # Check for subagent markers in the system prompt
+        for marker in SUBAGENT_SYSTEM_MARKERS:
+            if marker in system_prompt:
+                return True
+
+    except (json.JSONDecodeError, TypeError, AttributeError):
+        pass
+
+    return False
 
 
 def _has_meaningful_user_input(input_val: str) -> bool:
@@ -1043,6 +1199,7 @@ class SubagentExport:
     prompt: str
     spans: list[dict[str, Any]]
     parent_session_id: str
+    tool_result: Any = None  # The result returned by the subagent
 
 
 # Size threshold for inline vs file (chars)
@@ -1261,10 +1418,42 @@ def generate_subagent_markdown(
                         lines.append(_format_assistant_message(text, max_message_length))
                         lines.append("")
     else:
+        # No span data available, but we might have the tool_result
         lines.append("---")
         lines.append("")
-        lines.append("*No detailed conversation data available for this subagent.*")
-        lines.append("")
+
+        if subagent.tool_result:
+            # Show the subagent's response from the tool_result
+            lines.append("## Response")
+            lines.append("")
+
+            # Parse the tool_result - it might be a list with text content
+            result_content = subagent.tool_result
+            if isinstance(result_content, list):
+                for item in result_content:
+                    if isinstance(item, dict) and item.get("type") == "text":
+                        text = item.get("text", "")
+                        if text:
+                            if len(text) > max_message_length:
+                                text = text[:max_message_length] + "\n\n... [truncated]"
+                            lines.append(text)
+                            lines.append("")
+            elif isinstance(result_content, str):
+                text = result_content
+                if len(text) > max_message_length:
+                    text = text[:max_message_length] + "\n\n... [truncated]"
+                lines.append(text)
+                lines.append("")
+            else:
+                # Fallback: convert to string
+                text = str(result_content)
+                if len(text) > max_message_length:
+                    text = text[:max_message_length] + "\n\n... [truncated]"
+                lines.append(text)
+                lines.append("")
+        else:
+            lines.append("*No detailed conversation data available for this subagent.*")
+            lines.append("")
 
     # Footer
     lines.append("")
@@ -1346,6 +1535,100 @@ def export_chain_to_markdown(
                                 }
                     except (json.JSONDecodeError, TypeError, KeyError):
                         pass
+
+    # Build set of trace IDs that belong to subagent executions
+    # Subagent traces have raw_gen_ai_request spans with subagent-specific system prompts
+    subagent_trace_ids: set[str] = set()
+    # Also build mapping from tool_use_id to trace_id for subagent extraction
+    tool_id_to_trace_id: dict[str, str] = {}
+
+    # Build a reverse index: span_id -> list of child spans for efficient lookup
+    span_children_map: dict[str, list[dict[str, Any]]] = {}
+    for session_id in chain.session_ids:
+        session = session_lookup.get(session_id, {})
+        for span in session.get("spans", []):
+            parent_id = span.get("parent_id")
+            if parent_id:
+                if parent_id not in span_children_map:
+                    span_children_map[parent_id] = []
+                span_children_map[parent_id].append(span)
+
+    # Debug: track mapping attempts
+    import os
+    debug_enabled = os.environ.get("DAL_DEBUG_SUBAGENT") == "1"
+    mapping_attempts = 0
+    successful_mappings = 0
+
+    for session_id in chain.session_ids:
+        session = session_lookup.get(session_id, {})
+        for span in session.get("spans", []):
+            if span.get("name") == "raw_gen_ai_request" and _is_subagent_llm_span(span):
+                trace_id = span.get("trace_id")
+                if trace_id:
+                    subagent_trace_ids.add(trace_id)
+                    mapping_attempts += 1
+
+                    # Link this trace to a Task tool_use_id by finding the Task span
+                    # The raw_gen_ai_request span's parent should be within the Task execution tree
+                    # Walk up the parent chain to find Claude_Code_Tool_Task
+                    current_span = span
+                    found_task = False
+                    for depth in range(15):  # Limit depth to avoid infinite loops
+                        parent_id = current_span.get("parent_id")
+                        if not parent_id:
+                            if debug_enabled:
+                                print(f"  Depth {depth}: No parent_id, stopping")
+                            break
+
+                        # Find parent span
+                        parent_span = None
+                        for check_span in session.get("spans", []):
+                            if check_span.get("span_id") == parent_id:
+                                parent_span = check_span
+                                break
+
+                        if not parent_span:
+                            if debug_enabled:
+                                print(f"  Depth {depth}: Parent span not found: {parent_id}")
+                            break
+
+                        if debug_enabled and depth < 5:
+                            print(f"  Depth {depth}: {parent_span.get('name')}")
+
+                        # Check if this is the Task span
+                        if parent_span.get("name") == "Claude_Code_Tool_Task":
+                            # Extract tool_use_id from Task span
+                            raw_attrs = parent_span.get("raw_attributes_json")
+                            if raw_attrs:
+                                try:
+                                    attrs = json.loads(raw_attrs) if isinstance(raw_attrs, str) else raw_attrs
+                                    input_data = attrs.get("attributes", {}).get("input", {}).get("value", "")
+                                    if input_data:
+                                        tool_data = json.loads(input_data) if isinstance(input_data, str) else input_data
+                                        tool_id = tool_data.get("id")
+                                        if tool_id and tool_id not in tool_id_to_trace_id:
+                                            tool_id_to_trace_id[tool_id] = trace_id
+                                            successful_mappings += 1
+                                            found_task = True
+                                            if debug_enabled:
+                                                print(f"  SUCCESS: Mapped {tool_id[:20]} -> {trace_id[:20]}")
+                                except (json.JSONDecodeError, TypeError, KeyError) as e:
+                                    if debug_enabled:
+                                        print(f"  ERROR parsing Task attrs: {e}")
+                                    pass
+                            break
+
+                        # Move up to parent
+                        current_span = parent_span
+
+                    if debug_enabled and not found_task:
+                        print(f"  FAILED to find Task span for trace {trace_id[:20]}")
+
+    if debug_enabled:
+        print(f"\nSubagent mapping summary:")
+        print(f"  Mapping attempts: {mapping_attempts}")
+        print(f"  Successful mappings: {successful_mappings}")
+        print(f"  tool_id_to_trace_id size: {len(tool_id_to_trace_id)}")
 
     # Header
     lines.append(f"# Conversation: {chain.chain_id[:8]}...")
@@ -1485,6 +1768,15 @@ def export_chain_to_markdown(
         # Extract main thread spans with user/assistant messages
         for span in sorted_spans:
             if not _is_main_thread_span(span):
+                continue
+
+            # Skip subagent spans - their prompts are from the Task tool,
+            # not real user input. Subagent content is captured separately via
+            # SubagentExport when processing the Task tool_use in the output.
+            # Check both: 1) direct subagent detection via system prompt, and
+            # 2) whether this span is in a subagent trace (for Internal_Prompt spans)
+            span_trace_id = span.get("trace_id")
+            if _is_subagent_llm_span(span) or span_trace_id in subagent_trace_ids:
                 continue
 
             input_val = _extract_input_value(span)
@@ -1654,31 +1946,40 @@ def export_chain_to_markdown(
                         subagent_type = subagent_info.get("subagent_type", "unknown")
                         prompt = subagent_info.get("prompt", "")[:200]
 
-                        # Get subagent spans if available
-                        task_info = task_spans_by_id.get(tool_id, {})
-                        task_span = task_info.get("span")
+                        # Get subagent spans from the full trace, not just Task span children
                         subagent_spans = []
-                        if task_span:
-                            span_id = task_span.get("span_id")
-                            if span_id:
-                                subagent_spans = all_spans_by_parent.get(span_id, [])
+                        subagent_trace_id = tool_id_to_trace_id.get(tool_id)
+                        if subagent_trace_id:
+                            # Collect all spans with this trace_id from all sessions
+                            for check_session_id in chain.session_ids:
+                                check_session = session_lookup.get(check_session_id, {})
+                                for span in check_session.get("spans", []):
+                                    if span.get("trace_id") == subagent_trace_id:
+                                        subagent_spans.append(span)
 
                         # Create subagent export data (deduplicate by tool_use_id)
                         # Same subagent may appear multiple times due to compaction
                         existing_ids = {s.tool_use_id for s in subagents}
                         if tool_id not in existing_ids:
+                            # Get the tool result for this subagent
+                            subagent_result = tool_results.get(tool_id)
                             subagents.append(SubagentExport(
                                 tool_use_id=tool_id,
                                 subagent_type=subagent_type,
                                 prompt=subagent_info.get("prompt", ""),
                                 spans=subagent_spans,
                                 parent_session_id=session_id,
+                                tool_result=subagent_result,
                             ))
 
-                        # Add link in main markdown
+                        # Add link in main markdown with cleaner filename
                         _maybe_add_compaction_marker()
                         if output_basename:
-                            filename = f"{output_basename}_subagent_{tool_id}.md"
+                            # Use a cleaner filename based on subagent type and index
+                            # Count how many subagents of this type we've seen
+                            subagent_type_count = len([s for s in subagents if s.subagent_type == subagent_type])
+                            safe_type = subagent_type.lower().replace(' ', '_').replace('-', '_')
+                            filename = f"{output_basename}_subagent_{safe_type}_{subagent_type_count}.md"
                             lines.append(f"> 📦 **Subagent**: {subagent_type} - [{filename}](./{filename})")
                         else:
                             lines.append(f"> 📦 **Subagent**: {subagent_type}")
@@ -1796,8 +2097,13 @@ def export_chain_to_file(
     written_files = [str(output_file)]
 
     # Write subagent files
+    # Track subagent types for consistent numbering
+    subagent_type_counters: dict[str, int] = {}
     for subagent in result.subagents:
-        subagent_filename = f"{basename}_subagent_{subagent.tool_use_id}.md"
+        # Use cleaner filename based on subagent type
+        safe_type = subagent.subagent_type.lower().replace(' ', '_').replace('-', '_')
+        subagent_type_counters[safe_type] = subagent_type_counters.get(safe_type, 0) + 1
+        subagent_filename = f"{basename}_subagent_{safe_type}_{subagent_type_counters[safe_type]}.md"
         subagent_path = output_dir / subagent_filename
         subagent_content = generate_subagent_markdown(
             subagent,

@@ -67,17 +67,45 @@ def _group_by_session(spans: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """
     Group spans by session ID.
 
+    This function handles Claude Code traces where the Claude session UUID is only
+    present in certain span types (e.g., raw_gen_ai_request) but not in child spans
+    (tool calls, outputs). For spans in the same trace (same trace_id), we propagate
+    the Claude UUID from sibling spans that have it.
+
     Args:
         spans: List of span dictionaries
 
     Returns:
         List of session dictionaries with session_id, spans, span_count, time range
     """
-    # Group spans by session_id
+    # First pass: Build a mapping of trace_id -> Claude UUID
+    # Some spans have Claude metadata with the real session UUID, others just have trace_id
+    trace_to_claude_uuid: dict[str, str] = {}
+
+    for span in spans:
+        trace_id = span.get("trace_id")
+        if not trace_id:
+            continue
+
+        session_id = _extract_session_id(span)
+        # If we got a Claude UUID (36-char with hyphens) and not trace_id fallback
+        if session_id and session_id != trace_id and "-" in session_id and len(session_id) == 36:
+            trace_to_claude_uuid[trace_id] = session_id
+
+    # Second pass: Group spans, using Claude UUID if available for the trace
     sessions_map: dict[str | None, list[dict[str, Any]]] = {}
 
     for span in spans:
+        trace_id = span.get("trace_id")
         session_id = _extract_session_id(span)
+
+        # If this span's session_id is just the trace_id (fallback),
+        # check if we have a Claude UUID from a sibling span
+        if session_id and trace_id and session_id == trace_id:
+            claude_uuid = trace_to_claude_uuid.get(trace_id)
+            if claude_uuid:
+                session_id = claude_uuid
+
         if session_id not in sessions_map:
             sessions_map[session_id] = []
         sessions_map[session_id].append(span)
