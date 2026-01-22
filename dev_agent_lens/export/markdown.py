@@ -198,16 +198,11 @@ def parse_message(raw: dict) -> SessionMessage:
 # =============================================================================
 
 
-def truncate(text: str, limit: int) -> str:
-    """Truncate text to limit chars, showing (limit-3) + '...' if exceeded."""
-    if len(text) <= limit:
-        return text
-    return text[: limit - 3] + "..."
-
-
-def normalize_subagent_type(subagent_type: str) -> str:
-    """Normalize subagent type for filename: lowercase, replace - and spaces with _."""
-    return subagent_type.lower().replace("-", "_").replace(" ", "_")
+# Import shared utilities from markdown_renderer
+from dev_agent_lens.export.markdown_renderer import (
+    truncate,
+    normalize_subagent_type,
+)
 
 
 def is_compaction_boundary(message: dict) -> bool:
