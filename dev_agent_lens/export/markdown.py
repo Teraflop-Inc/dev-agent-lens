@@ -366,6 +366,285 @@ def extract_subagent_response_text(tool_use_result: dict) -> str:
 
 
 # =============================================================================
+# JSONL Intermediate Format Export
+# =============================================================================
+
+
+def export_session_to_jsonl(
+    session_file: str | Path,
+    project_dir: str | Path | None = None,
+) -> list[dict[str, Any]]:
+    """
+    Export a Claude Code session to JSONL intermediate format.
+
+    Uses a schema compatible with the shared markdown renderer so both
+    Claude and LiteLLM pipelines can use the same rendering code.
+
+    Args:
+        session_file: Path to the .jsonl session file.
+        project_dir: Project directory containing subagent files. If None,
+                     inferred from session_file location.
+
+    Returns:
+        List of JSONL records representing the conversation.
+    """
+    session_file = Path(session_file)
+
+    if project_dir is None:
+        project_dir = session_file.parent
+    else:
+        project_dir = Path(project_dir)
+
+    # Parse all messages
+    messages: list[SessionMessage] = []
+    for raw in parse_jsonl_file(session_file):
+        msg = parse_message(raw)
+        messages.append(msg)
+
+    if not messages:
+        return [
+            {"record_type": "header", "session_id": "", "schema_version": "1.0"},
+            {"record_type": "footer", "stats": {"user_turns": 0, "assistant_turns": 0, "tool_calls": 0, "subagents": 0, "compactions": 0}},
+        ]
+
+    # Extract session metadata
+    session_id = session_file.stem  # UUID from filename
+    cwd = None
+    git_branch = None
+    summary = ""
+
+    for msg in messages:
+        if msg.type == "summary":
+            summary = msg.raw.get("summary", "")
+        if msg.cwd and not cwd:
+            cwd = msg.cwd
+        if msg.git_branch and not git_branch:
+            git_branch = msg.git_branch
+
+    # Get timestamps
+    timestamps = [m.timestamp for m in messages if m.timestamp]
+    start_time = min(timestamps) if timestamps else None
+    end_time = max(timestamps) if timestamps else None
+
+    # Build JSONL records
+    records: list[dict[str, Any]] = []
+
+    # Stats tracking
+    stats = {
+        "user_turns": 0,
+        "assistant_turns": 0,
+        "tool_calls": 0,
+        "subagents": 0,
+        "compactions": 0,
+    }
+
+    # Subagent tracking
+    subagent_type_counts: dict[str, int] = {}
+
+    # Track pending tool calls
+    pending_tools: dict[str, dict] = {}
+    order_index = 0
+
+    # Process messages
+    i = 0
+    while i < len(messages):
+        msg = messages[i]
+
+        # Skip non-conversation types
+        if msg.type in ("summary", "file-history-snapshot"):
+            i += 1
+            continue
+
+        # Handle compaction boundary
+        if msg.type == "system" and msg.subtype == "compact_boundary":
+            stats["compactions"] += 1
+
+            # Get summary from next message
+            summary_text = ""
+            if i + 1 < len(messages):
+                next_msg = messages[i + 1]
+                if next_msg.type == "user":
+                    summary_text = extract_text_content(next_msg.content)
+
+            records.append({
+                "record_type": "event",
+                "event_type": "compaction",
+                "order_index": order_index,
+                "number": stats["compactions"],
+                "trigger": msg.compact_metadata.get("trigger", "unknown"),
+                "pre_tokens": msg.compact_metadata.get("pre_tokens", 0),
+                "summary": summary_text,
+                "timestamp": msg.timestamp.isoformat() if msg.timestamp else None,
+            })
+            order_index += 1
+
+            # Skip the continuation summary message
+            if i + 1 < len(messages) and messages[i + 1].type == "user":
+                i += 2
+            else:
+                i += 1
+            continue
+
+        # User message with tool result
+        if msg.type == "user" and msg.tool_use_result is not None:
+            result = msg.tool_use_result
+
+            # Check if subagent result
+            if isinstance(result, dict) and result.get("agentId"):
+                agent_id = result.get("agentId", "")
+
+                # Find matching Task tool
+                task_info = None
+                for tid, info in list(pending_tools.items()):
+                    if info.get("name") == "Task":
+                        task_info = info
+                        del pending_tools[tid]
+                        break
+
+                if task_info:
+                    subagent_type = task_info["input"].get("subagent_type", "unknown")
+                    task_description = task_info["input"].get("description", "")
+                    task_prompt = task_info["input"].get("prompt", "")
+                else:
+                    subagent_type = "unknown"
+                    task_description = ""
+                    task_prompt = result.get("prompt", "")
+
+                normalized_type = normalize_subagent_type(subagent_type)
+                subagent_type_counts[normalized_type] = subagent_type_counts.get(normalized_type, 0) + 1
+                sequence = subagent_type_counts[normalized_type]
+                filename = f"subagent_{normalized_type}_{sequence}"
+
+                response_text = extract_subagent_response_text(result)
+
+                records.append({
+                    "record_type": "event",
+                    "event_type": "subagent",
+                    "order_index": order_index,
+                    "subagent_type": subagent_type,
+                    "description": task_description,
+                    "prompt": task_prompt,
+                    "response": response_text,
+                    "filename": filename,
+                    "agent_id": agent_id,
+                    "timestamp": msg.timestamp.isoformat() if msg.timestamp else None,
+                })
+                order_index += 1
+                stats["subagents"] += 1
+
+            else:
+                # Regular tool result
+                result_str = str(result) if result else ""
+
+                # Find matching tool call
+                tool_info = None
+                tool_id = None
+                for tid, info in list(pending_tools.items()):
+                    if not info.get("result_received"):
+                        tool_info = info
+                        tool_id = tid
+                        break
+
+                if tool_info:
+                    tool_name = tool_info.get("name", "Unknown")
+                    tool_input = tool_info.get("input", {})
+                    tool_info["result_received"] = True
+
+                    records.append({
+                        "record_type": "event",
+                        "event_type": "tool",
+                        "order_index": order_index,
+                        "name": tool_name,
+                        "input": tool_input,
+                        "result": result_str,
+                        "tool_use_id": tool_id,
+                        "timestamp": msg.timestamp.isoformat() if msg.timestamp else None,
+                    })
+                    order_index += 1
+                    stats["tool_calls"] += 1
+
+            i += 1
+            continue
+
+        # Regular user message
+        if msg.type == "user":
+            content = extract_text_content(msg.content)
+            if content and content.strip():
+                records.append({
+                    "record_type": "event",
+                    "event_type": "user",
+                    "order_index": order_index,
+                    "text": content,
+                    "message_id": msg.uuid,
+                    "parent_id": msg.parent_uuid,
+                    "timestamp": msg.timestamp.isoformat() if msg.timestamp else None,
+                })
+                order_index += 1
+                stats["user_turns"] += 1
+
+            i += 1
+            continue
+
+        # Assistant message
+        if msg.type == "assistant":
+            # Register tool uses
+            if msg.tool_uses:
+                for tool_use in msg.tool_uses:
+                    tool_id = tool_use.get("id", "")
+                    pending_tools[tool_id] = {
+                        "name": tool_use.get("name"),
+                        "input": tool_use.get("input", {}),
+                        "result_received": False,
+                    }
+
+            # Text content
+            text_content = extract_text_content(msg.content)
+            if text_content and text_content.strip():
+                records.append({
+                    "record_type": "event",
+                    "event_type": "assistant",
+                    "order_index": order_index,
+                    "text": text_content,
+                    "message_id": msg.uuid,
+                    "parent_id": msg.parent_uuid,
+                    "timestamp": msg.timestamp.isoformat() if msg.timestamp else None,
+                })
+                order_index += 1
+                stats["assistant_turns"] += 1
+
+            i += 1
+            continue
+
+        i += 1
+
+    # Create header record (insert at beginning)
+    header = {
+        "record_type": "header",
+        "schema_version": "1.0",
+        "session_id": session_id,
+        "chain_id": session_id,  # For LiteLLM compatibility
+        "claude_session_id": session_id,
+        "pipeline": "claude",
+        "start_time": start_time.isoformat() if start_time else None,
+        "end_time": end_time.isoformat() if end_time else None,
+        "compaction_count": stats["compactions"],
+        "metadata": {
+            "project_path": cwd,
+            "git_branch": git_branch,
+            "summary": summary,
+        },
+    }
+
+    # Create footer record
+    footer = {
+        "record_type": "footer",
+        "stats": stats,
+    }
+
+    return [header] + records + [footer]
+
+
+# =============================================================================
 # Main Export Function
 # =============================================================================
 

@@ -2243,13 +2243,15 @@ def _extract_tool_use_id_from_input(input_val: str) -> str | None:
     return None
 
 
-def export_chain_to_jsonl(
+def export_chain_to_jsonl_v1(
     chain: ConversationChain,
     sessions: list[dict[str, Any]],
     include_raw_attributes: bool = True,
     include_ancillary: bool = False,
 ) -> list[dict[str, Any]]:
     """
+    [LEGACY] Turn-based JSONL export. Use export_chain_to_jsonl() for event-based format.
+
     Export a conversation chain to JSONL format (list of records).
 
     Each record represents either:
@@ -2263,7 +2265,7 @@ def export_chain_to_jsonl(
     - is_compaction: Whether this turn is part of compaction handling
     - subagent_span_ids: For main_thread turns, list of child subagent span IDs
 
-    This is the canonical, reversible format. Each line can be processed
+    This is the legacy turn-based format. Each line can be processed
     independently for streaming/grep-ability.
 
     By default, only main_thread turns are exported (much smaller files).
@@ -2564,3 +2566,766 @@ def export_chain_to_json(
         "turn_count": footer.get("turn_count", 0),
         "turns": turns,
     }
+
+
+# =============================================================================
+# V2 JSONL Export - Event-based format for markdown rendering
+# =============================================================================
+#
+# This is the new event-based JSONL format that:
+# 1. Extracts messages in correct chronological order using cumulative message diffing
+# 2. Links tools to assistant messages via tool_use_id
+# 3. Produces records suitable for markdown_renderer.py
+#
+# The key insight is that raw_gen_ai_request spans contain cumulative conversation
+# history in correct order. By diffing successive spans, we get the true message order.
+
+
+def _extract_cumulative_messages_from_raw_span(span: dict[str, Any]) -> list[dict[str, Any]]:
+    """
+    Extract the cumulative conversation messages from a raw_gen_ai_request span.
+
+    The correct path is: attributes -> llm -> None -> messages
+
+    This is the SOURCE OF TRUTH for message ordering - it contains the full
+    conversation history in correct chronological order at the time of the LLM call.
+
+    Args:
+        span: A raw_gen_ai_request span dict.
+
+    Returns:
+        List of message dicts with 'role' and 'content' keys, or empty list.
+    """
+    raw_attrs = span.get("raw_attributes_json")
+    if not raw_attrs:
+        raw_attrs = span.get("raw_attributes")
+    if not raw_attrs:
+        return []
+
+    try:
+        if isinstance(raw_attrs, str):
+            attrs = json.loads(raw_attrs)
+        else:
+            attrs = raw_attrs
+
+        # Navigate: attributes -> llm -> None -> messages
+        inner = attrs.get("attributes", {})
+        llm = inner.get("llm", {})
+        # The key is literally the string "None" (not Python None)
+        none_key = llm.get("None", llm.get(None, {}))
+
+        messages_str = none_key.get("messages", "")
+
+        if not messages_str:
+            return []
+
+        # Parse the messages string (it's a JSON/Python literal string)
+        try:
+            messages = json.loads(messages_str)
+        except json.JSONDecodeError:
+            try:
+                messages = ast.literal_eval(messages_str)
+            except (ValueError, SyntaxError):
+                return []
+
+        return messages if isinstance(messages, list) else []
+
+    except (json.JSONDecodeError, TypeError, AttributeError):
+        pass
+
+    return []
+
+
+def _get_message_content_key(msg: dict[str, Any]) -> str:
+    """
+    Generate a unique key for a message based on role and content.
+
+    Used for deduplication when diffing successive spans.
+    """
+    role = msg.get("role", "")
+    content = msg.get("content", "")
+
+    if isinstance(content, list):
+        # Get first text content for hashing
+        for block in content:
+            if isinstance(block, dict):
+                if block.get("type") == "text":
+                    content = block.get("text", "")[:200]
+                    break
+                elif block.get("type") == "tool_result":
+                    # Include tool_use_id for uniqueness
+                    tool_id = block.get("tool_use_id", "")
+                    content = f"tool_result:{tool_id}"
+                    break
+        else:
+            content = str(content)[:200]
+    elif isinstance(content, str):
+        content = content[:200]
+    else:
+        content = str(content)[:200]
+
+    return f"{role}:{hash(content)}"
+
+
+def _get_message_text(msg: dict[str, Any]) -> str:
+    """Extract text content from a message dict."""
+    content = msg.get("content", "")
+
+    if isinstance(content, list):
+        texts = []
+        for block in content:
+            if isinstance(block, dict):
+                if block.get("type") == "text":
+                    texts.append(block.get("text", ""))
+                elif block.get("type") == "tool_result":
+                    # Include tool result content
+                    result_content = block.get("content", "")
+                    if isinstance(result_content, str):
+                        texts.append(f"[tool_result: {result_content[:100]}]")
+        return " ".join(texts)
+    elif isinstance(content, str):
+        return content
+
+    return str(content)
+
+
+def _extract_ordered_messages(
+    all_spans: list[dict[str, Any]],
+) -> list[tuple[str, str]]:
+    """
+    Extract messages in correct chronological order by diffing successive
+    raw_gen_ai_request spans.
+
+    This is the SOURCE OF TRUTH approach - each raw_gen_ai_request span contains
+    the cumulative conversation history in correct order. By finding main thread
+    spans (those with increasing message counts) and diffing them, we get messages
+    in the order they actually occurred.
+
+    Args:
+        all_spans: List of all spans for a session.
+
+    Returns:
+        List of (role, text) tuples in correct chronological order.
+    """
+    # Filter to raw_gen_ai_request spans only
+    raw_spans = [s for s in all_spans if s.get("name") == "raw_gen_ai_request"]
+
+    if not raw_spans:
+        return []
+
+    # Sort by start_time
+    raw_spans.sort(key=lambda s: s.get("start_time", ""))
+
+    # Find main thread spans (those with increasing cumulative message counts)
+    main_thread_spans = []
+    prev_count = 0
+
+    for span in raw_spans:
+        messages = _extract_cumulative_messages_from_raw_span(span)
+        count = len(messages)
+
+        if count >= 2:
+            # Verify starts with user role
+            if messages and messages[0].get("role") == "user":
+                # Include if:
+                # 1. Count is increasing (normal case)
+                # 2. OR count dropped significantly (compaction/new turn) but we have valid messages
+                #
+                # Require at least 4 messages for compaction reset to distinguish from subagent calls
+                is_increasing = count > prev_count
+                is_compaction_reset = (
+                    prev_count > 0 and
+                    count < prev_count / 2 and
+                    count >= 4
+                )
+
+                if is_increasing or is_compaction_reset:
+                    main_thread_spans.append((span, messages))
+                    prev_count = count
+
+    if not main_thread_spans:
+        return []
+
+    # Diff successive spans to get ordered messages
+    ordered_messages: list[tuple[str, str]] = []
+    seen_keys: set[str] = set()
+
+    for span, messages in main_thread_spans:
+        for msg in messages:
+            key = _get_message_content_key(msg)
+            if key not in seen_keys:
+                seen_keys.add(key)
+                role = msg.get("role", "unknown")
+                text = _get_message_text(msg)
+                if not text.strip():
+                    continue
+
+                # Skip system/internal messages that we don't export
+                if role == "user":
+                    # Skip tool results (internal system messages)
+                    if text.startswith("[tool_result:"):
+                        continue
+                    # Skip system reminders
+                    if text.startswith("<system-reminder>") or text.startswith("<system"):
+                        continue
+                    # Skip subagent prompts (not actual user turns)
+                    if text.startswith("Explore the ~/") or text.startswith("Search for and read"):
+                        continue
+                    # Skip command/JSON outputs
+                    if text.startswith("{") and text.endswith("}"):
+                        continue
+                    if text.startswith("Command:") and "\nOutput:" in text:
+                        continue
+
+                ordered_messages.append((role, text))
+
+    return ordered_messages
+
+
+def _parse_message_content(content: str) -> list[dict[str, Any]]:
+    """
+    Parse message content which may be JSON array of message blocks.
+
+    Content may be stored as JSON (double quotes) or Python literals (single quotes).
+    Returns list of message dictionaries with 'type' and content keys.
+    """
+    if not content:
+        return []
+
+    parsed = None
+
+    # Try to parse as JSON array first
+    try:
+        parsed = json.loads(content)
+    except json.JSONDecodeError:
+        pass
+
+    # If JSON fails, try Python literal (handles single quotes)
+    if parsed is None:
+        try:
+            parsed = ast.literal_eval(content)
+        except (ValueError, SyntaxError):
+            pass
+
+    # Process the parsed content if successful
+    if isinstance(parsed, list):
+        messages = []
+        for item in parsed:
+            if isinstance(item, dict):
+                if item.get("type") == "text":
+                    messages.append({"type": "text", "text": item.get("text", "")})
+                elif item.get("type") == "tool_use":
+                    messages.append({
+                        "type": "tool_use",
+                        "name": item.get("name", "unknown"),
+                        "input": item.get("input", {}),
+                        "id": item.get("id", ""),
+                    })
+                elif item.get("type") == "tool_result":
+                    messages.append({
+                        "type": "tool_result",
+                        "tool_use_id": item.get("tool_use_id", ""),
+                        "content": item.get("content", ""),
+                    })
+        return messages
+
+    # Return as plain text if parsing failed
+    if content.strip():
+        return [{"type": "text", "text": content}]
+    return []
+
+
+def _extract_task_span_info(span: dict[str, Any]) -> dict[str, Any] | None:
+    """
+    Extract subagent info from a Claude_Code_Tool_Task span.
+
+    Returns dict with: tool_use_id, subagent_type, description, prompt, response
+    """
+    raw_attrs = span.get("raw_attributes_json")
+    if not raw_attrs:
+        return None
+
+    try:
+        if isinstance(raw_attrs, str):
+            attrs = json.loads(raw_attrs)
+        else:
+            attrs = raw_attrs
+
+        attributes = attrs.get("attributes", {})
+
+        # Get input - matches original _extract_task_span_info format
+        input_data = attributes.get("input", {}).get("value", "")
+        if isinstance(input_data, str):
+            input_data = json.loads(input_data) if input_data else {}
+
+        if not input_data or input_data.get("type") != "tool_use":
+            return None
+
+        # Extract tool_use_id from input's id field (not tool_use_id)
+        tool_use_id = input_data.get("id", "")
+        tool_input = input_data.get("input", {})
+
+        # Get output
+        output_data = attributes.get("output", {}).get("value", "")
+        if isinstance(output_data, str):
+            # Try to parse as Python literal (Phoenix uses single quotes)
+            try:
+                output_data = ast.literal_eval(output_data)
+            except (ValueError, SyntaxError):
+                try:
+                    output_data = json.loads(output_data)
+                except json.JSONDecodeError:
+                    output_data = []
+
+        # Extract response text
+        response_text = ""
+        if isinstance(output_data, list):
+            for item in output_data:
+                if isinstance(item, dict) and item.get("type") == "text":
+                    response_text = item.get("text", "")
+                    break
+        elif isinstance(output_data, str):
+            response_text = output_data
+
+        return {
+            "tool_use_id": tool_use_id,
+            "subagent_type": tool_input.get("subagent_type", "unknown"),
+            "description": tool_input.get("description", ""),
+            "prompt": tool_input.get("prompt", ""),
+            "response": response_text,
+        }
+    except (json.JSONDecodeError, TypeError, KeyError, AttributeError):
+        return None
+
+
+def _extract_tool_span_info(span: dict[str, Any]) -> dict[str, Any] | None:
+    """
+    Extract tool info from a Claude_Code_Tool_* span (non-Task).
+
+    Returns dict with: tool_use_id, name, input, result
+    """
+    name = span.get("name", "")
+    if not name.startswith("Claude_Code_Tool_") or name == "Claude_Code_Tool_Task":
+        return None
+
+    # Extract tool name from span name
+    tool_name = name.replace("Claude_Code_Tool_", "")
+
+    raw_attrs = span.get("raw_attributes_json")
+    if not raw_attrs:
+        return None
+
+    try:
+        if isinstance(raw_attrs, str):
+            attrs = json.loads(raw_attrs)
+        else:
+            attrs = raw_attrs
+
+        attributes = attrs.get("attributes", {})
+
+        # Get input
+        input_data = attributes.get("input", {}).get("value", "")
+        if isinstance(input_data, str):
+            try:
+                input_data = json.loads(input_data) if input_data else {}
+            except json.JSONDecodeError:
+                input_data = {}
+
+        tool_use_id = ""
+        tool_input = {}
+
+        if isinstance(input_data, dict):
+            if input_data.get("type") == "tool_use":
+                tool_use_id = input_data.get("id", "")
+                tool_input = input_data.get("input", {})
+            else:
+                tool_input = input_data
+
+        # Get output
+        output_data = attributes.get("output", {}).get("value", "")
+        result = ""
+        if isinstance(output_data, str):
+            result = output_data
+        elif isinstance(output_data, (dict, list)):
+            result = str(output_data)
+
+        return {
+            "tool_use_id": tool_use_id,
+            "name": tool_name,
+            "input": tool_input,
+            "result": result,
+        }
+    except (json.JSONDecodeError, TypeError, KeyError, AttributeError):
+        return None
+
+
+def export_chain_to_jsonl(
+    chain: ConversationChain,
+    sessions: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """
+    Export a conversation chain to JSONL format with event-based records.
+
+    This is the canonical format designed for markdown_renderer.py. It produces:
+    - A header record with chain metadata
+    - Event records for each conversation event (user, assistant, tool, subagent, compaction)
+    - A footer record with statistics
+
+    The key improvement over the legacy V1 format (export_chain_to_jsonl_v1) is using
+    cumulative message diffing from raw_gen_ai_request spans to get correct chronological ordering.
+
+    Args:
+        chain: The ConversationChain to export.
+        sessions: List of all session dictionaries.
+
+    Returns:
+        List of dictionaries, each representing one JSONL line.
+    """
+    session_lookup = {s.get("session_id", ""): s for s in sessions}
+    records: list[dict[str, Any]] = []
+
+    # Collect all spans from all sessions
+    all_spans: list[dict[str, Any]] = []
+    for session_id in chain.session_ids:
+        session = session_lookup.get(session_id, {})
+        all_spans.extend(session.get("spans", []))
+
+    # Extract Claude session UUID
+    claude_session_id = chain.claude_session_id
+    if not claude_session_id:
+        for span in all_spans:
+            raw_attrs = span.get("raw_attributes_json")
+            if raw_attrs:
+                try:
+                    if isinstance(raw_attrs, str):
+                        attrs = json.loads(raw_attrs)
+                    else:
+                        attrs = raw_attrs
+                    # Try to find session UUID in attributes
+                    meta = attrs.get("attributes", {}).get("metadata", {})
+                    if isinstance(meta, str):
+                        try:
+                            meta = json.loads(meta)
+                        except json.JSONDecodeError:
+                            meta = {}
+                    session_uuid = meta.get("sessionId") or meta.get("session_id")
+                    if session_uuid and len(session_uuid) == 36:
+                        claude_session_id = session_uuid
+                        break
+                except (json.JSONDecodeError, TypeError, AttributeError):
+                    pass
+
+    if not claude_session_id:
+        claude_session_id = chain.chain_id
+
+    # Get timestamps from ALL spans
+    all_timestamps: list[datetime] = []
+    for span in all_spans:
+        ts = _parse_timestamp(span.get("start_time"))
+        if ts:
+            all_timestamps.append(ts)
+        ts = _parse_timestamp(span.get("end_time"))
+        if ts:
+            all_timestamps.append(ts)
+
+    start_time = min(all_timestamps) if all_timestamps else None
+    end_time = max(all_timestamps) if all_timestamps else None
+
+    # LiteLLM-specific tracking
+    total_tokens = 0
+    models_used: set[str] = set()
+
+    # Stats
+    stats = {
+        "user_turns": 0,
+        "assistant_turns": 0,
+        "tool_calls": 0,
+        "subagents": 0,
+        "compactions": 0,
+    }
+
+    # Identify main thread trace_ids
+    main_thread_trace_ids: set[str] = set()
+    for span in all_spans:
+        if span.get("name") == "Claude_Code_Tool_Task":
+            trace_id = span.get("trace_id")
+            if trace_id:
+                main_thread_trace_ids.add(trace_id)
+
+    # Build ordering index from raw_gen_ai_request spans
+    ordered_messages = _extract_ordered_messages(all_spans)
+    ordering_index: dict[int, tuple[int, str]] = {}
+    max_order_idx = len(ordered_messages)
+    for idx, (role, text) in enumerate(ordered_messages):
+        text_clean = text.strip()
+        if text_clean:
+            content_hash = hash(text_clean[:100])
+            if content_hash not in ordering_index:
+                ordering_index[content_hash] = (idx, role)
+
+    # Collect conversation events: tuples of (timestamp, event_type, data)
+    conversation_events: list[tuple[datetime | None, str, dict[str, Any]]] = []
+
+    # Track seen messages and tool_use_ids for deduplication
+    seen_tool_use_ids: set[str] = set()
+    task_tool_ids: set[str] = set()
+    seen_user_messages: set[str] = set()
+    seen_assistant_messages: set[str] = set()
+    seen_compaction_hashes: set[int] = set()
+
+    # Map tool_use_id -> order_idx for correct tool positioning
+    tool_use_id_to_order_idx: dict[str, int] = {}
+
+    # Collect Task spans first
+    for span in all_spans:
+        if span.get("name") == "Claude_Code_Tool_Task":
+            task_info = _extract_task_span_info(span)
+            if task_info:
+                tool_use_id = task_info["tool_use_id"]
+                if tool_use_id in seen_tool_use_ids:
+                    continue
+                seen_tool_use_ids.add(tool_use_id)
+                task_tool_ids.add(tool_use_id)
+                ts = _parse_timestamp(span.get("start_time"))
+                conversation_events.append((ts, "subagent", task_info))
+                stats["subagents"] += 1
+
+    # Collect tool spans (non-Task) from main thread traces only
+    for span in all_spans:
+        trace_id = span.get("trace_id")
+        if trace_id and trace_id not in main_thread_trace_ids:
+            continue
+
+        name = span.get("name", "")
+        if name.startswith("Claude_Code_Tool_") and name != "Claude_Code_Tool_Task":
+            tool_info = _extract_tool_span_info(span)
+            if tool_info:
+                tool_use_id = tool_info.get("tool_use_id", "")
+                if tool_use_id and tool_use_id in seen_tool_use_ids:
+                    continue
+                if tool_use_id:
+                    seen_tool_use_ids.add(tool_use_id)
+                ts = _parse_timestamp(span.get("start_time"))
+                conversation_events.append((ts, "tool", tool_info))
+                stats["tool_calls"] += 1
+
+    # Collect main thread conversation spans for user/assistant messages
+    for span in all_spans:
+        trace_id = span.get("trace_id")
+        if trace_id and trace_id not in main_thread_trace_ids:
+            continue
+
+        name = span.get("name", "")
+        if not name.startswith("Claude_Code_Internal_Prompt_"):
+            continue
+
+        ts = _parse_timestamp(span.get("start_time"))
+        if not ts:
+            continue
+
+        input_val = _extract_input_value(span)
+        output_val = _extract_output_value(span)
+
+        # Track tokens and models
+        tokens_prompt = span.get("llm_token_count_prompt") or 0
+        tokens_completion = span.get("llm_token_count_completion") or 0
+        total_tokens += tokens_prompt + tokens_completion
+
+        model = _extract_model(span)
+        if model:
+            models_used.add(model)
+
+        # Check for compaction
+        if COMPACTION_CONTINUATION_MARKER in input_val:
+            if "The conversation is summarized below:" in input_val:
+                summary_start = input_val.find("The conversation is summarized below:")
+                summary_text = input_val[summary_start:]
+                summary_hash = hash(summary_text[:500])
+                if summary_hash not in seen_compaction_hashes:
+                    seen_compaction_hashes.add(summary_hash)
+                    stats["compactions"] += 1
+                    conversation_events.append((ts, "compaction", {
+                        "number": stats["compactions"],
+                        "summary": summary_text,
+                    }))
+            continue
+
+        # Skip compaction task spans
+        if COMPACTION_TASK_MARKER in input_val:
+            continue
+
+        # Parse messages
+        input_messages = _parse_message_content(input_val)
+        output_messages = _parse_message_content(output_val)
+
+        input_ts = ts
+        output_ts = _parse_timestamp(span.get("end_time")) or ts
+
+        # Extract user messages
+        for msg in input_messages:
+            if msg["type"] == "text":
+                text = msg.get("text", "").strip()
+                if text and len(text) > 10:
+                    # Skip system/internal messages
+                    if text.startswith("<system"):
+                        continue
+                    if text.startswith("Command:") and "\nOutput:" in text:
+                        continue
+                    if text.startswith("{") and text.endswith("}"):
+                        continue
+                    if text.startswith("Files modified by"):
+                        continue
+                    if text.startswith("Explore the ~/") or text.startswith("Search for and read"):
+                        continue
+
+                    text_hash = hash(text[:100])
+                    if text_hash in seen_user_messages:
+                        continue
+                    seen_user_messages.add(text_hash)
+
+                    order_info = ordering_index.get(text_hash)
+                    if order_info is not None:
+                        order_idx, _ = order_info
+                        conversation_events.append((input_ts, "user", {"text": text, "order_idx": order_idx}))
+                    else:
+                        conversation_events.append((input_ts, "user", {"text": text}))
+                    stats["user_turns"] += 1
+
+        # Extract assistant messages
+        assistant_order_idx_for_this_span: int | None = None
+        for msg in output_messages:
+            if msg["type"] == "text":
+                text = msg.get("text", "").strip()
+                if text and len(text) >= 5:
+                    text_hash = hash(text[:100])
+                    if text_hash in seen_assistant_messages:
+                        continue
+                    seen_assistant_messages.add(text_hash)
+
+                    order_info = ordering_index.get(text_hash)
+                    if order_info is not None:
+                        order_idx, _ = order_info
+                        assistant_order_idx_for_this_span = order_idx
+                        conversation_events.append((output_ts, "assistant", {"text": text, "order_idx": order_idx}))
+                    else:
+                        conversation_events.append((output_ts, "assistant", {"text": text}))
+                    stats["assistant_turns"] += 1
+
+        # Map tool_use_ids to order_idx
+        if assistant_order_idx_for_this_span is not None:
+            for msg in output_messages:
+                if msg["type"] == "tool_use":
+                    tool_use_id = msg.get("id", "")
+                    if tool_use_id:
+                        tool_use_id_to_order_idx[tool_use_id] = assistant_order_idx_for_this_span
+
+    # Assign order_idx to tools/subagents using tool_use_id linking
+    for i, (ts, event_type, data) in enumerate(conversation_events):
+        if event_type in ("tool", "subagent") and "order_idx" not in data:
+            tool_use_id = data.get("tool_use_id", "")
+            if tool_use_id and tool_use_id in tool_use_id_to_order_idx:
+                spawning_assistant_idx = tool_use_id_to_order_idx[tool_use_id]
+                data["order_idx"] = spawning_assistant_idx + 0.5
+            else:
+                # Fallback: Find last assistant before this timestamp
+                best_idx = 0
+                for other_ts, other_type, other_data in conversation_events:
+                    if other_type == "assistant" and "order_idx" in other_data:
+                        if other_ts and ts and other_ts <= ts:
+                            best_idx = max(best_idx, other_data["order_idx"])
+                data["order_idx"] = best_idx + 0.5
+
+    # Event type order within same order_idx
+    EVENT_TYPE_ORDER = {
+        "user": 0,
+        "assistant": 1,
+        "tool": 2,
+        "subagent": 3,
+        "compaction": 4,
+    }
+
+    # Interpolate order_idx for events without one
+    events_with_idx = [(ts, t, d) for ts, t, d in conversation_events if "order_idx" in d]
+    events_without_idx = [(ts, t, d) for ts, t, d in conversation_events if "order_idx" not in d]
+
+    if events_with_idx and events_without_idx:
+        events_with_idx.sort(key=lambda e: e[2].get("order_idx", 0))
+
+        for ts, event_type, data in events_without_idx:
+            if ts is None:
+                data["order_idx"] = max_order_idx + 1
+                continue
+
+            ts_value = ts.timestamp()
+            best_idx = 0
+            for other_ts, other_type, other_data in events_with_idx:
+                other_idx = other_data.get("order_idx", 0)
+                if other_ts and other_ts.timestamp() <= ts_value:
+                    best_idx = max(best_idx, other_idx)
+            data["order_idx"] = best_idx + 0.1
+
+    def sort_key(event):
+        ts, event_type, data = event
+        order_idx = data.get("order_idx", max_order_idx + 1)
+        type_order = EVENT_TYPE_ORDER.get(event_type, 5)
+        ts_value = ts.timestamp() if ts else 0
+        return (order_idx, type_order, ts_value)
+
+    conversation_events.sort(key=sort_key)
+
+    # Build header record
+    records.append({
+        "record_type": "header",
+        "schema_version": "2.0",
+        "chain_id": chain.chain_id,
+        "claude_session_id": claude_session_id,
+        "session_ids": chain.session_ids,
+        "session_count": chain.session_count,
+        "compaction_count": chain.compaction_count,
+        "start_time": start_time.isoformat() if start_time else None,
+        "end_time": end_time.isoformat() if end_time else None,
+        "duration_minutes": round(chain.duration_minutes, 2),
+        "total_spans": chain.total_spans,
+        "total_tokens": total_tokens,
+        "metrics": {
+            "models_used": {m: 1 for m in models_used},
+        },
+    })
+
+    # Build event records
+    for ts, event_type, data in conversation_events:
+        event_record: dict[str, Any] = {
+            "record_type": "event",
+            "event_type": event_type,
+            "timestamp": ts.isoformat() if ts else None,
+            "order_idx": data.get("order_idx"),
+        }
+
+        if event_type == "user":
+            event_record["text"] = data.get("text", "")
+        elif event_type == "assistant":
+            event_record["text"] = data.get("text", "")
+        elif event_type == "tool":
+            event_record["tool_use_id"] = data.get("tool_use_id", "")
+            event_record["name"] = data.get("name", "")
+            event_record["input"] = data.get("input", {})
+            event_record["result"] = data.get("result", "")
+        elif event_type == "subagent":
+            event_record["tool_use_id"] = data.get("tool_use_id", "")
+            event_record["subagent_type"] = data.get("subagent_type", "")
+            event_record["description"] = data.get("description", "")
+            event_record["prompt"] = data.get("prompt", "")
+            event_record["response"] = data.get("response", "")
+        elif event_type == "compaction":
+            event_record["number"] = data.get("number", 0)
+            event_record["summary"] = data.get("summary", "")
+
+        records.append(event_record)
+
+    # Build footer record
+    records.append({
+        "record_type": "footer",
+        "stats": stats,
+    })
+
+    return records
