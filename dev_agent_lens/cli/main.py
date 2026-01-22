@@ -5673,18 +5673,16 @@ def chain_export_cmd(
         from dev_agent_lens.analysis.chains import export_chain_to_jsonl
         import json as json_module
 
+        # Use canonical event-based JSONL format
         records = export_chain_to_jsonl(
             target_chain,
             sessions,
-            include_raw_attributes=not no_raw_attributes,
-            include_ancillary=include_ancillary,
         )
         # JSONL: one JSON object per line
         content = "\n".join(json_module.dumps(record, default=str) for record in records)
         ext = ".jsonl"
-        turn_count = sum(1 for r in records if r.get("record_type") == "turn")
-        mode = "with ancillary" if include_ancillary else "main thread only"
-        click.echo(f"Exported {turn_count} turns as JSONL ({mode}, {len(records)} total records)")
+        event_count = sum(1 for r in records if r.get("record_type") == "event")
+        click.echo(f"Exported {event_count} events as JSONL (event-based format, {len(records)} total records)")
     elif output_format == "json":
         from dev_agent_lens.analysis.chains import export_chain_to_json
         import json as json_module
