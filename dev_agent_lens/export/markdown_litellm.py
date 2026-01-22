@@ -967,11 +967,13 @@ def _extract_tool_span_info(span: dict[str, Any]) -> dict[str, Any] | None:
         return None
 
 
-def export_chain_to_unified_markdown(
+def export_chain_to_unified_markdown_v1(
     chain: "ConversationChain",
     sessions: list[dict[str, Any]],
 ) -> LiteLLMMarkdownExport:
     """
+    [LEGACY] Direct span-to-markdown export. Use export_chain_to_unified_markdown() for JSONL-based pipeline.
+
     Export a conversation chain to markdown matching AGREED_FORMAT.md.
 
     This function produces output identical to the Claude Session pipeline
@@ -1803,6 +1805,57 @@ def export_to_files(
             written.append(result_path)
 
     return written
+
+
+# =============================================================================
+# Canonical Pipeline: JSONL → Markdown
+# =============================================================================
+#
+# This is the canonical two-stage pipeline:
+# 1. export_chain_to_jsonl() -> JSONL records with conversation events
+# 2. render_jsonl_to_markdown() -> Markdown output
+#
+# Benefits:
+# - JSONL is queryable intermediate format (grep, jq, etc.)
+# - Markdown rendering is deterministic and testable
+# - Same JSONL can be rendered to different formats
+
+
+def export_chain_to_unified_markdown(
+    chain: "ConversationChain",
+    sessions: list[dict[str, Any]],
+) -> LiteLLMMarkdownExport:
+    """
+    Export a conversation chain to markdown using the JSONL pipeline.
+
+    This is the canonical two-stage pipeline that:
+    1. Exports to JSONL with correct chronological ordering
+    2. Renders JSONL to markdown
+
+    Args:
+        chain: The ConversationChain to export.
+        sessions: List of all session dictionaries with spans.
+
+    Returns:
+        LiteLLMMarkdownExport with main content, subagent files, and tool result files.
+    """
+    from dev_agent_lens.analysis.chains import export_chain_to_jsonl
+    from dev_agent_lens.export.markdown_renderer import render_jsonl_to_markdown
+
+    # Stage 1: Export to JSONL
+    records = export_chain_to_jsonl(chain, sessions)
+
+    # Stage 2: Render JSONL to markdown
+    result = render_jsonl_to_markdown(records)
+
+    # Convert to LiteLLMMarkdownExport for compatibility
+    return LiteLLMMarkdownExport(
+        main_content=result.main_content,
+        subagent_files=result.subagent_files,
+        tool_result_files=result.tool_result_files,
+        session_id=result.session_id,
+        stats=result.stats,
+    )
 
 
 # CLI helper for quick testing
