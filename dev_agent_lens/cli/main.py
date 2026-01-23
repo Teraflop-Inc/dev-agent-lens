@@ -737,7 +737,13 @@ def sync(
 @click.option(
     "--reset",
     is_flag=True,
-    help="Clear any existing checkpoint and start fresh",
+    help="Clear any existing checkpoint and start fresh. Requires --yes to confirm.",
+)
+@click.option(
+    "--yes", "-y",
+    "confirm_reset",
+    is_flag=True,
+    help="Confirm destructive operations like --reset without prompting.",
 )
 @click.option(
     "--force-resume",
@@ -799,6 +805,7 @@ def sync_historical(
     delay: float,
     resume: bool,
     reset: bool,
+    confirm_reset: bool,
     force_resume: bool,
     clean: bool,
     show_status: bool,
@@ -1069,15 +1076,50 @@ def sync_historical(
         click.echo("  Tip: Use --start-date YYYY-MM-DD or --days N for a specific range.")
         sync_start_time = sync_end_time - timedelta(days=90)
 
-    # Handle --reset flag
-    for source in sources_to_sync:
-        if reset:
-            if clear_historical_sync(source.name):
-                click.echo(f"Cleared checkpoint for '{source.name}'")
-    for backend_id in backends_to_sync:
-        if reset:
-            if clear_historical_sync(backend_id):
-                click.echo(f"Cleared checkpoint for '{backend_id}'")
+    # Handle --reset flag with safety checks
+    if reset:
+        sources_with_state = []
+
+        # Check which sources have existing state that would be lost
+        for source in sources_to_sync:
+            existing_state = HistoricalSyncState.load(source.name)
+            if existing_state:
+                sources_with_state.append((source.name, existing_state))
+        for backend_id in backends_to_sync:
+            existing_state = HistoricalSyncState.load(backend_id)
+            if existing_state:
+                sources_with_state.append((backend_id, existing_state))
+
+        if sources_with_state:
+            # Show warning about what will be lost
+            click.echo(click.style("\n⚠️  WARNING: --reset will delete the following sync progress:", fg="yellow", bold=True))
+            click.echo("")
+            for name, state in sources_with_state:
+                click.echo(f"  Source: {click.style(name, fg='cyan', bold=True)}")
+                click.echo(f"    Progress: {state.progress_percent:.1f}% complete")
+                click.echo(f"    Spans synced: {state.stats.total_spans:,}")
+                click.echo(f"    Batches completed: {state.stats.batches_completed}")
+                if state.stats.batches_failed > 0:
+                    click.echo(f"    Batches failed (pending retry): {state.stats.batches_failed}")
+                click.echo(f"    Date range: {state.target_start.date()} to {state.target_end.date()}")
+                click.echo("")
+
+            click.echo(click.style("  This will NOT delete your parquet data, only the checkpoint/progress tracking.", fg="white"))
+            click.echo(click.style("  You may need to re-sync data you've already downloaded.", fg="white"))
+            click.echo("")
+
+            if not confirm_reset:
+                click.echo(click.style("To confirm, re-run with --yes or -y flag:", fg="yellow"))
+                click.echo(f"  dal sync-historical --source <name> --reset --yes")
+                click.echo("")
+                raise SystemExit(1)
+
+            # User confirmed, proceed with reset
+            for name, _ in sources_with_state:
+                if clear_historical_sync(name):
+                    click.echo(click.style(f"✓ Cleared checkpoint for '{name}'", fg="green"))
+        else:
+            click.echo("No existing checkpoints to clear.")
 
     # Determine batch duration
     if batch_hours:
