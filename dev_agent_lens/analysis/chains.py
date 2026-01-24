@@ -1508,9 +1508,19 @@ def export_chain_to_markdown(
     task_spans_by_id: dict[str, dict[str, Any]] = {}
     all_spans_by_parent: dict[str, list[dict[str, Any]]] = {}
 
+    # Chain-wide span lookup by span_id for cross-session parent resolution
+    # This is needed because a span's parent may be in a different session of the same chain
+    # (e.g., after compaction boundaries)
+    chain_span_by_id: dict[str, dict[str, Any]] = {}
+
     for session_id in chain.session_ids:
         session = session_lookup.get(session_id, {})
         for span in session.get("spans", []):
+            # Add to chain-wide span lookup for cross-session parent resolution
+            span_id = span.get("span_id")
+            if span_id:
+                chain_span_by_id[span_id] = span
+
             parent_id = span.get("parent_id")
             if parent_id:
                 if parent_id not in all_spans_by_parent:
@@ -1580,12 +1590,9 @@ def export_chain_to_markdown(
                                 print(f"  Depth {depth}: No parent_id, stopping")
                             break
 
-                        # Find parent span
-                        parent_span = None
-                        for check_span in session.get("spans", []):
-                            if check_span.get("span_id") == parent_id:
-                                parent_span = check_span
-                                break
+                        # Find parent span using chain-wide lookup (fixes cross-session resolution)
+                        # Parent may be in a different session of the same chain (e.g., after compaction)
+                        parent_span = chain_span_by_id.get(parent_id)
 
                         if not parent_span:
                             if debug_enabled:
@@ -2817,7 +2824,7 @@ def _parse_message_content(content: str) -> list[dict[str, Any]]:
                 elif item.get("type") == "tool_use":
                     messages.append({
                         "type": "tool_use",
-                        "name": item.get("name", "unknown"),
+                        "tool": item.get("name", "unknown"),  # key must be "tool" to match consumers
                         "input": item.get("input", {}),
                         "id": item.get("id", ""),
                     })

@@ -893,7 +893,7 @@ class TestCompactionHandling:
             # Check compaction section is present
             assert "### Compaction #1" in export.main_content
             assert "**Trigger**: auto (Claude only)" in export.main_content
-            assert "**Pre-compaction tokens**: 155000 (Claude only)" in export.main_content
+            assert "**Pre-compaction tokens**: 155,000 (Claude only)" in export.main_content
             assert "> **Context Summary**:" in export.main_content
 
             # Check stats include compaction count
