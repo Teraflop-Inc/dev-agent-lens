@@ -96,23 +96,6 @@ class SessionMessage:
     raw: dict = field(default_factory=dict)
 
 
-@dataclass
-class SubagentInfo:
-    """Tracking info for a subagent."""
-
-    agent_id: str
-    subagent_type: str
-    normalized_type: str
-    sequence: int
-    filename: str
-    task_description: str
-    task_prompt: str
-    response_summary: str
-    duration_ms: int
-    total_tokens: int
-    tool_count: int
-
-
 # =============================================================================
 # Parsing Functions
 # =============================================================================
@@ -439,6 +422,7 @@ def export_session_to_jsonl(
     # Track pending tool calls
     pending_tools: dict[str, dict] = {}
     order_index = 0
+    parallel_group_counter = 0  # Counter for parallel tool groups
 
     # Process messages
     i = 0
@@ -531,32 +515,66 @@ def export_session_to_jsonl(
                 # Regular tool result
                 result_str = str(result) if result else ""
 
-                # Find matching tool call
+                # Find matching tool call (skip Task tools - handled in subagent branch)
                 tool_info = None
                 tool_id = None
                 for tid, info in list(pending_tools.items()):
-                    if not info.get("result_received"):
+                    if not info.get("result_received") and info.get("name") != "Task":
                         tool_info = info
                         tool_id = tid
                         break
 
                 if tool_info:
-                    tool_name = tool_info.get("name", "Unknown")
-                    tool_input = tool_info.get("input", {})
                     tool_info["result_received"] = True
+                    tool_info["result"] = result_str
 
-                    records.append({
-                        "record_type": "event",
-                        "event_type": "tool",
-                        "order_index": order_index,
-                        "name": tool_name,
-                        "input": tool_input,
-                        "result": result_str,
-                        "tool_use_id": tool_id,
-                        "timestamp": msg.timestamp.isoformat() if msg.timestamp else None,
-                    })
-                    order_index += 1
-                    stats["tool_calls"] += 1
+                    parallel_group = tool_info.get("parallel_group")
+
+                    if parallel_group:
+                        # Check if all tools in this group have received results
+                        group_tools = [
+                            (tid, info) for tid, info in pending_tools.items()
+                            if info.get("parallel_group") == parallel_group
+                        ]
+                        all_received = all(info.get("result_received") for _, info in group_tools)
+
+                        if all_received:
+                            # Emit parallel_tools event with all tools
+                            tools_list = []
+                            for tid, info in group_tools:
+                                tools_list.append({
+                                    "name": info.get("name", "Unknown"),
+                                    "input": info.get("input", {}),
+                                    "result": info.get("result", ""),
+                                    "tool_use_id": tid,
+                                })
+                                stats["tool_calls"] += 1
+                                del pending_tools[tid]
+
+                            records.append({
+                                "record_type": "event",
+                                "event_type": "parallel_tools",
+                                "order_index": order_index,
+                                "tools": tools_list,
+                                "timestamp": msg.timestamp.isoformat() if msg.timestamp else None,
+                            })
+                            order_index += 1
+                    else:
+                        # Single tool - emit immediately
+                        records.append({
+                            "record_type": "event",
+                            "event_type": "tool",
+                            "order_index": order_index,
+                            "name": tool_info.get("name", "Unknown"),
+                            "input": tool_info.get("input", {}),
+                            "result": result_str,
+                            "tool_use_id": tool_id,
+                            "timestamp": msg.timestamp.isoformat() if msg.timestamp else None,
+                        })
+                        order_index += 1
+                        stats["tool_calls"] += 1
+                        if tool_id:
+                            del pending_tools[tool_id]
 
             i += 1
             continue
@@ -584,12 +602,19 @@ def export_session_to_jsonl(
         if msg.type == "assistant":
             # Register tool uses
             if msg.tool_uses:
+                # If multiple tools, assign to a parallel group
+                group_id = None
+                if len(msg.tool_uses) > 1:
+                    parallel_group_counter += 1
+                    group_id = parallel_group_counter
+
                 for tool_use in msg.tool_uses:
                     tool_id = tool_use.get("id", "")
                     pending_tools[tool_id] = {
                         "name": tool_use.get("name"),
                         "input": tool_use.get("input", {}),
                         "result_received": False,
+                        "parallel_group": group_id,
                     }
 
             # Text content
@@ -613,6 +638,7 @@ def export_session_to_jsonl(
         i += 1
 
     # Create header record (insert at beginning)
+    # Fields at top level for compatibility with render_jsonl_to_markdown
     header = {
         "record_type": "header",
         "schema_version": "1.0",
@@ -623,11 +649,10 @@ def export_session_to_jsonl(
         "start_time": start_time.isoformat() if start_time else None,
         "end_time": end_time.isoformat() if end_time else None,
         "compaction_count": stats["compactions"],
-        "metadata": {
-            "project_path": cwd,
-            "git_branch": git_branch,
-            "summary": summary,
-        },
+        # Claude-specific fields at top level for shared renderer
+        "project_path": cwd or "",
+        "git_branch": git_branch,
+        "summary": summary,
     }
 
     # Create footer record
@@ -651,7 +676,8 @@ def export_session_to_markdown(
     """
     Export a Claude Code session JSONL file to markdown.
 
-    Implements the AGREED_FORMAT.md specification.
+    Implements the AGREED_FORMAT.md specification using the shared renderer.
+    This ensures both Claude and LiteLLM pipelines produce identical output format.
 
     Args:
         session_file: Path to the .jsonl session file.
@@ -661,6 +687,8 @@ def export_session_to_markdown(
     Returns:
         MarkdownExport with main content, subagent files, and tool result files.
     """
+    from dev_agent_lens.export.markdown_renderer import render_jsonl_to_markdown
+
     session_file = Path(session_file)
 
     if project_dir is None:
@@ -668,698 +696,51 @@ def export_session_to_markdown(
     else:
         project_dir = Path(project_dir)
 
-    # Parse all messages
-    messages: list[SessionMessage] = []
-    for raw in parse_jsonl_file(session_file):
-        msg = parse_message(raw)
-        messages.append(msg)
+    # Convert Claude JSONL to common format
+    records = export_session_to_jsonl(session_file, project_dir)
 
-    if not messages:
+    if not records or len(records) <= 2:  # Only header and footer
         return MarkdownExport(
             main_content="# Empty Session\n\nNo messages found.\n",
             session_id="",
             stats={"user_turns": 0, "assistant_turns": 0, "tool_calls": 0, "subagents": 0},
         )
 
-    # Extract session metadata
-    session_id = session_file.stem  # UUID from filename
-    cwd = None
-    git_branch = None
-    summary = ""
-
-    for msg in messages:
-        if msg.type == "summary":
-            summary = msg.raw.get("summary", "")
-        if msg.cwd and not cwd:
-            cwd = msg.cwd
-        if msg.git_branch and not git_branch:
-            git_branch = msg.git_branch
-
-    # Get timestamps
-    timestamps = [m.timestamp for m in messages if m.timestamp]
-    start_time = min(timestamps) if timestamps else None
-    end_time = max(timestamps) if timestamps else None
-
-    # Stats tracking
-    stats = {
-        "user_turns": 0,
-        "assistant_turns": 0,
-        "tool_calls": 0,
-        "subagents": 0,
-    }
-
-    # Subagent tracking: type -> count for sequence numbering
-    subagent_type_counts: dict[str, int] = {}
-    subagent_infos: list[SubagentInfo] = []
-
-    # Tool result file tracking
-    tool_result_files: dict[str, str] = {}
-    tool_result_sequence = 0
-
-    # Build conversation content
-    conversation_lines: list[str] = []
-
-    # Track which messages we've processed (for tool results)
-    tool_use_id_to_info: dict[str, dict] = {}  # tool_use_id -> {name, input, ...}
-
-    for msg in messages:
-        # Skip non-conversation types
-        if msg.type == "summary":
-            continue
-        if msg.type == "file-history-snapshot":
-            continue
-
-        # User message
-        if msg.type == "user":
-            # Check if this is a tool result
-            if msg.tool_use_result is not None:
-                # This is a tool result, will be processed with the tool call
-                pass
-            else:
-                # Regular user message
-                content = extract_text_content(msg.content)
-                if content and content.strip():
-                    conversation_lines.append("### User")
-                    conversation_lines.append("")
-                    conversation_lines.append(content)
-                    conversation_lines.append("")
-                    conversation_lines.append("---")
-                    conversation_lines.append("")
-                    stats["user_turns"] += 1
-
-        # Assistant message
-        elif msg.type == "assistant":
-            # Check for tool uses
-            if msg.tool_uses:
-                if len(msg.tool_uses) > 1:
-                    # Parallel tools
-                    conversation_lines.append(f"### Parallel Tools ({len(msg.tool_uses)} calls)")
-                    conversation_lines.append("")
-                    conversation_lines.append("| # | Tool | Target |")
-                    conversation_lines.append("|---|------|--------|")
-
-                    for i, tool_use in enumerate(msg.tool_uses, 1):
-                        tool_name = tool_use.get("name", "Unknown")
-                        tool_input = tool_use.get("input", {})
-                        tool_id = tool_use.get("id", "")
-                        target = get_tool_target_brief(tool_name, tool_input)
-                        conversation_lines.append(f"| {i} | {tool_name} | {target} |")
-                        tool_use_id_to_info[tool_id] = {
-                            "name": tool_name,
-                            "input": tool_input,
-                            "parallel_index": i,
-                            "is_parallel": True,
-                        }
-                        stats["tool_calls"] += 1
-
-                    conversation_lines.append("")
-                    # Results will be added when we see the tool_use_result messages
-
-                else:
-                    # Single tool call
-                    tool_use = msg.tool_uses[0]
-                    tool_name = tool_use.get("name", "Unknown")
-                    tool_input = tool_use.get("input", {})
-                    tool_id = tool_use.get("id", "")
-
-                    # Check if it's a Task (subagent) - handle specially
-                    if tool_name == "Task":
-                        tool_use_id_to_info[tool_id] = {
-                            "name": tool_name,
-                            "input": tool_input,
-                            "is_parallel": False,
-                        }
-                        stats["tool_calls"] += 1
-                        # The subagent section will be added when we see the result
-                    else:
-                        tool_use_id_to_info[tool_id] = {
-                            "name": tool_name,
-                            "input": tool_input,
-                            "is_parallel": False,
-                        }
-                        stats["tool_calls"] += 1
-                        # Tool header and input will be shown, result comes later
-
-            # Text content (separate from tool use)
-            text_content = extract_text_content(msg.content)
-            if text_content and text_content.strip():
-                conversation_lines.append("### Assistant")
-                conversation_lines.append("")
-                conversation_lines.append(text_content)
-                conversation_lines.append("")
-                conversation_lines.append("---")
-                conversation_lines.append("")
-                stats["assistant_turns"] += 1
-
-    # Now we need to re-process to properly interleave tool calls with results
-    # The above approach doesn't work well. Let me rewrite with a cleaner approach.
-
-    # Clear and restart
-    conversation_lines = []
-    stats = {"user_turns": 0, "assistant_turns": 0, "tool_calls": 0, "subagents": 0, "compactions": 0}
-    subagent_type_counts = {}
-    subagent_infos = []
-    tool_result_files = {}
-    tool_result_sequence = 0
-    compaction_files: dict[str, str] = {}  # For compaction summaries > 500 chars
-
-    # Track pending tool calls waiting for results
-    pending_tools: dict[str, dict] = {}  # tool_use_id -> info
-    pending_parallel_group: list[dict] | None = None  # For parallel tools
-    pending_parallel_results: dict[str, str] = {}  # tool_use_id -> result content
-
-    i = 0
-    while i < len(messages):
-        msg = messages[i]
-
-        # Skip non-conversation types
-        if msg.type in ("summary", "file-history-snapshot"):
-            i += 1
-            continue
-
-        # Handle compaction boundary (system message with subtype compact_boundary)
-        if msg.type == "system" and msg.subtype == "compact_boundary":
-            stats["compactions"] += 1
-            compaction_num = stats["compactions"]
-
-            # Get metadata
-            trigger = msg.compact_metadata.get("trigger", "unknown")
-            pre_tokens = msg.compact_metadata.get("pre_tokens", 0)
-
-            # Get continuation summary from next message (should be user message)
-            summary_text = ""
-            if i + 1 < len(messages):
-                next_msg = messages[i + 1]
-                if next_msg.type == "user":
-                    summary_text = extract_text_content(next_msg.content)
-
-            # Format compaction section
-            conversation_lines.append(f"### Compaction #{compaction_num}")
-            conversation_lines.append("")
-            conversation_lines.append("<!-- BEGIN PIPELINE_SPECIFIC -->")
-            conversation_lines.append(f"- **Trigger**: {trigger} (Claude only)")
-            conversation_lines.append(f"- **Pre-compaction tokens**: {pre_tokens} (Claude only)")
-            conversation_lines.append("<!-- END PIPELINE_SPECIFIC -->")
-            conversation_lines.append("")
-
-            if summary_text:
-                summary_preview = truncate(summary_text, SUBAGENT_RESPONSE_SUMMARY_LIMIT)
-                conversation_lines.append("> **Context Summary**:")
-                # Format as blockquote (each line prefixed with >)
-                for line in summary_preview.split("\n"):
-                    conversation_lines.append(f"> {line}")
-                conversation_lines.append("")
-
-                if len(summary_text) > SUBAGENT_RESPONSE_SUMMARY_LIMIT:
-                    file_name = f"compaction_{compaction_num}_summary"
-                    compaction_files[file_name] = summary_text
-                    conversation_lines.append(f"→ Full summary: [{file_name}.txt](./{file_name}.txt)")
-                    conversation_lines.append("")
-
-            conversation_lines.append("---")
-            conversation_lines.append("")
-
-            # Skip the next message (the continuation summary) since we already processed it
-            if i + 1 < len(messages) and messages[i + 1].type == "user":
-                i += 2
-            else:
-                i += 1
-            continue
-
-        # User message with tool result
-        if msg.type == "user" and msg.tool_use_result is not None:
-            result = msg.tool_use_result
-
-            # Check if this is a subagent result (dict with agentId)
-            if isinstance(result, dict) and result.get("agentId"):
-                agent_id = result.get("agentId", "")
-                # Find the corresponding Task tool call
-                task_prompt = result.get("prompt", "")
-
-                # Look for Task tool info in pending_tools
-                task_info = None
-                for tid, info in list(pending_tools.items()):
-                    if info.get("name") == "Task":
-                        task_info = info
-                        del pending_tools[tid]
-                        break
-
-                if task_info:
-                    subagent_type = task_info["input"].get("subagent_type", "unknown")
-                    task_description = task_info["input"].get("description", "")
-                    task_prompt = task_info["input"].get("prompt", task_prompt)
-                else:
-                    subagent_type = "unknown"
-                    task_description = ""
-
-                normalized_type = normalize_subagent_type(subagent_type)
-                subagent_type_counts[normalized_type] = subagent_type_counts.get(normalized_type, 0) + 1
-                sequence = subagent_type_counts[normalized_type]
-                filename = f"subagent_{normalized_type}_{sequence}"
-
-                response_text = extract_subagent_response_text(result)
-                duration_ms = result.get("totalDurationMs", 0)
-                total_tokens = result.get("totalTokens", 0)
-                tool_count = result.get("totalToolUseCount", 0)
-
-                subagent_infos.append(SubagentInfo(
-                    agent_id=agent_id,
-                    subagent_type=subagent_type,
-                    normalized_type=normalized_type,
-                    sequence=sequence,
-                    filename=filename,
-                    task_description=task_description,
-                    task_prompt=task_prompt,
-                    response_summary=response_text,
-                    duration_ms=duration_ms,
-                    total_tokens=total_tokens,
-                    tool_count=tool_count,
-                ))
-
-                # Format subagent section
-                conversation_lines.append(f"### Subagent: {subagent_type}")
-                conversation_lines.append("")
-                conversation_lines.append(f"**Task**: {task_description}")
-
-                prompt_preview = truncate(task_prompt, SUBAGENT_PROMPT_PREVIEW_LIMIT)
-                if len(task_prompt) > SUBAGENT_PROMPT_PREVIEW_LIMIT:
-                    conversation_lines.append(f"**Prompt** (first {SUBAGENT_PROMPT_PREVIEW_LIMIT} chars):")
-                else:
-                    conversation_lines.append("**Prompt**:")
-                conversation_lines.append(f"> {prompt_preview}")
-                conversation_lines.append("")
-
-                summary_preview = truncate(response_text, SUBAGENT_RESPONSE_SUMMARY_LIMIT)
-                if len(response_text) > SUBAGENT_RESPONSE_SUMMARY_LIMIT:
-                    conversation_lines.append(f"**Result Summary** (first {SUBAGENT_RESPONSE_SUMMARY_LIMIT} chars):")
-                else:
-                    conversation_lines.append("**Result Summary**:")
-                conversation_lines.append(f"> {summary_preview}")
-                conversation_lines.append("")
-                conversation_lines.append(f"→ Full conversation: [{filename}.md](./{filename}.md)")
-                conversation_lines.append("")
-                conversation_lines.append("---")
-                conversation_lines.append("")
-                stats["subagents"] += 1
-
-            else:
-                # Regular tool result (string)
-                result_str = str(result) if result else ""
-
-                # Find the tool this result belongs to
-                # Look at the previous assistant message for tool_use
-                tool_info = None
-                tool_id = None
-                for tid, info in list(pending_tools.items()):
-                    if not info.get("result_received"):
-                        tool_info = info
-                        tool_id = tid
-                        break
-
-                if tool_info:
-                    tool_name = tool_info.get("name", "Unknown")
-                    tool_input = tool_info.get("input", {})
-                    is_parallel = tool_info.get("is_parallel", False)
-                    parallel_index = tool_info.get("parallel_index", 0)
-
-                    if is_parallel:
-                        # Store result for parallel group
-                        pending_parallel_results[tool_id] = result_str
-                        tool_info["result_received"] = True
-
-                        # Check if all parallel results received
-                        if pending_parallel_group:
-                            all_received = all(
-                                pending_tools.get(t.get("id", ""), {}).get("result_received", False)
-                                for t in pending_parallel_group
-                            )
-                            if all_received:
-                                # Output parallel results
-                                conversation_lines.append("**Results**:")
-                                conversation_lines.append("")
-                                for j, tool in enumerate(pending_parallel_group, 1):
-                                    t_id = tool.get("id", "")
-                                    t_name = tool.get("name", "Unknown")
-                                    t_result = pending_parallel_results.get(t_id, "")
-                                    char_count = len(t_result)
-
-                                    if char_count == 0:
-                                        conversation_lines.append(f"**[{j}]** (0 chars):")
-                                        conversation_lines.append("*[Empty result]*")
-                                    elif char_count > TOOL_RESULT_FILE_THRESHOLD:
-                                        # External file needed
-                                        tool_result_sequence += 1
-                                        file_name = f"{tool_result_sequence:03d}_{t_name.lower()}"
-                                        tool_result_files[file_name] = t_result
-                                        preview = truncate(t_result, TOOL_RESULT_INLINE_LIMIT)
-                                        conversation_lines.append(f"**[{j}]** ({char_count} chars):")
-                                        conversation_lines.append(preview)
-                                        conversation_lines.append("")
-                                        conversation_lines.append(f"→ Full result: [tool_results/{file_name}.txt](./tool_results/{file_name}.txt)")
-                                    else:
-                                        result_display = truncate(t_result, TOOL_RESULT_INLINE_LIMIT)
-                                        # Determine language hint
-                                        t_input = pending_tools.get(t_id, {}).get("input", {})
-                                        if t_name == "Read":
-                                            lang = get_language_hint(t_input.get("file_path", ""))
-                                        elif t_name == "Bash":
-                                            lang = "bash"
-                                        else:
-                                            lang = "text"
-                                        conversation_lines.append(f"**[{j}]** ({char_count} chars):")
-                                        conversation_lines.append(f"```{lang}")
-                                        conversation_lines.append(result_display)
-                                        conversation_lines.append("```")
-                                    conversation_lines.append("")
-
-                                conversation_lines.append("---")
-                                conversation_lines.append("")
-
-                                # Clean up
-                                for t in pending_parallel_group:
-                                    t_id = t.get("id", "")
-                                    if t_id in pending_tools:
-                                        del pending_tools[t_id]
-                                pending_parallel_group = None
-                                pending_parallel_results = {}
-
-                    else:
-                        # Single tool - output tool section now
-                        conversation_lines.append(f"### Tool: {tool_name}")
-                        conversation_lines.append("")
-                        conversation_lines.append("**Input**:")
-                        conversation_lines.append("```text")
-                        conversation_lines.append(format_tool_input(tool_input))
-                        conversation_lines.append("```")
-                        conversation_lines.append("")
-
-                        char_count = len(result_str)
-                        if char_count == 0:
-                            conversation_lines.append("**Result** (0 chars):")
-                            conversation_lines.append("*[Empty result]*")
-                        elif char_count > TOOL_RESULT_FILE_THRESHOLD:
-                            tool_result_sequence += 1
-                            file_name = f"{tool_result_sequence:03d}_{tool_name.lower()}"
-                            tool_result_files[file_name] = result_str
-                            preview = truncate(result_str, TOOL_RESULT_INLINE_LIMIT)
-                            conversation_lines.append(f"**Result** ({char_count} chars):")
-                            # Determine language
-                            if tool_name == "Read":
-                                lang = get_language_hint(tool_input.get("file_path", ""))
-                            elif tool_name == "Bash":
-                                lang = "bash"
-                            else:
-                                lang = "text"
-                            conversation_lines.append(f"```{lang}")
-                            conversation_lines.append(preview)
-                            conversation_lines.append("```")
-                            conversation_lines.append("")
-                            conversation_lines.append(f"→ Full result: [tool_results/{file_name}.txt](./tool_results/{file_name}.txt)")
-                        else:
-                            result_display = truncate(result_str, TOOL_RESULT_INLINE_LIMIT)
-                            if tool_name == "Read":
-                                lang = get_language_hint(tool_input.get("file_path", ""))
-                            elif tool_name == "Bash":
-                                lang = "bash"
-                            else:
-                                lang = "text"
-                            conversation_lines.append(f"**Result** ({char_count} chars):")
-                            conversation_lines.append(f"```{lang}")
-                            conversation_lines.append(result_display)
-                            conversation_lines.append("```")
-
-                        conversation_lines.append("")
-                        conversation_lines.append("---")
-                        conversation_lines.append("")
-
-                        if tool_id:
-                            del pending_tools[tool_id]
-
-            i += 1
-            continue
-
-        # Regular user message (no tool result)
-        if msg.type == "user":
-            content = extract_text_content(msg.content)
-            if content and content.strip():
-                conversation_lines.append("### User")
-                conversation_lines.append("")
-                conversation_lines.append(content)
-                conversation_lines.append("")
-                conversation_lines.append("---")
-                conversation_lines.append("")
-                stats["user_turns"] += 1
-            i += 1
-            continue
-
-        # Assistant message
-        if msg.type == "assistant":
-            # Extract text content (non-tool parts)
-            text_content = extract_text_content(msg.content)
-
-            if msg.tool_uses:
-                # Has tool calls
-                if len(msg.tool_uses) > 1:
-                    # Parallel tools
-                    conversation_lines.append(f"### Parallel Tools ({len(msg.tool_uses)} calls)")
-                    conversation_lines.append("")
-                    conversation_lines.append("| # | Tool | Target |")
-                    conversation_lines.append("|---|------|--------|")
-
-                    pending_parallel_group = msg.tool_uses
-                    for j, tool_use in enumerate(msg.tool_uses, 1):
-                        tool_name = tool_use.get("name", "Unknown")
-                        tool_input = tool_use.get("input", {})
-                        tool_id = tool_use.get("id", "")
-                        target = get_tool_target_brief(tool_name, tool_input)
-                        conversation_lines.append(f"| {j} | {tool_name} | {target} |")
-                        pending_tools[tool_id] = {
-                            "name": tool_name,
-                            "input": tool_input,
-                            "is_parallel": True,
-                            "parallel_index": j,
-                            "result_received": False,
-                        }
-                        stats["tool_calls"] += 1
-
-                    conversation_lines.append("")
-
-                else:
-                    # Single tool
-                    tool_use = msg.tool_uses[0]
-                    tool_name = tool_use.get("name", "Unknown")
-                    tool_input = tool_use.get("input", {})
-                    tool_id = tool_use.get("id", "")
-
-                    pending_tools[tool_id] = {
-                        "name": tool_name,
-                        "input": tool_input,
-                        "is_parallel": False,
-                    }
-                    stats["tool_calls"] += 1
-
-                    # Don't output tool section yet - wait for result
-                    # But if there's text content before the tool, output that
-                    if text_content and text_content.strip():
-                        conversation_lines.append("### Assistant")
-                        conversation_lines.append("")
-                        conversation_lines.append(text_content)
-                        conversation_lines.append("")
-                        conversation_lines.append("---")
-                        conversation_lines.append("")
-                        stats["assistant_turns"] += 1
-                        text_content = ""  # Don't output again
-
-            # Text content without tool use
-            if text_content and text_content.strip() and not msg.tool_uses:
-                conversation_lines.append("### Assistant")
-                conversation_lines.append("")
-                conversation_lines.append(text_content)
-                conversation_lines.append("")
-                conversation_lines.append("---")
-                conversation_lines.append("")
-                stats["assistant_turns"] += 1
-
-            i += 1
-            continue
-
-        i += 1
-
-    # Build main content
-    lines: list[str] = []
-
-    # Header
-    lines.append(f"# Session: {session_id[:8]}")
-    lines.append("")
-    lines.append("## Metadata")
-    lines.append("")
-    lines.append(f"- **Session ID**: `{session_id}`")
-    lines.append("")
-
-    # Pipeline-specific section (Claude only fields)
-    lines.append("<!-- BEGIN PIPELINE_SPECIFIC -->")
-    if start_time:
-        lines.append(f"- **Started**: {format_timestamp(start_time)} (Claude only)")
-    if end_time:
-        lines.append(f"- **Ended**: {format_timestamp(end_time)} (Claude only)")
-    if cwd:
-        lines.append(f"- **Project**: `{cwd}` (Claude only)")
-    if git_branch:
-        lines.append(f"- **Branch**: `{git_branch}` (Claude only)")
-    else:
-        lines.append("- **Branch**: *[No branch]* (Claude only)")
-    if summary:
-        lines.append(f"- **Summary**: {summary} (Claude only)")
-    else:
-        lines.append("- **Summary**: *[No summary]* (Claude only)")
-    lines.append("<!-- END PIPELINE_SPECIFIC -->")
-    lines.append("")
-    lines.append("---")
-    lines.append("")
-    lines.append("## Conversation")
-    lines.append("")
-
-    # Add conversation content
-    lines.extend(conversation_lines)
-
-    # Footer
-    lines.append(f"*Exported from session `{session_id}`*")
-    footer_parts = [
-        f"{stats['user_turns']} user turns",
-        f"{stats['assistant_turns']} assistant turns",
-        f"{stats['tool_calls']} tool calls",
-        f"{stats['subagents']} subagents",
-    ]
-    if stats["compactions"] > 0:
-        footer_parts.append(f"{stats['compactions']} compactions")
-    lines.append(f"*{', '.join(footer_parts)}*")
-    lines.append("")
-
-    main_content = "\n".join(lines)
-
-    # Generate subagent files
-    subagent_files: dict[str, str] = {}
-    for info in subagent_infos:
-        agent_file = project_dir / f"agent-{info.agent_id}.jsonl"
-        if agent_file.exists():
+    # Use shared renderer with Claude pipeline
+    result = render_jsonl_to_markdown(records, pipeline="claude")
+
+    # Extract metadata from header for MarkdownExport
+    header = next((r for r in records if r.get("record_type") == "header"), {})
+    session_id = header.get("session_id", "")
+    project_path = header.get("project_path", "")
+    git_branch = header.get("git_branch")
+    summary = header.get("summary", "")
+
+    # Load subagent files from disk if they exist
+    subagent_files = dict(result.subagent_files)  # Copy from renderer
+    for filename in list(subagent_files.keys()):
+        # Check if there's a real subagent JSONL file to load
+        subagent_jsonl = project_dir / f"{filename}.jsonl"
+        if subagent_jsonl.exists():
             try:
-                # Recursively export subagent
-                subagent_export = export_session_to_markdown(agent_file, project_dir)
-
-                # Wrap in subagent format
-                subagent_lines = [
-                    f"# Subagent: {info.subagent_type} ({info.filename})",
-                    "",
-                    "## Context",
-                    "",
-                    f"- **Parent Session**: `{session_id}`",
-                ]
-
-                # Get subagent timestamps
-                subagent_messages = list(parse_jsonl_file(agent_file))
-                subagent_parsed = [parse_message(m) for m in subagent_messages]
-                subagent_ts = [m.timestamp for m in subagent_parsed if m.timestamp]
-
-                subagent_lines.append("")
-                subagent_lines.append("<!-- BEGIN PIPELINE_SPECIFIC -->")
-                if subagent_ts:
-                    subagent_lines.append(f"- **Started**: {format_timestamp(min(subagent_ts))} (Claude only)")
-                    subagent_lines.append(f"- **Ended**: {format_timestamp(max(subagent_ts))} (Claude only)")
-                subagent_lines.append(f"- **Agent ID**: `{info.agent_id}` (Claude only)")
-                subagent_lines.append("<!-- END PIPELINE_SPECIFIC -->")
-                subagent_lines.append("")
-                subagent_lines.append("## Task Prompt")
-                subagent_lines.append("")
-                subagent_lines.append(info.task_prompt)
-                subagent_lines.append("")
-                subagent_lines.append("---")
-                subagent_lines.append("")
-                subagent_lines.append("## Conversation")
-                subagent_lines.append("")
-
-                # Extract conversation part from subagent export
-                subagent_main = subagent_export.main_content
-                # Find the ## Conversation section
-                if "## Conversation" in subagent_main:
-                    conv_start = subagent_main.index("## Conversation") + len("## Conversation")
-                    # Find the footer
-                    footer_marker = "*Exported from session"
-                    if footer_marker in subagent_main:
-                        conv_end = subagent_main.index(footer_marker)
-                        conversation_part = subagent_main[conv_start:conv_end].strip()
-                        subagent_lines.append(conversation_part)
-                    else:
-                        subagent_lines.append(subagent_main[conv_start:].strip())
-                else:
-                    subagent_lines.append(subagent_export.main_content)
-
-                subagent_lines.append("")
-                subagent_lines.append("---")
-                subagent_lines.append("")
-                subagent_lines.append(f"*Subagent of session `{session_id}`*")
-                subagent_lines.append("")
-
-                subagent_files[info.filename] = "\n".join(subagent_lines)
-
+                subagent_export = export_session_to_markdown(subagent_jsonl, project_dir)
+                subagent_files[filename] = subagent_export.main_content
                 # Include nested subagent files
                 for nested_name, nested_content in subagent_export.subagent_files.items():
                     subagent_files[nested_name] = nested_content
-
-            except Exception as e:
-                # Subagent file failed to load - use summary only format
-                subagent_files[info.filename] = _generate_summary_only_subagent(info, session_id)
-        else:
-            # Subagent file doesn't exist - use summary only format
-            subagent_files[info.filename] = _generate_summary_only_subagent(info, session_id)
-
-    # Merge compaction files into tool_result_files (they're all supplementary text files)
-    all_result_files = {**tool_result_files, **compaction_files}
+            except Exception:
+                pass  # Keep the summary-only version from renderer
 
     return MarkdownExport(
-        main_content=main_content,
+        main_content=result.main_content,
         subagent_files=subagent_files,
-        tool_result_files=all_result_files,
+        tool_result_files=result.tool_result_files,
         session_id=session_id,
-        project_path=cwd or "",
+        project_path=project_path,
         git_branch=git_branch,
         summary=summary,
-        stats=stats,
+        stats=result.stats,
     )
-
-
-def _generate_summary_only_subagent(info: SubagentInfo, parent_session_id: str) -> str:
-    """Generate a summary-only subagent file when full conversation unavailable."""
-    lines = [
-        f"# Subagent: {info.subagent_type} ({info.filename})",
-        "",
-        "## Context",
-        "",
-        f"- **Parent Session**: `{parent_session_id}`",
-        "",
-        "<!-- BEGIN PIPELINE_SPECIFIC -->",
-        f"- **Agent ID**: `{info.agent_id}` (Claude only)",
-        "<!-- END PIPELINE_SPECIFIC -->",
-        "",
-        "## Task Prompt",
-        "",
-        info.task_prompt,
-        "",
-        "---",
-        "",
-        "## Conversation",
-        "",
-        "*[Full conversation not available - showing response summary only]*",
-        "",
-        "### Response Summary",
-        "",
-        info.response_summary,
-        "",
-        "---",
-        "",
-        f"*Subagent of session `{parent_session_id}`*",
-        "",
-    ]
-    return "\n".join(lines)
 
 
 def export_to_files(

@@ -196,6 +196,96 @@ def normalize_subagent_type(subagent_type: str) -> str:
 # =============================================================================
 
 
+def _render_parallel_tools_section(
+    tools: list[dict],
+    tool_result_files: dict[str, str],
+    tool_result_sequence: int,
+) -> tuple[list[str], int]:
+    """
+    Render a parallel tools section to markdown lines per AGREED_FORMAT.md.
+
+    Args:
+        tools: List of tool dicts with name, input, result
+        tool_result_files: Dict to store large result files
+        tool_result_sequence: Counter for result file naming
+
+    Returns:
+        Tuple of (markdown_lines, updated_tool_result_sequence)
+    """
+    lines: list[str] = []
+    count = len(tools)
+
+    lines.append(f"### Parallel Tools ({count} calls)")
+    lines.append("")
+
+    # Summary table
+    lines.append("| # | Tool | Target |")
+    lines.append("|---|------|--------|")
+    for i, tool in enumerate(tools, 1):
+        name = tool.get("name", "Unknown")
+        target = get_tool_target_brief(name, tool.get("input", {}))
+        lines.append(f"| {i} | {name} | {target} |")
+    lines.append("")
+
+    # Individual results
+    for i, tool in enumerate(tools, 1):
+        name = tool.get("name", "Unknown")
+        result = tool.get("result", "")
+        tool_input = tool.get("input", {})
+
+        lines.append(f"**[{i}]** {name}")
+        lines.append("")
+
+        # Show input
+        input_str = format_tool_input(tool_input)
+        if input_str:
+            lines.append("**Input**:")
+            lines.append("```text")
+            lines.append(input_str)
+            lines.append("```")
+            lines.append("")
+
+        # Show result
+        if result:
+            result_len = len(result)
+            lang = "text"
+            if name == "Read":
+                file_path = tool_input.get("file_path", "")
+                lang = get_language_hint(file_path)
+            elif name == "Bash":
+                lang = "bash"
+
+            if result_len > TOOL_RESULT_FILE_THRESHOLD:
+                tool_result_sequence += 1
+                filename = f"tool_result_{tool_result_sequence}.txt"
+                tool_result_files[filename] = result
+
+                lines.append(f"**Result** ({result_len:,} chars):")
+                lines.append(f"```{lang}")
+                lines.append(truncate(result, TOOL_RESULT_INLINE_LIMIT))
+                lines.append("```")
+                lines.append("")
+                lines.append(f"→ Full result: [{filename}](./{filename})")
+            elif result_len > TOOL_RESULT_INLINE_LIMIT:
+                lines.append(f"**Result** ({result_len:,} chars):")
+                lines.append(f"```{lang}")
+                lines.append(truncate(result, TOOL_RESULT_INLINE_LIMIT))
+                lines.append("```")
+            else:
+                lines.append(f"**Result** ({result_len:,} chars):")
+                lines.append(f"```{lang}")
+                lines.append(result)
+                lines.append("```")
+        else:
+            lines.append("**Result**: (empty)")
+        lines.append("")
+
+    lines.append("---")
+    lines.append("")
+
+    return lines, tool_result_sequence
+
+
 def _render_tool_section(
     tool_name: str,
     tool_input: dict,
@@ -204,7 +294,7 @@ def _render_tool_section(
     tool_result_sequence: int,
 ) -> tuple[list[str], int]:
     """
-    Render a tool section to markdown lines.
+    Render a tool section to markdown lines per AGREED_FORMAT.md.
 
     Returns:
         Tuple of (markdown_lines, updated_tool_result_sequence)
@@ -214,43 +304,53 @@ def _render_tool_section(
     lines.append(f"### Tool: {tool_name}")
     lines.append("")
 
-    # Format input
+    # Format input - per spec: **Input**: with ```text
     input_str = format_tool_input(tool_input)
     if input_str:
-        lines.append("**Input:**")
-        lines.append("```")
+        lines.append("**Input**:")
+        lines.append("```text")
         lines.append(input_str)
         lines.append("```")
         lines.append("")
 
-    # Format result
+    # Format result - per spec: **Result** (N chars): with language hint
     if result:
         result_len = len(result)
+        # Determine language hint
+        lang = "text"
+        if tool_name == "Read":
+            file_path = tool_input.get("file_path", "")
+            lang = get_language_hint(file_path)
+        elif tool_name == "Bash":
+            lang = "bash"
+
         if result_len > TOOL_RESULT_FILE_THRESHOLD:
             # Create external file
             tool_result_sequence += 1
             filename = f"tool_result_{tool_result_sequence}.txt"
             tool_result_files[filename] = result
 
-            lines.append(f"**Result:** See [{filename}]({filename}) ({result_len:,} chars)")
+            # Show truncated inline + link to full file
+            lines.append(f"**Result** ({result_len:,} chars):")
+            lines.append(f"```{lang}")
+            lines.append(truncate(result, TOOL_RESULT_INLINE_LIMIT))
+            lines.append("```")
+            lines.append("")
+            lines.append(f"→ Full result: [{filename}](./{filename})")
         elif result_len > TOOL_RESULT_INLINE_LIMIT:
             # Truncate inline
-            lines.append("**Result:**")
-            lines.append("```")
+            lines.append(f"**Result** ({result_len:,} chars):")
+            lines.append(f"```{lang}")
             lines.append(truncate(result, TOOL_RESULT_INLINE_LIMIT))
             lines.append("```")
         else:
             # Full inline
-            lang = ""
-            if tool_name == "Read":
-                file_path = tool_input.get("file_path", "")
-                lang = get_language_hint(file_path)
-            lines.append("**Result:**")
+            lines.append(f"**Result** ({result_len:,} chars):")
             lines.append(f"```{lang}")
             lines.append(result)
             lines.append("```")
     else:
-        lines.append("**Result:** (empty)")
+        lines.append("**Result**: (empty)")
 
     lines.append("")
     lines.append("---")
@@ -271,31 +371,37 @@ def _render_subagent_section(
     response: str,
     filename: str,
 ) -> list[str]:
-    """Render a subagent section to markdown lines."""
+    """Render a subagent section to markdown lines per AGREED_FORMAT.md."""
     lines: list[str] = []
 
     lines.append(f"### Subagent: {subagent_type}")
     lines.append("")
 
     if description:
-        lines.append(f"**Task:** {description}")
-        lines.append("")
+        lines.append(f"**Task**: {description}")
 
-    # Prompt preview
+    # Prompt preview - per spec: **Prompt** (first 200 chars):
     if prompt:
         prompt_preview = truncate(prompt, SUBAGENT_PROMPT_PREVIEW_LIMIT)
-        lines.append("**Prompt Preview:**")
+        if len(prompt) > SUBAGENT_PROMPT_PREVIEW_LIMIT:
+            lines.append(f"**Prompt** (first {SUBAGENT_PROMPT_PREVIEW_LIMIT} chars):")
+        else:
+            lines.append("**Prompt**:")
         lines.append(f"> {prompt_preview}")
         lines.append("")
 
-    # Response summary
+    # Result summary - per spec: **Result Summary** (first 500 chars):
     if response:
         response_summary = truncate(response, SUBAGENT_RESPONSE_SUMMARY_LIMIT)
-        lines.append("**Response Summary:**")
+        if len(response) > SUBAGENT_RESPONSE_SUMMARY_LIMIT:
+            lines.append(f"**Result Summary** (first {SUBAGENT_RESPONSE_SUMMARY_LIMIT} chars):")
+        else:
+            lines.append("**Result Summary**:")
         lines.append(f"> {response_summary}")
         lines.append("")
 
-    lines.append(f"**Full conversation:** [{filename}.md]({filename}.md)")
+    # Per spec: → Full conversation: [filename](./filename)
+    lines.append(f"→ Full conversation: [{filename}.md](./{filename}.md)")
     lines.append("")
     lines.append("---")
     lines.append("")
@@ -308,24 +414,59 @@ def _render_subagent_section(
 # =============================================================================
 
 
+COMPACTION_SUMMARY_INLINE_LIMIT = 500  # Truncate summaries longer than this
+
+
 def _render_compaction_section(
     number: int,
     summary: str,
+    pipeline: str = "litellm",
+    pre_compaction_tokens: int | None = None,
+    trigger: str | None = None,
+    tool_result_files: dict[str, str] | None = None,
 ) -> list[str]:
-    """Render a compaction section to markdown lines."""
+    """Render a compaction section to markdown lines per AGREED_FORMAT.md."""
     lines: list[str] = []
 
     lines.append(f"### Compaction #{number}")
     lines.append("")
+
+    # Pipeline-specific metadata
     lines.append("<!-- BEGIN PIPELINE_SPECIFIC -->")
-    lines.append("> **Previous Context Summary** (LiteLLM detected):")
-
-    # Format summary with proper blockquote
-    for line in summary.split("\n"):
-        lines.append(f"> {line}")
-
+    if pipeline == "claude":
+        if trigger:
+            lines.append(f"- **Trigger**: {trigger} (Claude only)")
+        if pre_compaction_tokens:
+            lines.append(f"- **Pre-compaction tokens**: {pre_compaction_tokens:,} (Claude only)")
+    else:
+        # LiteLLM pipeline - detected from traces
+        lines.append("- **Detected from**: LiteLLM traces (LiteLLM only)")
     lines.append("<!-- END PIPELINE_SPECIFIC -->")
     lines.append("")
+
+    # Context summary (outside PIPELINE_SPECIFIC per spec)
+    # Truncate long summaries and create external file
+    if len(summary) > COMPACTION_SUMMARY_INLINE_LIMIT and tool_result_files is not None:
+        # Store full summary in external file
+        filename = f"compaction_{number}_summary"
+        tool_result_files[filename] = summary
+
+        # Show truncated inline with link
+        truncated = truncate(summary, COMPACTION_SUMMARY_INLINE_LIMIT)
+        lines.append("> **Context Summary**:")
+        for line in truncated.split("\n"):
+            for subline in line.replace("\\n", "\n").split("\n"):
+                lines.append(f"> {subline}")
+        lines.append("")
+        lines.append(f"→ Full summary: [{filename}.txt](./{filename}.txt)")
+    else:
+        lines.append("> **Context Summary**:")
+        for line in summary.split("\n"):
+            # Handle literal \n in the string
+            for subline in line.replace("\\n", "\n").split("\n"):
+                lines.append(f"> {subline}")
+    lines.append("")
+
     lines.append("---")
     lines.append("")
 
@@ -342,6 +483,7 @@ def _render_subagent_file(
     description: str,
     prompt: str,
     response: str,
+    filename: str = "",
     events: list[dict[str, Any]] | None = None,
     start_time: str | None = None,
     end_time: str | None = None,
@@ -355,6 +497,7 @@ def _render_subagent_file(
         description: Task description
         prompt: Full task prompt
         response: Response summary
+        filename: Filename (without .md) for header
         events: List of conversation events (tools, messages) if available
         start_time: Start timestamp
         end_time: End timestamp
@@ -365,8 +508,11 @@ def _render_subagent_file(
     """
     lines: list[str] = []
 
-    # Header
-    lines.append(f"# Subagent: {subagent_type}")
+    # Header - include filename per test expectations
+    if filename:
+        lines.append(f"# Subagent: {subagent_type} ({filename})")
+    else:
+        lines.append(f"# Subagent: {subagent_type}")
     lines.append("")
 
     # Metadata in PIPELINE_SPECIFIC
@@ -427,6 +573,10 @@ def _render_subagent_file(
                     tool_result_sequence,
                 )
                 lines.extend(tool_lines)
+    else:
+        # No linked conversation available
+        lines.append("*[Full conversation not available - linked trace not found]*")
+        lines.append("")
 
     # Response summary
     lines.append("## Response")
@@ -444,22 +594,24 @@ def _render_subagent_file(
 
 def render_jsonl_to_markdown(
     records: list[dict[str, Any]],
+    pipeline: str = "litellm",
 ) -> MarkdownExport:
     """
     Render JSONL conversation records to markdown format.
 
-    This function takes the output of export_chain_to_jsonl() and produces
-    markdown matching AGREED_FORMAT.md specification.
+    This function takes the output of export_chain_to_jsonl() or
+    export_claude_session_to_jsonl() and produces markdown matching
+    AGREED_FORMAT.md specification.
 
     Args:
-        records: List of JSONL records from export_chain_to_jsonl()
+        records: List of JSONL records with header, events, and footer
+        pipeline: "litellm" or "claude" - determines PIPELINE_SPECIFIC content
 
     Returns:
         MarkdownExport with main content, subagent files, and tool result files.
     """
     # Extract header
     header = next((r for r in records if r.get("record_type") == "header"), {})
-    footer = next((r for r in records if r.get("record_type") == "footer"), {})
 
     chain_id = header.get("chain_id", "unknown")
     session_id = header.get("claude_session_id", chain_id)
@@ -469,12 +621,18 @@ def render_jsonl_to_markdown(
     models_used = list(header.get("metrics", {}).get("models_used", {}).keys())
     compaction_count = header.get("compaction_count", 0)
 
+    # Claude-specific fields
+    project_path = header.get("project_path", "")
+    git_branch = header.get("git_branch")
+    summary = header.get("summary", "")
+
     # Stats
     stats = {
         "user_turns": 0,
         "assistant_turns": 0,
         "tool_calls": 0,
         "subagents": 0,
+        "compactions": 0,
     }
 
     # Track subagent files and tool result files
@@ -488,25 +646,47 @@ def render_jsonl_to_markdown(
     # Build main content
     lines: list[str] = []
 
-    # Header section
-    lines.append(f"# Conversation: {session_id}")
+    # Header section per AGREED_FORMAT.md: # Session: {first_8_chars}
+    session_id_short = session_id[:8] if len(session_id) >= 8 else session_id
+    lines.append(f"# Session: {session_id_short}")
+    lines.append("")
+
+    # Metadata section per AGREED_FORMAT.md
+    lines.append("## Metadata")
+    lines.append("")
+    lines.append(f"- **Session ID**: `{session_id}`")
     lines.append("")
 
     # Pipeline-specific metadata
     lines.append("<!-- BEGIN PIPELINE_SPECIFIC -->")
-    if start_time:
-        lines.append(f"- **Started**: {format_timestamp(start_time)} (LiteLLM only)")
-    if end_time:
-        lines.append(f"- **Ended**: {format_timestamp(end_time)} (LiteLLM only)")
-    if total_tokens:
-        lines.append(f"- **Tokens**: {total_tokens:,} (LiteLLM only)")
-    if models_used:
-        lines.append(f"- **Models**: {', '.join(models_used)} (LiteLLM only)")
-    if compaction_count:
-        lines.append(f"- **Compactions**: {compaction_count} (LiteLLM only)")
+    if pipeline == "claude":
+        if start_time:
+            lines.append(f"- **Started**: {format_timestamp(start_time)} (Claude only)")
+        if end_time:
+            lines.append(f"- **Ended**: {format_timestamp(end_time)} (Claude only)")
+        if project_path:
+            lines.append(f"- **Project**: `{project_path}` (Claude only)")
+        branch_str = f"`{git_branch}`" if git_branch else "*[No branch]*"
+        lines.append(f"- **Branch**: {branch_str} (Claude only)")
+        summary_str = summary if summary else "*[No summary]*"
+        lines.append(f"- **Summary**: {summary_str} (Claude only)")
+    else:
+        # LiteLLM pipeline
+        if start_time:
+            lines.append(f"- **Started**: {format_timestamp(start_time)} (LiteLLM only)")
+        if end_time:
+            lines.append(f"- **Ended**: {format_timestamp(end_time)} (LiteLLM only)")
+        if models_used:
+            lines.append(f"- **Models**: {', '.join(models_used)} (LiteLLM only)")
+        if compaction_count:
+            lines.append(f"- **Compactions**: {compaction_count} (LiteLLM only)")
     lines.append("<!-- END PIPELINE_SPECIFIC -->")
     lines.append("")
     lines.append("---")
+    lines.append("")
+
+    # Conversation section header per AGREED_FORMAT.md
+    lines.append("## Conversation")
     lines.append("")
 
     # Process conversation events
@@ -544,6 +724,15 @@ def render_jsonl_to_markdown(
             lines.extend(tool_lines)
             stats["tool_calls"] += 1
 
+        elif event_type == "parallel_tools":
+            parallel_lines, tool_result_sequence = _render_parallel_tools_section(
+                event.get("tools", []),
+                tool_result_files,
+                tool_result_sequence,
+            )
+            lines.extend(parallel_lines)
+            stats["tool_calls"] += len(event.get("tools", []))
+
         elif event_type == "subagent":
             subagent_type = event.get("subagent_type", "unknown")
             description = event.get("description", "")
@@ -573,6 +762,7 @@ def render_jsonl_to_markdown(
                 description,
                 prompt,
                 response,
+                filename=filename,
                 events=subagent_events,
                 start_time=event.get("start_time"),
                 end_time=event.get("end_time"),
@@ -585,8 +775,29 @@ def render_jsonl_to_markdown(
             compaction_lines = _render_compaction_section(
                 event.get("number", 0),
                 event.get("summary", ""),
+                pipeline=pipeline,
+                pre_compaction_tokens=event.get("pre_tokens"),  # JSONL uses pre_tokens
+                trigger=event.get("trigger"),
+                tool_result_files=tool_result_files,
             )
             lines.extend(compaction_lines)
+            stats["compactions"] += 1
+
+    # Footer with stats per AGREED_FORMAT.md
+    lines.append("---")
+    lines.append("")
+    lines.append(f"*Exported from session `{session_id}`*")
+    # Include compaction count if any
+    footer_parts = [
+        f"{stats['user_turns']} user turns",
+        f"{stats['assistant_turns']} assistant turns",
+        f"{stats['tool_calls']} tool calls",
+        f"{stats['subagents']} subagents",
+    ]
+    if stats["compactions"] > 0:
+        footer_parts.append(f"{stats['compactions']} compactions")
+    lines.append(f"*{', '.join(footer_parts)}*")
+    lines.append("")
 
     # Join all lines
     main_content = "\n".join(lines)

@@ -38,8 +38,6 @@ from dev_agent_lens.core.unify import unify_sessions
 from dev_agent_lens.storage.oxen_store import OxenStore
 from dev_agent_lens.analysis.chains import (
     build_conversation_chains,
-    export_chain_to_markdown,
-    export_chain_to_file,
     ConversationChain,
 )
 
@@ -5740,19 +5738,31 @@ def chain_export_cmd(
         mode = "with ancillary" if include_ancillary else "main thread only"
         click.echo(f"Exported {json_data.get('turn_count', 0)} turns as JSON ({mode})")
     else:
-        # Markdown format - use export_chain_to_file which handles subagent files
+        # Markdown format - use unified export pipeline per AGREED_FORMAT.md
+        from dev_agent_lens.export.markdown_litellm import (
+            export_chain_to_unified_markdown,
+            export_to_files,
+        )
+
         ext = ".md"
         main_file = output_file if output_file else f"chain_{target_chain.chain_id[:8]}{ext}"
+        output_dir = Path(main_file).parent if Path(main_file).parent.exists() else Path(".")
 
-        written_files = export_chain_to_file(
+        # Export using the unified JSONL->Markdown pipeline
+        export_result = export_chain_to_unified_markdown(
             target_chain,
             sessions,
-            main_file,
-            include_tool_calls=include_tool_calls,
+        )
+
+        # Write files to disk
+        written_files = export_to_files(
+            export_result,
+            output_dir,
+            main_filename=Path(main_file).name,
         )
 
         # Report main file
-        main_content_size = Path(written_files[0]).stat().st_size
+        main_content_size = written_files[0].stat().st_size
         click.echo(
             click.style(
                 f"Exported to {written_files[0]} ({main_content_size:,} bytes)",
@@ -5761,13 +5771,22 @@ def chain_export_cmd(
             )
         )
 
+        # Report stats
+        stats = export_result.stats
+        click.echo(
+            f"  {stats.get('user_turns', 0)} user turns, "
+            f"{stats.get('assistant_turns', 0)} assistant turns, "
+            f"{stats.get('tool_calls', 0)} tool calls, "
+            f"{stats.get('subagents', 0)} subagents"
+        )
+
         # Report subagent files if any
         if len(written_files) > 1:
             subagent_count = len(written_files) - 1
-            click.echo(f"  + {subagent_count} subagent file(s):")
-            for subagent_file in written_files[1:]:
-                subagent_size = Path(subagent_file).stat().st_size
-                click.echo(f"    - {Path(subagent_file).name} ({subagent_size:,} bytes)")
+            click.echo(f"  + {subagent_count} additional file(s):")
+            for extra_file in written_files[1:]:
+                extra_size = extra_file.stat().st_size
+                click.echo(f"    - {extra_file.name} ({extra_size:,} bytes)")
 
         return  # Already wrote files
 
