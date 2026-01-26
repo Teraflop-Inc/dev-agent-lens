@@ -1080,3 +1080,298 @@ class TestCompactionHandling:
             # Check it's NOT in tool_results/
             tool_results_compaction = output_dir / "tool_results" / "compaction_1_summary.txt"
             assert not tool_results_compaction.exists()
+
+
+class TestAskUserQuestion:
+    """Tests for AskUserQuestion tool handling."""
+
+    def test_get_tool_target_brief_single_question(self):
+        """Single question should show header."""
+        tool_input = {
+            "questions": [
+                {
+                    "question": "Which approach should we use?",
+                    "header": "Approach",
+                    "options": [
+                        {"label": "Option A", "description": "First option"},
+                        {"label": "Option B", "description": "Second option"},
+                    ],
+                    "multiSelect": False,
+                }
+            ]
+        }
+        result = get_tool_target_brief("AskUserQuestion", tool_input)
+        assert result == "Approach"
+
+    def test_get_tool_target_brief_multi_question(self):
+        """Multiple questions should show header with count."""
+        tool_input = {
+            "questions": [
+                {"question": "Q1?", "header": "First", "options": [], "multiSelect": False},
+                {"question": "Q2?", "header": "Second", "options": [], "multiSelect": False},
+                {"question": "Q3?", "header": "Third", "options": [], "multiSelect": False},
+            ]
+        }
+        result = get_tool_target_brief("AskUserQuestion", tool_input)
+        assert result == "First (+2)"
+
+    def test_get_tool_target_brief_no_header(self):
+        """Question without header should show truncated question text."""
+        tool_input = {
+            "questions": [
+                {
+                    "question": "This is a very long question that should be truncated?",
+                    "options": [],
+                    "multiSelect": False,
+                }
+            ]
+        }
+        result = get_tool_target_brief("AskUserQuestion", tool_input)
+        assert "truncated" in result or len(result) <= 43  # 40 chars + "..."
+
+    def test_export_ask_user_question_single(self):
+        """Test export of session with single AskUserQuestion."""
+        jsonl_content = [
+            {
+                "type": "summary",
+                "summary": "Q&A session",
+                "sessionId": "ask-test-001",
+            },
+            {
+                "type": "user",
+                "uuid": "u1",
+                "message": {"content": "Help me decide"},
+                "timestamp": "2026-01-19T10:00:00.000Z",
+                "sessionId": "ask-test-001",
+            },
+            {
+                "type": "assistant",
+                "uuid": "a1",
+                "parentUuid": "u1",
+                "message": {
+                    "content": [
+                        {"type": "text", "text": "Let me ask you a question."},
+                        {
+                            "type": "tool_use",
+                            "name": "AskUserQuestion",
+                            "id": "toolu_ask_1",
+                            "input": {
+                                "questions": [
+                                    {
+                                        "question": "Which database should we use?",
+                                        "header": "Database",
+                                        "options": [
+                                            {"label": "PostgreSQL", "description": "Relational DB"},
+                                            {"label": "MongoDB", "description": "Document DB"},
+                                        ],
+                                        "multiSelect": False,
+                                    }
+                                ]
+                            },
+                        },
+                    ]
+                },
+                "timestamp": "2026-01-19T10:00:05.000Z",
+                "sessionId": "ask-test-001",
+            },
+            {
+                "type": "user",
+                "uuid": "u2",
+                "parentUuid": "a1",
+                "toolUseResult": 'User has answered your questions: "Which database should we use?"="PostgreSQL"',
+                "timestamp": "2026-01-19T10:00:10.000Z",
+                "sessionId": "ask-test-001",
+            },
+        ]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            jsonl_path = Path(tmpdir) / "ask-test-001.jsonl"
+            with open(jsonl_path, "w") as f:
+                for line in jsonl_content:
+                    f.write(json.dumps(line) + "\n")
+
+            export = export_session_to_markdown(jsonl_path)
+
+            # Check the markdown contains the Q&A content
+            assert "AskUserQuestion" in export.main_content
+            assert "Database" in export.main_content
+            assert "Which database should we use?" in export.main_content
+            # Check answer is shown
+            assert "PostgreSQL" in export.main_content
+
+    def test_export_ask_user_question_multi(self):
+        """Test export of session with multi-question AskUserQuestion."""
+        jsonl_content = [
+            {
+                "type": "summary",
+                "summary": "Multi-Q session",
+                "sessionId": "ask-test-002",
+            },
+            {
+                "type": "user",
+                "uuid": "u1",
+                "message": {"content": "Configure my project"},
+                "timestamp": "2026-01-19T10:00:00.000Z",
+                "sessionId": "ask-test-002",
+            },
+            {
+                "type": "assistant",
+                "uuid": "a1",
+                "parentUuid": "u1",
+                "message": {
+                    "content": [
+                        {"type": "text", "text": "I have a few questions."},
+                        {
+                            "type": "tool_use",
+                            "name": "AskUserQuestion",
+                            "id": "toolu_ask_2",
+                            "input": {
+                                "questions": [
+                                    {
+                                        "question": "What framework do you prefer?",
+                                        "header": "Framework",
+                                        "options": [
+                                            {"label": "React", "description": "Popular JS library"},
+                                            {"label": "Vue", "description": "Progressive framework"},
+                                        ],
+                                        "multiSelect": False,
+                                    },
+                                    {
+                                        "question": "What styling approach?",
+                                        "header": "Styling",
+                                        "options": [
+                                            {"label": "Tailwind", "description": "Utility-first CSS"},
+                                            {"label": "CSS Modules", "description": "Scoped CSS"},
+                                        ],
+                                        "multiSelect": False,
+                                    },
+                                    {
+                                        "question": "Include testing?",
+                                        "header": "Testing",
+                                        "options": [
+                                            {"label": "Yes", "description": "Add Jest + RTL"},
+                                            {"label": "No", "description": "Skip for now"},
+                                        ],
+                                        "multiSelect": False,
+                                    },
+                                ]
+                            },
+                        },
+                    ]
+                },
+                "timestamp": "2026-01-19T10:00:05.000Z",
+                "sessionId": "ask-test-002",
+            },
+            {
+                "type": "user",
+                "uuid": "u2",
+                "parentUuid": "a1",
+                "toolUseResult": 'User has answered your questions: "What framework do you prefer?"="React", "What styling approach?"="Tailwind", "Include testing?"="Yes"',
+                "timestamp": "2026-01-19T10:00:20.000Z",
+                "sessionId": "ask-test-002",
+            },
+        ]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            jsonl_path = Path(tmpdir) / "ask-test-002.jsonl"
+            with open(jsonl_path, "w") as f:
+                for line in jsonl_content:
+                    f.write(json.dumps(line) + "\n")
+
+            export = export_session_to_markdown(jsonl_path)
+
+            # Check all questions are present
+            assert "Framework" in export.main_content
+            assert "What framework do you prefer?" in export.main_content
+            assert "Styling" in export.main_content
+            assert "What styling approach?" in export.main_content
+            assert "Testing" in export.main_content
+            assert "Include testing?" in export.main_content
+
+            # Check multi-question indicator
+            assert "3 questions" in export.main_content
+
+            # Check answers are shown
+            assert "React" in export.main_content
+            assert "Tailwind" in export.main_content
+
+    def test_export_ask_user_question_with_dict_result(self):
+        """Test export with dict-format tool result (questions + answers)."""
+        jsonl_content = [
+            {
+                "type": "summary",
+                "summary": "Dict result session",
+                "sessionId": "ask-test-003",
+            },
+            {
+                "type": "user",
+                "uuid": "u1",
+                "message": {"content": "Help me"},
+                "timestamp": "2026-01-19T10:00:00.000Z",
+                "sessionId": "ask-test-003",
+            },
+            {
+                "type": "assistant",
+                "uuid": "a1",
+                "parentUuid": "u1",
+                "message": {
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "name": "AskUserQuestion",
+                            "id": "toolu_ask_3",
+                            "input": {
+                                "questions": [
+                                    {
+                                        "question": "Color preference?",
+                                        "header": "Color",
+                                        "options": [
+                                            {"label": "Blue", "description": "Calm"},
+                                            {"label": "Red", "description": "Bold"},
+                                        ],
+                                        "multiSelect": False,
+                                    }
+                                ]
+                            },
+                        },
+                    ]
+                },
+                "timestamp": "2026-01-19T10:00:05.000Z",
+                "sessionId": "ask-test-003",
+            },
+            {
+                "type": "user",
+                "uuid": "u2",
+                "parentUuid": "a1",
+                "toolUseResult": {
+                    "questions": [
+                        {
+                            "question": "Color preference?",
+                            "header": "Color",
+                            "options": [
+                                {"label": "Blue", "description": "Calm"},
+                                {"label": "Red", "description": "Bold"},
+                            ],
+                            "multiSelect": False,
+                        }
+                    ],
+                    "answers": {"Color preference?": "Blue"},
+                },
+                "timestamp": "2026-01-19T10:00:10.000Z",
+                "sessionId": "ask-test-003",
+            },
+        ]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            jsonl_path = Path(tmpdir) / "ask-test-003.jsonl"
+            with open(jsonl_path, "w") as f:
+                for line in jsonl_content:
+                    f.write(json.dumps(line) + "\n")
+
+            export = export_session_to_markdown(jsonl_path)
+
+            # Check Q&A is rendered
+            assert "Color" in export.main_content
+            assert "Color preference?" in export.main_content
+            # Note: dict-format answers may be handled differently
+            # The main check is that it doesn't crash

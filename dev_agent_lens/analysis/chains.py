@@ -264,8 +264,8 @@ def _extract_input_value(span: dict[str, Any]) -> str:
     if input_val:
         return input_val
 
-    # Try raw_attributes_json
-    raw_attrs = span.get("raw_attributes_json")
+    # Try raw_attributes_json or raw_attributes (parquet may use either)
+    raw_attrs = span.get("raw_attributes_json") or span.get("raw_attributes")
     if raw_attrs:
         try:
             if isinstance(raw_attrs, str):
@@ -692,8 +692,8 @@ def _extract_output_value(span: dict[str, Any]) -> str:
     if output_val:
         return output_val
 
-    # Try raw_attributes_json
-    raw_attrs = span.get("raw_attributes_json")
+    # Try raw_attributes_json or raw_attributes (parquet may use either)
+    raw_attrs = span.get("raw_attributes_json") or span.get("raw_attributes")
     if raw_attrs:
         try:
             if isinstance(raw_attrs, str):
@@ -715,7 +715,7 @@ def _extract_model(span: dict[str, Any]) -> str:
         return _safe_str(model)
 
     # Try raw_attributes_json
-    raw_attrs = span.get("raw_attributes_json")
+    raw_attrs = span.get("raw_attributes_json") or span.get("raw_attributes")
     if raw_attrs:
         try:
             if isinstance(raw_attrs, str):
@@ -1129,6 +1129,25 @@ def _format_tool_input(tool_name: str, tool_input: dict[str, Any], max_length: i
         query = tool_input.get("query", "")
         lines.append(f"> Query: `{query}`")
 
+    elif tool_name == "AskUserQuestion":
+        # Show questions and answers in Q&A format
+        questions = tool_input.get("questions", [])
+        if questions:
+            lines.append(f"> **{len(questions)} question(s)**")
+            for i, q in enumerate(questions, 1):
+                header = q.get("header", f"Q{i}")
+                question_text = q.get("question", "")
+                # Truncate long questions
+                if len(question_text) > 150:
+                    question_text = question_text[:147] + "..."
+                lines.append(f"> **{header}**: {question_text}")
+                # Show options if present
+                options = q.get("options", [])
+                if options and len(options) <= 4:
+                    for opt in options:
+                        label = opt.get("label", "") if isinstance(opt, dict) else str(opt)
+                        lines.append(f">   - {label}")
+
     elif tool_name.startswith("mcp__"):
         # MCP tool - show key parameters
         for key, value in list(tool_input.items())[:3]:
@@ -1261,6 +1280,16 @@ def _generate_tool_summary(tool_name: str, tool_input: dict[str, Any]) -> str:
     elif tool_name == "Task":
         subagent = tool_input.get("subagent_type", "unknown")
         return f"Subagent: {subagent}"
+    elif tool_name == "AskUserQuestion":
+        questions = tool_input.get("questions", [])
+        if questions:
+            first_q = questions[0]
+            header = first_q.get("header", "")
+            count_suffix = f" (+{len(questions)-1})" if len(questions) > 1 else ""
+            if header:
+                return f"Ask: {header}{count_suffix}"
+            return f"Ask user ({len(questions)} questions)"
+        return "Ask user"
     elif tool_name.startswith("mcp__"):
         # MCP tools - extract meaningful params
         parts = tool_name.split("__")
@@ -1529,7 +1558,7 @@ def export_chain_to_markdown(
 
             # Track Claude_Code_Tool_Task spans
             if span.get("name") == "Claude_Code_Tool_Task":
-                raw_attrs = span.get("raw_attributes_json")
+                raw_attrs = span.get("raw_attributes_json") or span.get("raw_attributes")
                 if raw_attrs:
                     try:
                         attrs = json.loads(raw_attrs) if isinstance(raw_attrs, str) else raw_attrs
@@ -1605,7 +1634,7 @@ def export_chain_to_markdown(
                         # Check if this is the Task span
                         if parent_span.get("name") == "Claude_Code_Tool_Task":
                             # Extract tool_use_id from Task span
-                            raw_attrs = parent_span.get("raw_attributes_json")
+                            raw_attrs = parent_span.get("raw_attributes_json") or parent_span.get("raw_attributes")
                             if raw_attrs:
                                 try:
                                     attrs = json.loads(raw_attrs) if isinstance(raw_attrs, str) else raw_attrs
@@ -2772,9 +2801,25 @@ def _extract_ordered_messages(
                     # Skip tool results (internal system messages)
                     if text.startswith("[tool_result:"):
                         continue
-                    # Skip system reminders
-                    if text.startswith("<system-reminder>") or text.startswith("<system"):
+
+                    # FIX: System reminders may be prepended to actual user content.
+                    # Example: "<system-reminder>...todo...</system-reminder> # Fabric Session\n..."
+                    # Strip all <system-reminder>...</system-reminder> tags before checking
+                    # if there's real user content remaining. This preserves user context
+                    # like Fabric Session headers that appear after system reminders.
+                    text_stripped = text
+                    while "<system-reminder>" in text_stripped and "</system-reminder>" in text_stripped:
+                        start = text_stripped.find("<system-reminder>")
+                        end = text_stripped.find("</system-reminder>") + len("</system-reminder>")
+                        text_stripped = (text_stripped[:start] + text_stripped[end:]).strip()
+
+                    # Skip if only system content remains (or empty)
+                    if not text_stripped or text_stripped.startswith("<system"):
                         continue
+
+                    # Use the stripped text for further checks and output
+                    text = text_stripped
+
                     # Skip subagent prompts (not actual user turns)
                     if text.startswith("Explore the ~/") or text.startswith("Search for and read"):
                         continue
@@ -2848,7 +2893,7 @@ def _extract_task_span_info(span: dict[str, Any]) -> dict[str, Any] | None:
 
     Returns dict with: tool_use_id, subagent_type, description, prompt, response
     """
-    raw_attrs = span.get("raw_attributes_json")
+    raw_attrs = span.get("raw_attributes_json") or span.get("raw_attributes")
     if not raw_attrs:
         return None
 
@@ -2905,11 +2950,29 @@ def _extract_task_span_info(span: dict[str, Any]) -> dict[str, Any] | None:
         return None
 
 
+def extract_skill_name(tool_input: dict[str, Any]) -> str | None:
+    """
+    Extract the skill name from a Skill tool's input.
+
+    For Claude_Code_Tool_Skill spans, the skill name is nested:
+    raw_attributes_json → attributes.input.value → {type: "tool_use", input: {skill: "draft-project"}}
+
+    Args:
+        tool_input: The parsed input dict from the Skill tool
+
+    Returns:
+        The skill name (e.g., "draft-project") or None if not a Skill tool
+    """
+    if not isinstance(tool_input, dict):
+        return None
+    return tool_input.get("skill")
+
+
 def _extract_tool_span_info(span: dict[str, Any]) -> dict[str, Any] | None:
     """
     Extract tool info from a Claude_Code_Tool_* span (non-Task).
 
-    Returns dict with: tool_use_id, name, input, result
+    Returns dict with: tool_use_id, name, input, result, skill_name (if Skill tool)
     """
     name = span.get("name", "")
     if not name.startswith("Claude_Code_Tool_") or name == "Claude_Code_Tool_Task":
@@ -2918,7 +2981,7 @@ def _extract_tool_span_info(span: dict[str, Any]) -> dict[str, Any] | None:
     # Extract tool name from span name
     tool_name = name.replace("Claude_Code_Tool_", "")
 
-    raw_attrs = span.get("raw_attributes_json")
+    raw_attrs = span.get("raw_attributes_json") or span.get("raw_attributes")
     if not raw_attrs:
         return None
 
@@ -2956,11 +3019,17 @@ def _extract_tool_span_info(span: dict[str, Any]) -> dict[str, Any] | None:
         elif isinstance(output_data, (dict, list)):
             result = str(output_data)
 
+        # Extract skill_name for Skill tool
+        skill_name = None
+        if tool_name == "Skill":
+            skill_name = extract_skill_name(tool_input)
+
         return {
             "tool_use_id": tool_use_id,
             "name": tool_name,
             "input": tool_input,
             "result": result,
+            "skill_name": skill_name,
         }
     except (json.JSONDecodeError, TypeError, KeyError, AttributeError):
         return None
@@ -3001,7 +3070,7 @@ def export_chain_to_jsonl(
     claude_session_id = chain.claude_session_id
     if not claude_session_id:
         for span in all_spans:
-            raw_attrs = span.get("raw_attributes_json")
+            raw_attrs = span.get("raw_attributes_json") or span.get("raw_attributes")
             if raw_attrs:
                 try:
                     if isinstance(raw_attrs, str):
@@ -3052,12 +3121,17 @@ def export_chain_to_jsonl(
     }
 
     # Identify main thread trace_ids
+    # Task spans are launched FROM the main thread, so their trace_id IS the main thread
     main_thread_trace_ids: set[str] = set()
     for span in all_spans:
         if span.get("name") == "Claude_Code_Tool_Task":
             trace_id = span.get("trace_id")
             if trace_id:
                 main_thread_trace_ids.add(trace_id)
+
+    # If no Task spans exist (no subagents), all spans are main thread
+    # In this case, don't filter by trace_id at all
+    filter_by_trace_id = len(main_thread_trace_ids) > 0
 
     # Build ordering index from raw_gen_ai_request spans
     ordered_messages = _extract_ordered_messages(all_spans)
@@ -3100,7 +3174,7 @@ def export_chain_to_jsonl(
     # Collect tool spans (non-Task) from main thread traces only
     for span in all_spans:
         trace_id = span.get("trace_id")
-        if trace_id and trace_id not in main_thread_trace_ids:
+        if filter_by_trace_id and trace_id and trace_id not in main_thread_trace_ids:
             continue
 
         name = span.get("name", "")
@@ -3119,7 +3193,7 @@ def export_chain_to_jsonl(
     # Collect main thread conversation spans for user/assistant messages
     for span in all_spans:
         trace_id = span.get("trace_id")
-        if trace_id and trace_id not in main_thread_trace_ids:
+        if filter_by_trace_id and trace_id and trace_id not in main_thread_trace_ids:
             continue
 
         name = span.get("name", "")
