@@ -442,11 +442,19 @@ class TestOrchestrator:
         if "name" in spans_df.columns:
             names = spans_df["name"].astype(str)
             assertions["has_read_tool"] = names.str.contains("Read", case=False, na=False).any()
-            assertions["has_task_tool"] = names.str.contains("Task", case=False, na=False).any()
+
+            # Check for subagent (Task) tool - only assert if prompt expects it
+            has_task = names.str.contains("Task", case=False, na=False).any()
+            if has_task or "stress_test" in self.config.prompt_file:
+                assertions["has_task_tool"] = has_task
+
+            # Check for AskUserQuestion tool - only assert if prompt expects it
+            has_ask_user = names.str.contains("AskUserQuestion", case=False, na=False).any()
+            if has_ask_user or "ask_user" in self.config.prompt_file:
+                assertions["has_ask_user_question_tool"] = has_ask_user
         else:
             # Can't verify without name column
             assertions["has_read_tool"] = True
-            assertions["has_task_tool"] = True
 
         return TestResult(
             test_run_id=self.config.test_run_id,

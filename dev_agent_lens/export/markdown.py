@@ -284,6 +284,29 @@ def format_tool_input(tool_input: dict) -> str:
     return "\n".join(lines)
 
 
+def extract_skill_name(tool_name: str, tool_input: dict[str, Any]) -> str | None:
+    """
+    Extract the skill name from a Skill tool invocation.
+
+    Args:
+        tool_name: The tool name (e.g., "Skill", "Read", "Bash")
+        tool_input: The tool's input dictionary
+
+    Returns:
+        The skill name (e.g., "draft-project") if this is a Skill tool, else None
+    """
+    if tool_name != "Skill":
+        return None
+    if not isinstance(tool_input, dict):
+        return None
+    return tool_input.get("skill")
+
+
+def format_skill_header(skill_name: str) -> str:
+    """Format the markdown header for a skill invocation."""
+    return f"### Skill: {skill_name}"
+
+
 def get_tool_target_brief(tool_name: str, tool_input: dict) -> str:
     """Get brief target description for parallel tools table."""
     if tool_name == "Read":
@@ -322,6 +345,26 @@ def get_tool_target_brief(tool_name: str, tool_input: dict) -> str:
         subagent_type = tool_input.get("subagent_type", "")
         desc = tool_input.get("description", "")
         return f"{subagent_type}: {truncate(desc, 30)}"
+
+    elif tool_name == "Skill":
+        skill = tool_input.get("skill", "unknown")
+        args = tool_input.get("args", "")
+        if args:
+            return f"{skill} {truncate(str(args), 30)}"
+        return skill
+
+    elif tool_name == "AskUserQuestion":
+        questions = tool_input.get("questions", [])
+        if questions:
+            # Show first question's header or question text
+            first_q = questions[0]
+            header = first_q.get("header", "")
+            question_text = first_q.get("question", "")
+            count_suffix = f" (+{len(questions)-1})" if len(questions) > 1 else ""
+            if header:
+                return f"{header}{count_suffix}"
+            return truncate(question_text, 40) + count_suffix
+        return "question"
 
     else:
         # First value truncated

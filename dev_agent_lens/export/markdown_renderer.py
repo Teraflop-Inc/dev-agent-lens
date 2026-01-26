@@ -178,6 +178,26 @@ def get_tool_target_brief(tool_name: str, tool_input: dict) -> str:
         desc = tool_input.get("description", "")
         return f"{subagent_type}: {truncate(desc, 30)}"
 
+    elif tool_name == "Skill":
+        skill = tool_input.get("skill", "unknown")
+        args = tool_input.get("args", "")
+        if args:
+            return f"{skill} {truncate(str(args), 30)}"
+        return skill
+
+    elif tool_name == "AskUserQuestion":
+        questions = tool_input.get("questions", [])
+        if questions:
+            # Show first question's header or question text
+            first_q = questions[0]
+            header = first_q.get("header", "")
+            question_text = first_q.get("question", "")
+            count_suffix = f" (+{len(questions)-1})" if len(questions) > 1 else ""
+            if header:
+                return f"{header}{count_suffix}"
+            return truncate(question_text, 40) + count_suffix
+        return "question"
+
     else:
         # First value truncated
         for key in sorted(tool_input.keys()):
@@ -223,8 +243,15 @@ def _render_parallel_tools_section(
     lines.append("|---|------|--------|")
     for i, tool in enumerate(tools, 1):
         name = tool.get("name", "Unknown")
-        target = get_tool_target_brief(name, tool.get("input", {}))
-        lines.append(f"| {i} | {name} | {target} |")
+        tool_input = tool.get("input", {})
+        # For Skill tools, show skill name in Tool column
+        if name == "Skill":
+            skill = tool_input.get("skill", "Skill")
+            table_tool_name = f"Skill:{skill}"
+        else:
+            table_tool_name = name
+        target = get_tool_target_brief(name, tool_input)
+        lines.append(f"| {i} | {table_tool_name} | {target} |")
     lines.append("")
 
     # Individual results
@@ -233,11 +260,30 @@ def _render_parallel_tools_section(
         result = tool.get("result", "")
         tool_input = tool.get("input", {})
 
-        lines.append(f"**[{i}]** {name}")
+        # For Skill tools, show skill name in header and filter 'skill' from input
+        skill_name = extract_skill_name(name, tool_input)
+        if skill_name:
+            lines.append(f"**[{i}]** Skill:{skill_name}")
+            display_input = {k: v for k, v in tool_input.items() if k != "skill"}
+        elif name == "AskUserQuestion":
+            questions = tool_input.get("questions", [])
+            count_suffix = f" ({len(questions)} questions)" if len(questions) > 1 else ""
+            lines.append(f"**[{i}]** AskUserQuestion{count_suffix}")
+            display_input = {}  # Use Q&A format instead
+        else:
+            lines.append(f"**[{i}]** {name}")
+            display_input = tool_input
         lines.append("")
 
+        # Special Q&A rendering for AskUserQuestion
+        if name == "AskUserQuestion":
+            qa_lines = format_ask_user_question(tool_input, result)
+            if qa_lines:
+                lines.extend(qa_lines)
+            continue  # Skip normal input/result rendering
+
         # Show input
-        input_str = format_tool_input(tool_input)
+        input_str = format_tool_input(display_input)
         if input_str:
             lines.append("**Input**:")
             lines.append("```text")
@@ -286,6 +332,97 @@ def _render_parallel_tools_section(
     return lines, tool_result_sequence
 
 
+def extract_skill_name(tool_name: str, tool_input: dict) -> str | None:
+    """
+    Extract the skill name from a Skill tool invocation.
+
+    Args:
+        tool_name: The tool name (e.g., "Skill", "Read", "Bash")
+        tool_input: The tool's input dictionary
+
+    Returns:
+        The skill name (e.g., "draft-project") if this is a Skill tool, else None
+    """
+    if tool_name != "Skill":
+        return None
+    if not isinstance(tool_input, dict):
+        return None
+    return tool_input.get("skill")
+
+
+def format_skill_header(skill_name: str) -> str:
+    """Format the markdown header for a skill invocation."""
+    return f"### Skill: {skill_name}"
+
+
+def format_ask_user_question(tool_input: dict, result: str) -> list[str]:
+    """
+    Format AskUserQuestion tool call with Q&A display.
+
+    Handles both single and multi-question scenarios, showing each question
+    with its options and the user's answer.
+
+    Args:
+        tool_input: The tool input containing questions array
+        result: The tool result containing user's answers
+
+    Returns:
+        List of markdown lines for the Q&A section
+    """
+    lines: list[str] = []
+    questions = tool_input.get("questions", [])
+
+    if not questions:
+        return lines
+
+    # Parse answers from result
+    # Result format 1: "User has answered your questions: \"Q1\"=\"A1\", \"Q2\"=\"A2\"..."
+    # Result format 2: {"questions": [...], "answers": {"Q1": "A1", ...}}
+    answers: dict[str, str] = {}
+
+    if isinstance(result, str) and "User has answered" in result:
+        # Parse string format: extract Q="A" pairs
+        import re
+        # Match patterns like "question text"="answer text"
+        pattern = r'"([^"]+)"="([^"]*)"'
+        matches = re.findall(pattern, result)
+        for question_text, answer_text in matches:
+            answers[question_text] = answer_text
+    elif isinstance(result, dict):
+        answers = result.get("answers", {})
+
+    # Render each question
+    for i, q in enumerate(questions, 1):
+        header = q.get("header", f"Question {i}")
+        question_text = q.get("question", "")
+        options = q.get("options", [])
+        multi_select = q.get("multiSelect", False)
+
+        lines.append(f"**{header}**: {question_text}")
+
+        # Show options if present
+        if options:
+            for opt in options:
+                label = opt.get("label", "") if isinstance(opt, dict) else str(opt)
+                desc = opt.get("description", "") if isinstance(opt, dict) else ""
+                # Check if this option was selected
+                answer = answers.get(question_text, "")
+                selected = label == answer or label in answer
+                marker = "→" if selected else "-"
+                if desc:
+                    lines.append(f"  {marker} **{label}**: {desc}")
+                else:
+                    lines.append(f"  {marker} {label}")
+
+        # Show the answer
+        answer = answers.get(question_text, "")
+        if answer:
+            lines.append(f"  **Answer**: {answer}")
+        lines.append("")
+
+    return lines
+
+
 def _render_tool_section(
     tool_name: str,
     tool_input: dict,
@@ -301,11 +438,35 @@ def _render_tool_section(
     """
     lines: list[str] = []
 
-    lines.append(f"### Tool: {tool_name}")
+    # Check for Skill tool - render distinct header
+    skill_name = extract_skill_name(tool_name, tool_input)
+    if skill_name:
+        lines.append(format_skill_header(skill_name))
+        # Filter out 'skill' key from input display (shown in header)
+        display_input = {k: v for k, v in tool_input.items() if k != "skill"}
+    elif tool_name == "AskUserQuestion":
+        # Special handling for AskUserQuestion - show as Q&A
+        questions = tool_input.get("questions", [])
+        count_suffix = f" ({len(questions)} questions)" if len(questions) > 1 else ""
+        lines.append(f"### Tool: AskUserQuestion{count_suffix}")
+        display_input = {}  # Don't show raw input, use Q&A format instead
+    else:
+        lines.append(f"### Tool: {tool_name}")
+        display_input = tool_input
     lines.append("")
 
+    # Special Q&A rendering for AskUserQuestion
+    if tool_name == "AskUserQuestion":
+        qa_lines = format_ask_user_question(tool_input, result)
+        if qa_lines:
+            lines.extend(qa_lines)
+        # Skip normal input/result rendering for AskUserQuestion
+        lines.append("---")
+        lines.append("")
+        return lines, tool_result_sequence
+
     # Format input - per spec: **Input**: with ```text
-    input_str = format_tool_input(tool_input)
+    input_str = format_tool_input(display_input)
     if input_str:
         lines.append("**Input**:")
         lines.append("```text")
