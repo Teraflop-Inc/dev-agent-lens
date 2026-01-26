@@ -173,6 +173,85 @@ services:
     profiles:
       - advanced
 
+  # =============================================================================
+  # TEST INFRASTRUCTURE
+  # =============================================================================
+
+  # Test container for Arize AX (cloud) - semi-persistent, on-demand
+  # Usage: docker compose --profile test-arize up -d litellm-test-arize
+  litellm-test-arize:
+    image: aowen14/litellm-oauth-fix:latest
+    ports:
+      - "4100:4000"
+    volumes:
+      - ./litellm_config_arize.yaml:/app/config.yaml
+    environment:
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - LITELLM_DISABLE_AUTH=true
+      - LITELLM_LOG=DEBUG
+
+      # Arize AX credentials
+      - ARIZE_API_KEY=${ARIZE_API_KEY}
+      - ARIZE_SPACE_KEY=${ARIZE_SPACE_KEY}
+      - ARIZE_ENDPOINT=https://otlp.arize.com/v1
+
+      # Test project isolation - override via DAL_TEST_PROJECT env var
+      - OTEL_SERVICE_NAME=${DAL_TEST_PROJECT:-dal-test-default}
+    env_file:
+      - .env
+    command:
+      ["--config", "/app/config.yaml", "--port", "4000", "--num_workers", "1"]
+    restart: "no"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:4000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    profiles:
+      - test-arize
+
+  # Test container for Phoenix (local) - semi-persistent, on-demand
+  # Uses the same Phoenix server as dev, but different project name
+  # Usage: docker compose --profile test-phoenix up -d litellm-test-phoenix
+  litellm-test-phoenix:
+    image: aowen14/litellm-oauth-fix:latest
+    ports:
+      - "4101:4000"
+    volumes:
+      # Use test-specific config that uses host.docker.internal
+      - ./litellm_config_test_phoenix.yaml:/app/config.yaml
+    environment:
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+
+      # Test project isolation - override via DAL_TEST_PROJECT env var
+      - OTEL_SERVICE_NAME=${DAL_TEST_PROJECT:-dal-test-default}
+
+      # Phoenix OTLP endpoint - use host.docker.internal to reach Phoenix
+      # running in any docker project (not just this one)
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://host.docker.internal:4317
+      - OTEL_EXPORTER_OTLP_PROTOCOL=grpc
+      # Override the config file defaults to use host.docker.internal
+      - PHOENIX_COLLECTOR_ENDPOINT=http://host.docker.internal:4317
+      - PHOENIX_COLLECTOR_HTTP_ENDPOINT=http://host.docker.internal:6006/v1/traces
+
+      # Project name in Phoenix UI
+      - OTEL_RESOURCE_ATTRIBUTES=service.name=${DAL_TEST_PROJECT:-dal-test-default},openinference.project.name=${DAL_TEST_PROJECT:-dal-test-default}
+    env_file:
+      - .env
+    command:
+      ["--config", "/app/config.yaml", "--port", "4000", "--num_workers", "1"]
+    restart: "no"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:4000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    # NOTE: No depends_on here - the orchestrator starts phoenix first via
+    # `docker compose --profile phoenix up -d phoenix` before starting this container.
+    # Using depends_on would cause profile validation errors.
+    profiles:
+      - test-phoenix
+
 volumes:
   postgres_data:
   phoenix_data:
