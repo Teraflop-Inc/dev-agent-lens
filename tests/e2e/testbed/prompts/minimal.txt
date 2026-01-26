@@ -1,0 +1,3 @@
+PIPELINE_TEST_MODE ACTIVE
+
+Smoke test: Read sample_code/main.py and output "PIPELINE_TEST_COMPLETE".
