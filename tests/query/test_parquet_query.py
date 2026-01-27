@@ -25,6 +25,7 @@ from dev_agent_lens.query.parquet_query import (
     _check_duckdb_available,
     _group_spans_by_session,
     _parse_datetime,
+    extract_skill_name_from_span,
     find_parquet_files,
     get_parquet_stats,
     query_parquet,
@@ -785,3 +786,335 @@ class TestQuerySessionsAutoDetect:
 
         assert len(sessions) == 1
         assert sessions[0]["session_id"] == "session_abc123"
+
+
+# =============================================================================
+# ENG2-734: Skill Name Extraction Tests
+# =============================================================================
+
+
+class TestExtractSkillNameFromSpan:
+    """Tests for extract_skill_name_from_span function (ENG2-734).
+
+    Tests the 2-level JSON parsing to extract skill names from
+    Claude_Code_Tool_Skill spans.
+    """
+
+    def test_extract_skill_name_valid_span(self):
+        """Extract skill name from a valid Skill tool span."""
+        span = {
+            "name": "Claude_Code_Tool_Skill",
+            "raw_attributes": {
+                "attributes": {
+                    "input": {
+                        "value": json.dumps({
+                            "type": "tool_use",
+                            "name": "Skill",
+                            "input": {
+                                "skill": "draft-project"
+                            }
+                        })
+                    }
+                }
+            }
+        }
+        result = extract_skill_name_from_span(span)
+        assert result == "draft-project"
+
+    def test_extract_skill_name_json_string_raw_attributes(self):
+        """Extract skill name when raw_attributes_json is a JSON string."""
+        span = {
+            "name": "Claude_Code_Tool_Skill",
+            "raw_attributes_json": json.dumps({
+                "attributes": {
+                    "input": {
+                        "value": json.dumps({
+                            "type": "tool_use",
+                            "name": "Skill",
+                            "input": {
+                                "skill": "create-implementation-ticket"
+                            }
+                        })
+                    }
+                }
+            })
+        }
+        result = extract_skill_name_from_span(span)
+        assert result == "create-implementation-ticket"
+
+    def test_extract_skill_name_non_skill_span(self):
+        """Non-Skill spans return None."""
+        span = {
+            "name": "Claude_Code_Tool_Read",
+            "raw_attributes": {
+                "attributes": {
+                    "input": {"value": "{}"}
+                }
+            }
+        }
+        result = extract_skill_name_from_span(span)
+        assert result is None
+
+    def test_extract_skill_name_missing_raw_attributes(self):
+        """Missing raw_attributes returns None."""
+        span = {
+            "name": "Claude_Code_Tool_Skill",
+        }
+        result = extract_skill_name_from_span(span)
+        assert result is None
+
+    def test_extract_skill_name_empty_raw_attributes(self):
+        """Empty raw_attributes returns None."""
+        span = {
+            "name": "Claude_Code_Tool_Skill",
+            "raw_attributes": None,
+        }
+        result = extract_skill_name_from_span(span)
+        assert result is None
+
+    def test_extract_skill_name_malformed_json(self):
+        """Malformed JSON in input.value returns None gracefully."""
+        span = {
+            "name": "Claude_Code_Tool_Skill",
+            "raw_attributes": {
+                "attributes": {
+                    "input": {
+                        "value": "not valid json {{{}"
+                    }
+                }
+            }
+        }
+        result = extract_skill_name_from_span(span)
+        assert result is None
+
+    def test_extract_skill_name_missing_skill_key(self):
+        """Valid structure but missing 'skill' key returns None."""
+        span = {
+            "name": "Claude_Code_Tool_Skill",
+            "raw_attributes": {
+                "attributes": {
+                    "input": {
+                        "value": json.dumps({
+                            "type": "tool_use",
+                            "name": "Skill",
+                            "input": {
+                                "args": "--help"
+                            }
+                        })
+                    }
+                }
+            }
+        }
+        result = extract_skill_name_from_span(span)
+        assert result is None
+
+    def test_extract_skill_name_various_skill_names(self):
+        """Test extraction of various real-world skill names."""
+        skill_names = [
+            "draft-project",
+            "create-implementation-ticket",
+            "fabric-cli",
+            "draft-implementation-ticket",
+            "testbed",
+        ]
+        for expected_skill in skill_names:
+            span = {
+                "name": "Claude_Code_Tool_Skill",
+                "raw_attributes": {
+                    "attributes": {
+                        "input": {
+                            "value": json.dumps({
+                                "type": "tool_use",
+                                "name": "Skill",
+                                "input": {"skill": expected_skill}
+                            })
+                        }
+                    }
+                }
+            }
+            result = extract_skill_name_from_span(span)
+            assert result == expected_skill, f"Failed for skill: {expected_skill}"
+
+
+class TestSkillNameFilterSQL:
+    """Tests for skill_name filter in SQL building (ENG2-734)."""
+
+    def test_skill_name_filter_prefilters_to_skill_spans(self):
+        """skill_name filter adds name='Claude_Code_Tool_Skill' condition."""
+        where, params = _build_filter_sql(skill_name="draft-project")
+        assert "name = ?" in where
+        assert "Claude_Code_Tool_Skill" in params
+
+    def test_skill_name_filter_combines_with_others(self):
+        """skill_name filter combines with other filters."""
+        where, params = _build_filter_sql(
+            session_id="abc123",
+            skill_name="draft-project",
+        )
+        assert "session_id = ?" in where
+        assert "name = ?" in where
+        assert "abc123" in params
+        assert "Claude_Code_Tool_Skill" in params
+
+
+@pytest.fixture
+def sample_skill_spans_data():
+    """Sample span data including Skill tool spans for testing skill extraction."""
+    return [
+        # Non-skill span
+        {
+            "session_id": "session_skill_test",
+            "source": "test-source",
+            "span_id": "span_llm",
+            "trace_id": "trace1",
+            "parent_id": None,
+            "name": "LLMSpan",
+            "span_kind": "LLM",
+            "start_time": datetime(2024, 1, 1, 10, 0, 0),
+            "end_time": datetime(2024, 1, 1, 10, 5, 0),
+            "status_code": "OK",
+            "input_value": "User request",
+            "output_value": "Response",
+            "input_messages": None,
+            "output_messages": None,
+            "llm_model_name": "claude-3-sonnet",
+            "llm_token_count_prompt": 100,
+            "llm_token_count_completion": 50,
+            "llm_token_count_total": 150,
+            "backend": "phoenix",
+            "raw_attributes_json": "{}",
+        },
+        # Skill span: draft-project
+        {
+            "session_id": "session_skill_test",
+            "source": "test-source",
+            "span_id": "span_skill_1",
+            "trace_id": "trace1",
+            "parent_id": "span_llm",
+            "name": "Claude_Code_Tool_Skill",
+            "span_kind": "TOOL",
+            "start_time": datetime(2024, 1, 1, 10, 6, 0),
+            "end_time": datetime(2024, 1, 1, 10, 7, 0),
+            "status_code": "OK",
+            "input_value": None,
+            "output_value": "Launching skill: draft-project",
+            "input_messages": None,
+            "output_messages": None,
+            "llm_model_name": None,
+            "llm_token_count_prompt": None,
+            "llm_token_count_completion": None,
+            "llm_token_count_total": None,
+            "backend": "phoenix",
+            "raw_attributes_json": json.dumps({
+                "attributes": {
+                    "input": {
+                        "value": json.dumps({
+                            "type": "tool_use",
+                            "name": "Skill",
+                            "input": {"skill": "draft-project"}
+                        })
+                    }
+                }
+            }),
+        },
+        # Skill span: testbed
+        {
+            "session_id": "session_skill_test",
+            "source": "test-source",
+            "span_id": "span_skill_2",
+            "trace_id": "trace1",
+            "parent_id": "span_llm",
+            "name": "Claude_Code_Tool_Skill",
+            "span_kind": "TOOL",
+            "start_time": datetime(2024, 1, 1, 10, 8, 0),
+            "end_time": datetime(2024, 1, 1, 10, 9, 0),
+            "status_code": "OK",
+            "input_value": None,
+            "output_value": "Launching skill: testbed",
+            "input_messages": None,
+            "output_messages": None,
+            "llm_model_name": None,
+            "llm_token_count_prompt": None,
+            "llm_token_count_completion": None,
+            "llm_token_count_total": None,
+            "backend": "phoenix",
+            "raw_attributes_json": json.dumps({
+                "attributes": {
+                    "input": {
+                        "value": json.dumps({
+                            "type": "tool_use",
+                            "name": "Skill",
+                            "input": {"skill": "testbed"}
+                        })
+                    }
+                }
+            }),
+        },
+    ]
+
+
+@pytest.fixture
+def sample_skill_parquet_file(tmp_path, sample_skill_spans_data):
+    """Create a Parquet file with skill span data."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    spans_path = tmp_path / "test_skill_spans.parquet"
+    table = pa.Table.from_pylist(sample_skill_spans_data)
+    pq.write_table(table, spans_path, compression="zstd")
+    return spans_path
+
+
+class TestSkillNameQueryParquet:
+    """Tests for querying Parquet files by skill_name (ENG2-734)."""
+
+    def test_query_by_skill_name(self, sample_skill_parquet_file):
+        """Filter by skill_name returns only matching skill spans."""
+        result = query_parquet(
+            spans_path=sample_skill_parquet_file,
+            skill_name="draft-project",
+        )
+
+        assert result.total_spans == 1
+        df = result.to_dataframe()
+        assert df.iloc[0]["span_id"] == "span_skill_1"
+        assert df.iloc[0]["skill_name"] == "draft-project"
+
+    def test_query_skill_name_nonexistent(self, sample_skill_parquet_file):
+        """Filter by nonexistent skill returns empty result."""
+        result = query_parquet(
+            spans_path=sample_skill_parquet_file,
+            skill_name="nonexistent-skill",
+        )
+
+        assert result.total_spans == 0
+
+    def test_query_all_skills(self, sample_skill_parquet_file):
+        """Query without skill_name returns all spans with skill_name populated."""
+        result = query_parquet(spans_path=sample_skill_parquet_file)
+
+        assert result.total_spans == 3
+        df = result.to_dataframe()
+
+        # Check that skill_name is extracted for skill spans
+        skill_spans = df[df["name"] == "Claude_Code_Tool_Skill"]
+        assert len(skill_spans) == 2
+        skill_names = set(skill_spans["skill_name"].dropna())
+        assert skill_names == {"draft-project", "testbed"}
+
+        # Non-skill span should have None for skill_name
+        non_skill = df[df["name"] == "LLMSpan"]
+        assert len(non_skill) == 1
+        assert non_skill.iloc[0]["skill_name"] is None
+
+    def test_query_skill_combined_with_session(self, sample_skill_parquet_file):
+        """skill_name filter combines with session_id filter."""
+        result = query_parquet(
+            spans_path=sample_skill_parquet_file,
+            session_id="session_skill_test",
+            skill_name="testbed",
+        )
+
+        assert result.total_spans == 1
+        df = result.to_dataframe()
+        assert df.iloc[0]["skill_name"] == "testbed"

@@ -60,6 +60,10 @@ class AggregateStats:
     total_tool_calls: int = 0
     total_successes: int = 0
     total_failures: int = 0
+    # Skill tracking
+    skills_used: list[str] = field(default_factory=list)
+    skill_call_count: int = 0
+    skill_breakdown: dict[str, int] = field(default_factory=dict)
 
     @property
     def overall_success_rate(self) -> float:
@@ -76,6 +80,9 @@ class AggregateStats:
             "total_failures": self.total_failures,
             "overall_success_rate": round(self.overall_success_rate, 2),
             "tools": {name: stats.to_dict() for name, stats in self.tools.items()},
+            "skills_used": self.skills_used,
+            "skill_call_count": self.skill_call_count,
+            "skill_breakdown": self.skill_breakdown,
         }
 
 
@@ -133,6 +140,13 @@ def _is_success(span: dict[str, Any]) -> bool:
     return status in ("OK", "SUCCESS", "")
 
 
+def _extract_skill_from_span(span: dict[str, Any]) -> str | None:
+    """Extract skill name from a span if it's a Skill tool call."""
+    from dev_agent_lens.query.parquet_query import extract_skill_name_from_span
+
+    return extract_skill_name_from_span(span)
+
+
 def aggregate_tools(spans: list[dict[str, Any]]) -> AggregateStats:
     """
     Aggregate tool call statistics from spans.
@@ -176,6 +190,16 @@ def aggregate_tools(spans: list[dict[str, Any]]) -> AggregateStats:
         if duration is not None:
             tool_stats.durations.append(duration)
             tool_stats.total_duration_ms += duration
+
+        # Track skill usage if this is a Skill tool
+        if tool_name == "Skill":
+            skill_name = _extract_skill_from_span(span)
+            if skill_name:
+                stats.skill_call_count += 1
+                if skill_name not in stats.skill_breakdown:
+                    stats.skill_breakdown[skill_name] = 0
+                    stats.skills_used.append(skill_name)
+                stats.skill_breakdown[skill_name] += 1
 
     return stats
 
