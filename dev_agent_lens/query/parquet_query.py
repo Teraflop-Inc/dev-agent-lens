@@ -38,12 +38,54 @@ def _parse_datetime(value: datetime | str | None) -> str | None:
     return value
 
 
+def extract_skill_name_from_span(span: dict[str, Any]) -> str | None:
+    """
+    Extract skill name from a span if it's a Claude_Code_Tool_Skill span.
+
+    Handles the 2-level JSON parsing:
+    1. raw_attributes_json/raw_attributes → dict
+    2. attributes.input.value → tool_use dict
+    3. input.skill → skill name
+
+    Returns:
+        Skill name string or None if not a Skill span
+    """
+    name = span.get("name", "")
+    if name != "Claude_Code_Tool_Skill":
+        return None
+
+    raw_attrs = span.get("raw_attributes") or span.get("raw_attributes_json")
+    if not raw_attrs:
+        return None
+
+    try:
+        if isinstance(raw_attrs, str):
+            attrs = json.loads(raw_attrs)
+        else:
+            attrs = raw_attrs
+
+        input_value = attrs.get("attributes", {}).get("input", {}).get("value", "")
+        if isinstance(input_value, str) and input_value:
+            input_data = json.loads(input_value)
+        else:
+            input_data = input_value
+
+        if isinstance(input_data, dict):
+            tool_input = input_data.get("input", {})
+            return tool_input.get("skill")
+    except (json.JSONDecodeError, TypeError, AttributeError):
+        pass
+
+    return None
+
+
 def _build_filter_sql(
     session_id: str | None = None,
     start_time: datetime | str | None = None,
     end_time: datetime | str | None = None,
     status_code: str | None = None,
     model_name: str | None = None,
+    skill_name: str | None = None,
 ) -> tuple[str, list[Any]]:
     """
     Build SQL WHERE clause from filter parameters.
@@ -75,6 +117,12 @@ def _build_filter_sql(
         conditions.append("LOWER(llm_model_name) LIKE ?")
         params.append(f"%{model_name.lower()}%")
 
+    # For skill_name filter, we pre-filter to Skill tool spans at SQL level
+    # The actual skill name matching is done in memory after parsing raw_attributes
+    if skill_name is not None:
+        conditions.append("name = ?")
+        params.append("Claude_Code_Tool_Skill")
+
     if conditions:
         return "WHERE " + " AND ".join(conditions), params
     return "", []
@@ -89,6 +137,7 @@ def query_parquet(
     end_time: datetime | str | None = None,
     status_code: str | None = None,
     model_name: str | None = None,
+    skill_name: str | None = None,
     fields: list[str] | None = None,
     case_insensitive: bool = False,
     flat: bool = False,
@@ -109,6 +158,7 @@ def query_parquet(
         end_time: Filter spans starting before this time
         status_code: Filter by status code (e.g., "OK", "ERROR")
         model_name: Filter by LLM model name (case-insensitive partial match)
+        skill_name: Filter to Skill tool spans with this skill name (e.g., "draft-project")
         fields: List of fields to search when using pattern
         case_insensitive: Whether pattern matching is case-insensitive
         flat: If True, returns spans ungrouped; if False, groups by session
@@ -147,6 +197,7 @@ def query_parquet(
         "end_time": str(end_time) if end_time else None,
         "status_code": status_code,
         "model_name": model_name,
+        "skill_name": skill_name,
         "fields": fields,
         "case_insensitive": case_insensitive,
         "flat": flat,
@@ -160,6 +211,7 @@ def query_parquet(
         end_time=end_time,
         status_code=status_code,
         model_name=model_name,
+        skill_name=skill_name,
     )
 
     # Build SELECT columns - get all needed columns
@@ -210,7 +262,7 @@ def query_parquet(
     # Convert DataFrame to list of dicts
     spans_list = result_df.to_dict("records")
 
-    # Parse raw_attributes_json back to dict if present
+    # Parse raw_attributes_json back to dict if present and extract skill_name
     for span in spans_list:
         if span.get("raw_attributes_json"):
             try:
@@ -221,6 +273,15 @@ def query_parquet(
             span["raw_attributes"] = {}
         # Remove the JSON string version
         span.pop("raw_attributes_json", None)
+
+        # Extract skill_name for Skill tool spans
+        span["skill_name"] = extract_skill_name_from_span(span)
+
+    # Apply skill_name filter in memory (SQL pre-filtered to Skill spans)
+    if skill_name is not None:
+        spans_list = [s for s in spans_list if s.get("skill_name") == skill_name]
+        if not spans_list:
+            return QueryResult(query_params=query_params)
 
     # Apply regex pattern filter if provided (done in-memory after SQL filtering)
     if pattern is not None:
@@ -506,6 +567,7 @@ def query_source(
     end_time: datetime | str | None = None,
     status_code: str | None = None,
     model_name: str | None = None,
+    skill_name: str | None = None,
     fields: list[str] | None = None,
     case_insensitive: bool = False,
     flat: bool = False,
@@ -527,6 +589,7 @@ def query_source(
         end_time: Filter spans starting before this time
         status_code: Filter by status code
         model_name: Filter by LLM model name
+        skill_name: Filter to Skill tool spans with this skill name (e.g., "draft-project")
         fields: List of fields to search when using pattern
         case_insensitive: Whether pattern matching is case-insensitive
         flat: If True, returns spans ungrouped
@@ -564,6 +627,7 @@ def query_source(
                 end_time=end_time,
                 status_code=status_code,
                 model_name=model_name,
+                skill_name=skill_name,
                 fields=fields,
                 case_insensitive=case_insensitive,
                 flat=flat,

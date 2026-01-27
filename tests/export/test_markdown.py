@@ -1375,3 +1375,164 @@ class TestAskUserQuestion:
             assert "Color preference?" in export.main_content
             # Note: dict-format answers may be handled differently
             # The main check is that it doesn't crash
+
+
+# =============================================================================
+# ENG2-734: Skill Header Rendering Tests
+# =============================================================================
+
+
+class TestSkillHeaderRendering:
+    """Tests for skill header formatting in markdown export (ENG2-734).
+
+    Verifies that Skill tool invocations are rendered with
+    `### Skill: skill-name` headers instead of generic `### Tool: Skill`.
+    """
+
+    def test_extract_skill_name_from_skill_tool(self):
+        """extract_skill_name returns skill name for Skill tool."""
+        from dev_agent_lens.export.markdown_renderer import extract_skill_name
+
+        result = extract_skill_name("Skill", {"skill": "draft-project"})
+        assert result == "draft-project"
+
+    def test_extract_skill_name_non_skill_tool(self):
+        """extract_skill_name returns None for non-Skill tools."""
+        from dev_agent_lens.export.markdown_renderer import extract_skill_name
+
+        assert extract_skill_name("Read", {"file_path": "/test"}) is None
+        assert extract_skill_name("Bash", {"command": "ls"}) is None
+
+    def test_extract_skill_name_missing_skill_key(self):
+        """extract_skill_name returns None if skill key missing."""
+        from dev_agent_lens.export.markdown_renderer import extract_skill_name
+
+        result = extract_skill_name("Skill", {"args": "--help"})
+        assert result is None
+
+    def test_extract_skill_name_invalid_input(self):
+        """extract_skill_name handles invalid input gracefully."""
+        from dev_agent_lens.export.markdown_renderer import extract_skill_name
+
+        assert extract_skill_name("Skill", None) is None
+        assert extract_skill_name("Skill", "not a dict") is None
+
+    def test_format_skill_header(self):
+        """format_skill_header produces correct header format."""
+        from dev_agent_lens.export.markdown_renderer import format_skill_header
+
+        assert format_skill_header("draft-project") == "### Skill: draft-project"
+        assert format_skill_header("testbed") == "### Skill: testbed"
+        assert format_skill_header("fabric-cli") == "### Skill: fabric-cli"
+
+    def test_skill_tool_in_session_export(self):
+        """Skill tool invocation renders with Skill header in export."""
+        # Claude JSONL format: assistant message with tool_use, then user message with toolUseResult
+        jsonl_content = [
+            {
+                "type": "user",
+                "uuid": "u1",
+                "message": {
+                    "role": "user",
+                    "content": "Run /testbed",
+                },
+                "timestamp": "2026-01-19T10:00:00.000Z",
+                "sessionId": "skill-test-001",
+            },
+            {
+                "type": "assistant",
+                "uuid": "a1",
+                "parentUuid": "u1",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "tool-1",
+                            "name": "Skill",
+                            "input": {"skill": "testbed"},
+                        }
+                    ],
+                },
+                "timestamp": "2026-01-19T10:00:05.000Z",
+                "sessionId": "skill-test-001",
+            },
+            {
+                "type": "user",
+                "uuid": "u2",
+                "parentUuid": "a1",
+                "toolUseResult": "Launching skill: testbed",
+                "timestamp": "2026-01-19T10:00:06.000Z",
+                "sessionId": "skill-test-001",
+            },
+        ]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            jsonl_path = Path(tmpdir) / "skill-test-001.jsonl"
+            with open(jsonl_path, "w") as f:
+                for line in jsonl_content:
+                    f.write(json.dumps(line) + "\n")
+
+            export = export_session_to_markdown(jsonl_path)
+
+            # Should have "### Skill: testbed" instead of "### Tool: Skill"
+            assert "### Skill: testbed" in export.main_content
+            assert "### Tool: Skill" not in export.main_content
+
+    def test_skill_tool_with_args(self):
+        """Skill tool with additional args renders correctly."""
+        # Claude JSONL format: assistant message with tool_use, then user message with toolUseResult
+        jsonl_content = [
+            {
+                "type": "user",
+                "uuid": "u1",
+                "message": {
+                    "role": "user",
+                    "content": "Run fabric",
+                },
+                "timestamp": "2026-01-19T10:00:00.000Z",
+                "sessionId": "skill-test-002",
+            },
+            {
+                "type": "assistant",
+                "uuid": "a1",
+                "parentUuid": "u1",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "tool-1",
+                            "name": "Skill",
+                            "input": {
+                                "skill": "fabric-cli",
+                                "args": "meeting analyze --meeting-id 123"
+                            },
+                        }
+                    ],
+                },
+                "timestamp": "2026-01-19T10:00:05.000Z",
+                "sessionId": "skill-test-002",
+            },
+            {
+                "type": "user",
+                "uuid": "u2",
+                "parentUuid": "a1",
+                "toolUseResult": "Launching skill: fabric-cli",
+                "timestamp": "2026-01-19T10:00:06.000Z",
+                "sessionId": "skill-test-002",
+            },
+        ]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            jsonl_path = Path(tmpdir) / "skill-test-002.jsonl"
+            with open(jsonl_path, "w") as f:
+                for line in jsonl_content:
+                    f.write(json.dumps(line) + "\n")
+
+            export = export_session_to_markdown(jsonl_path)
+
+            # Should have "### Skill: fabric-cli"
+            assert "### Skill: fabric-cli" in export.main_content
+            # Args should be shown in input section
+            assert "meeting analyze" in export.main_content

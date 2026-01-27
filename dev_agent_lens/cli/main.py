@@ -2430,7 +2430,12 @@ def _get_sessions_file_for_source(source_name: str | None) -> Path | None:
     default=10,
     help="Number of top tools to show (default: 10)",
 )
-def stats(file: str | None, source_name: str | None, by_session: bool, output: str, top_tools: int) -> None:
+@click.option(
+    "--skill",
+    type=str,
+    help="Filter by skill name (e.g., 'draft-project', 'commit')",
+)
+def stats(file: str | None, source_name: str | None, by_session: bool, output: str, top_tools: int, skill: str | None) -> None:
     """Show statistics for trace data.
 
     By default, shows stats for the current sessions file.
@@ -2501,6 +2506,18 @@ def stats(file: str | None, source_name: str | None, by_session: bool, output: s
         return
 
     click.echo(f"Loaded {len(spans):,} spans")
+
+    # Apply skill filter if specified
+    if skill:
+        from dev_agent_lens.query.parquet_query import extract_skill_name_from_span
+
+        original_count = len(spans)
+        spans = [s for s in spans if extract_skill_name_from_span(s) == skill]
+        click.echo(f"Filtered to {len(spans):,} spans with skill '{skill}' (from {original_count:,})")
+        if not spans:
+            click.echo(click.style(f"No spans found with skill '{skill}'.", fg="yellow"))
+            return
+
     click.echo()
 
     # Compute stats
@@ -2566,6 +2583,16 @@ def stats(file: str | None, source_name: str | None, by_session: bool, output: s
                     f"({t['success_rate']:.0f}% success)"
                 )
         click.echo()
+
+        # Skill statistics (only show if skills were used)
+        if tools.skill_call_count > 0:
+            click.echo(click.style("Skill Statistics", bold=True, underline=True))
+            click.echo(f"  Total Skill Calls: {tools.skill_call_count:,}")
+            if tools.skill_breakdown:
+                click.echo("  Skills Used:")
+                for skill_name, count in sorted(tools.skill_breakdown.items(), key=lambda x: -x[1]):
+                    click.echo(f"    {skill_name:30} {count:6,} calls")
+            click.echo()
 
         # Failure statistics
         click.echo(click.style("Failure Analysis", bold=True, underline=True))
@@ -5895,6 +5922,393 @@ def session_to_markdown(
     except Exception as e:
         click.echo(click.style(f"Error: {e}", fg="red"))
         raise
+
+
+# =============================================================================
+# Run command group - Testing infrastructure
+# =============================================================================
+
+
+@main.group()
+def run() -> None:
+    """Run tests and utilities.
+
+    Subcommands for testing and automation:
+
+        dal run testbed    Run end-to-end pipeline test
+    """
+    pass
+
+
+@run.command("testbed")
+@click.option(
+    "--backend",
+    type=click.Choice(["arize", "phoenix"]),
+    default="phoenix",
+    help="Observability backend to test against",
+)
+@click.option(
+    "--stop-after",
+    is_flag=True,
+    help="Stop test container after run (default: keep running)",
+)
+@click.option(
+    "--run-id",
+    default=None,
+    help="Specific run ID (default: auto-generated)",
+)
+@click.option(
+    "--prompt",
+    default="stress_test.txt",
+    help="Prompt file to use from testbed/prompts/ (default: stress_test.txt)",
+)
+@click.option(
+    "--cleanup",
+    is_flag=True,
+    help="Remove run directory after test completes",
+)
+def run_testbed(
+    backend: str, stop_after: bool, run_id: str | None, prompt: str, cleanup: bool
+):
+    """Run end-to-end pipeline test.
+
+    Executes Claude Code in an isolated test environment and validates
+    that traces flow correctly through the LiteLLM -> observability pipeline.
+
+    This command:
+    1. Starts the test LiteLLM container (if not running)
+    2. Creates an isolated run directory in tests/e2e/testbed/runs/
+    3. Runs Claude Code with --print mode against a stress test prompt
+    4. Syncs traces from the observability backend
+    5. Validates expected spans exist
+
+    Examples:
+        dal run testbed                    # Test against Phoenix
+        dal run testbed --backend arize    # Test against Arize AX
+        dal run testbed --stop-after       # Stop container when done
+    """
+    import asyncio
+
+    from dev_agent_lens.testing import TestBackend, TestConfig, TestOrchestrator
+
+    config = TestConfig(
+        backend=TestBackend(backend),
+        stop_container_after=stop_after,
+        prompt_file=prompt,
+    )
+    if run_id:
+        config.test_run_id = run_id
+
+    click.echo(click.style("Pipeline Test", bold=True))
+    click.echo(f"  Run ID:  {config.test_run_id}")
+    click.echo(f"  Backend: {backend}")
+    click.echo(f"  Project: dal-test-{config.test_run_id}")
+    click.echo(f"  Prompt:  {prompt}")
+    click.echo()
+
+    orchestrator = TestOrchestrator(config)
+
+    click.echo("Starting test container...")
+    try:
+        orchestrator.container.start()
+        click.echo(
+            click.style(
+                f"  Container ready at {orchestrator.container.get_proxy_url()}", fg="green"
+            )
+        )
+    except Exception as e:
+        click.echo(click.style(f"  Failed to start container: {e}", fg="red"))
+        raise SystemExit(1)
+
+    click.echo()
+    click.echo("Running Claude Code...")
+    result = asyncio.run(orchestrator.run())
+
+    click.echo()
+
+    # Output results
+    if result.error:
+        click.echo(click.style(f"Error: {result.error}", fg="red"))
+        raise SystemExit(1)
+
+    click.echo(f"Spans captured: {result.span_count}")
+    click.echo()
+    click.echo(click.style("Assertions:", bold=True))
+    for name, passed in result.assertions.items():
+        status = click.style("PASS", fg="green") if passed else click.style("FAIL", fg="red")
+        click.echo(f"  [{status}] {name}")
+
+    click.echo()
+    if result.run_dir:
+        click.echo(f"Run directory: {result.run_dir}")
+
+    if cleanup and result.run_dir:
+        orchestrator.cleanup_run_dir()
+        click.echo("Run directory cleaned up.")
+
+    click.echo()
+    if result.passed:
+        click.echo(click.style("Test PASSED", fg="green", bold=True))
+    else:
+        click.echo(click.style("Test FAILED", fg="red", bold=True))
+        raise SystemExit(1)
+
+
+@run.command("cleanup")
+@click.option(
+    "--stale",
+    "stale_hours",
+    type=int,
+    default=None,
+    help="Delete test data older than N hours (e.g., --stale 24)",
+)
+@click.option(
+    "--all",
+    "delete_all",
+    is_flag=True,
+    help="Delete ALL test data (requires confirmation)",
+)
+@click.option(
+    "--list",
+    "list_only",
+    is_flag=True,
+    help="List test data without deleting",
+)
+@click.option(
+    "--yes",
+    "-y",
+    is_flag=True,
+    help="Skip confirmation prompts (use with caution)",
+)
+@click.option(
+    "--phoenix-only",
+    is_flag=True,
+    help="Only clean Phoenix projects (skip Claude sessions)",
+)
+@click.option(
+    "--sessions-only",
+    is_flag=True,
+    help="Only clean Claude sessions (skip Phoenix projects)",
+)
+@click.option(
+    "--phoenix-url",
+    default="http://localhost:6006",
+    help="Phoenix server URL (default: http://localhost:6006)",
+)
+def run_cleanup(
+    stale_hours: int | None,
+    delete_all: bool,
+    list_only: bool,
+    yes: bool,
+    phoenix_only: bool,
+    sessions_only: bool,
+    phoenix_url: str,
+):
+    """Clean up test data from Phoenix and Claude sessions.
+
+    Safely removes test data created by the testbed runner:
+
+    \b
+    Phoenix projects:
+      - Only 'dal-test-*' projects can be deleted
+      - Protected: dev-agent-lens, default (NEVER deleted)
+
+    \b
+    Claude sessions:
+      - Only sessions from testbed runs can be deleted
+      - Safety based on path structure (must contain testbed path)
+      - Normal user sessions are NEVER touched
+
+    \b
+    Examples:
+        dal run cleanup --list          List all test data
+        dal run cleanup --stale 24      Delete data older than 24h
+        dal run cleanup --all           Delete all test data (confirm)
+        dal run cleanup --all -y        Delete all without confirmation
+        dal run cleanup --phoenix-only  Only clean Phoenix projects
+        dal run cleanup --sessions-only Only clean Claude sessions
+    """
+    from dev_agent_lens.testing import ClaudeSessionCleaner, PhoenixProjectCleaner
+
+    # Validate options
+    if phoenix_only and sessions_only:
+        click.echo(click.style("Error: Cannot use both --phoenix-only and --sessions-only", fg="red"))
+        raise SystemExit(1)
+
+    clean_phoenix = not sessions_only
+    clean_sessions = not phoenix_only
+
+    phoenix_stats = None
+    session_stats = None
+
+    # Get Phoenix stats
+    if clean_phoenix:
+        phoenix_cleaner = PhoenixProjectCleaner(phoenix_url=phoenix_url)
+        try:
+            phoenix_stats = phoenix_cleaner.get_stats()
+        except RuntimeError as e:
+            click.echo(click.style(f"Phoenix error: {e}", fg="yellow"))
+            click.echo("Phoenix cleanup will be skipped.")
+            clean_phoenix = False
+
+    # Get Claude session stats
+    if clean_sessions:
+        session_cleaner = ClaudeSessionCleaner()
+        session_stats = session_cleaner.get_stats()
+
+    # Display stats
+    click.echo(click.style("Test Data Cleanup", bold=True))
+    click.echo()
+
+    if phoenix_stats:
+        click.echo(click.style("Phoenix Projects:", bold=True))
+        click.echo(f"  URL: {phoenix_url}")
+        click.echo(f"  Test projects (dal-test-*): {phoenix_stats['test_projects']}")
+        click.echo(f"  Protected: {', '.join(phoenix_stats['protected_names'])}")
+        click.echo()
+
+    if session_stats:
+        click.echo(click.style("Claude Sessions:", bold=True))
+        click.echo(f"  Testbed sessions: {session_stats['testbed_sessions']}")
+        click.echo(f"  Size: {session_stats['testbed_size_mb']} MB")
+        click.echo(f"  Pattern: *tests-e2e-testbed-runs-run-*")
+        click.echo()
+
+    # List mode
+    if list_only:
+        if clean_phoenix and phoenix_stats and phoenix_stats["test_project_names"]:
+            click.echo(click.style("Phoenix test projects:", bold=True))
+            test_projects = phoenix_cleaner.list_test_projects()
+            for p in sorted(test_projects, key=lambda x: x.created_at or datetime.min):
+                age = ""
+                if p.created_at:
+                    age_td = datetime.now(p.created_at.tzinfo or None) - p.created_at
+                    hours = int(age_td.total_seconds() / 3600)
+                    age = f" ({hours}h ago)"
+                spans = f", {p.span_count} spans" if p.span_count else ""
+                click.echo(f"  - {p.name}{age}{spans}")
+            click.echo()
+
+        if clean_sessions and session_stats and session_stats["testbed_sessions"] > 0:
+            click.echo(click.style("Claude testbed sessions:", bold=True))
+            testbed_sessions = session_cleaner.list_testbed_sessions()
+            for s in sorted(testbed_sessions, key=lambda x: x.modified_at or datetime.min):
+                age = ""
+                if s.modified_at:
+                    age_td = datetime.now(s.modified_at.tzinfo) - s.modified_at
+                    hours = int(age_td.total_seconds() / 3600)
+                    age = f" ({hours}h ago)"
+                # Extract just the run ID from the long path
+                run_id = s.name.split("run-")[-1] if "run-" in s.name else s.name[-20:]
+                click.echo(f"  - run-{run_id}{age}")
+            click.echo()
+
+        if (not phoenix_stats or not phoenix_stats["test_project_names"]) and \
+           (not session_stats or session_stats["testbed_sessions"] == 0):
+            click.echo("No test data found.")
+        return
+
+    # Must specify --stale or --all
+    if stale_hours is None and not delete_all:
+        click.echo("Specify --stale, --all, or --list. Use --help for options.")
+        raise SystemExit(1)
+
+    # Stale cleanup
+    if stale_hours is not None:
+        if stale_hours <= 0:
+            click.echo(click.style("Error: --stale value must be positive", fg="red"))
+            raise SystemExit(1)
+
+        click.echo(f"Deleting test data older than {stale_hours} hours...")
+        click.echo()
+
+        total_deleted = 0
+
+        if clean_phoenix and phoenix_stats:
+            deleted = phoenix_cleaner.cleanup_stale(hours=stale_hours)
+            if deleted:
+                click.echo(click.style(f"Deleted {len(deleted)} Phoenix project(s):", fg="green"))
+                for name in deleted:
+                    click.echo(f"  - {name}")
+                total_deleted += len(deleted)
+            else:
+                click.echo("No stale Phoenix projects found.")
+            click.echo()
+
+        if clean_sessions and session_stats:
+            deleted = session_cleaner.cleanup_stale(hours=stale_hours)
+            if deleted:
+                click.echo(click.style(f"Deleted {len(deleted)} Claude session(s):", fg="green"))
+                for name in deleted:
+                    run_id = name.split("run-")[-1] if "run-" in name else name[-20:]
+                    click.echo(f"  - run-{run_id}")
+                total_deleted += len(deleted)
+            else:
+                click.echo("No stale Claude sessions found.")
+
+        if total_deleted == 0:
+            click.echo()
+            click.echo("No stale test data found.")
+        return
+
+    # Delete all
+    if delete_all:
+        items_to_delete = []
+
+        if clean_phoenix and phoenix_stats:
+            test_projects = phoenix_cleaner.list_test_projects()
+            for p in test_projects:
+                items_to_delete.append(("phoenix", p.name, p))
+
+        if clean_sessions and session_stats:
+            testbed_sessions = session_cleaner.list_testbed_sessions()
+            for s in testbed_sessions:
+                items_to_delete.append(("session", s.name, s))
+
+        if not items_to_delete:
+            click.echo("No test data to delete.")
+            return
+
+        click.echo(click.style(f"About to delete {len(items_to_delete)} item(s):", fg="yellow"))
+        click.echo()
+
+        phoenix_items = [i for i in items_to_delete if i[0] == "phoenix"]
+        session_items = [i for i in items_to_delete if i[0] == "session"]
+
+        if phoenix_items:
+            click.echo(f"  Phoenix projects ({len(phoenix_items)}):")
+            for _, name, _ in phoenix_items:
+                click.echo(f"    - {name}")
+
+        if session_items:
+            click.echo(f"  Claude sessions ({len(session_items)}):")
+            for _, name, _ in session_items:
+                run_id = name.split("run-")[-1] if "run-" in name else name[-20:]
+                click.echo(f"    - run-{run_id}")
+
+        click.echo()
+
+        if not yes:
+            confirmed = click.confirm(
+                click.style("This cannot be undone. Continue?", fg="yellow"),
+                default=False,
+            )
+            if not confirmed:
+                click.echo("Aborted.")
+                return
+
+        total_deleted = 0
+
+        if clean_phoenix and phoenix_stats:
+            deleted = phoenix_cleaner.cleanup_all(confirm=False)
+            total_deleted += len(deleted)
+
+        if clean_sessions and session_stats:
+            deleted = session_cleaner.cleanup_all()
+            total_deleted += len(deleted)
+
+        click.echo()
+        click.echo(click.style(f"Deleted {total_deleted} item(s)", fg="green"))
 
 
 if __name__ == "__main__":
