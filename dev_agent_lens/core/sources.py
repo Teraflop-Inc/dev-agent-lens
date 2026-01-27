@@ -42,6 +42,7 @@ class SourceType(str, Enum):
 
     PHOENIX = "phoenix"
     ARIZE = "arize"
+    CLAUDE = "claude"
 
 
 @dataclass
@@ -72,6 +73,9 @@ class SourceConfig:
     space_key: str | None = None
     model_id: str | None = None
 
+    # Claude-specific
+    claude_dir: str | None = None  # Custom ~/.claude path, defaults to ~/.claude/projects
+
     # Optional API key override
     api_key_env: str | None = None
 
@@ -94,6 +98,9 @@ class SourceConfig:
                 data["space_key"] = self.space_key
             if self.model_id:
                 data["model_id"] = self.model_id
+        elif self.source_type == SourceType.CLAUDE:
+            if self.claude_dir:
+                data["claude_dir"] = self.claude_dir
 
         if self.api_key_env:
             data["api_key_env"] = self.api_key_env
@@ -114,6 +121,7 @@ class SourceConfig:
             sqlite_container=data.get("sqlite_container"),
             space_key=data.get("space_key"),
             model_id=data.get("model_id"),
+            claude_dir=data.get("claude_dir"),
             api_key_env=data.get("api_key_env"),
         )
 
@@ -136,6 +144,9 @@ class SourceConfig:
                 errors.append("Arize source requires 'space_key'")
             if not self.model_id:
                 errors.append("Arize source requires 'model_id'")
+        elif self.source_type == SourceType.CLAUDE:
+            # Claude source has no required fields - defaults to ~/.claude/projects
+            pass
 
         return errors
 
@@ -145,6 +156,8 @@ class SourceConfig:
             return f"Phoenix @ {self.url or 'localhost:6006'}"
         elif self.source_type == SourceType.ARIZE:
             return f"Arize ({self.model_id or 'unknown'})"
+        elif self.source_type == SourceType.CLAUDE:
+            return f"Claude ({self.claude_dir or '~/.claude/projects'})"
         return f"{self.source_type.value}"
 
 
