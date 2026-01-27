@@ -1,0 +1,16 @@
+PIPELINE_TEST_MODE ACTIVE
+
+You are being tested as part of the dev-agent-lens automated testing infrastructure.
+This test validates skill invocation tracing (ENG2-734).
+
+Execute these operations in order:
+
+1. SKILL INVOCATION: Use the Skill tool to invoke the "testbed" skill.
+   Call the Skill tool with: {"skill": "testbed"}
+
+2. READ OPERATION: Read the file sample_code/main.py
+
+3. CONFIRMATION: After completing both operations, output exactly:
+   "PIPELINE_TEST_COMPLETE: Skill invocation test executed successfully"
+
+Do not skip any step. The skill invocation is critical for validating trace processing.

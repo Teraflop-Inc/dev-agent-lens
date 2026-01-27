@@ -242,6 +242,13 @@ def get_tool_target_brief(tool_name: str, tool_input: dict) -> str:
         desc = tool_input.get("description", "")
         return f"{subagent_type}: {truncate(desc, 30)}"
 
+    elif tool_name == "Skill":
+        skill = tool_input.get("skill", "unknown")
+        args = tool_input.get("args", "")
+        if args:
+            return f"{skill} {truncate(str(args), 30)}"
+        return skill
+
     else:
         # First value truncated
         for key in sorted(tool_input.keys()):
@@ -1577,6 +1584,16 @@ def _get_result_language(tool_name: str, tool_input: dict) -> str:
         return "text"
 
 
+def is_skill_span(tool_name: str, tool_input: dict) -> bool:
+    """Check if this tool span represents a Skill invocation."""
+    return tool_name == "Skill" and isinstance(tool_input, dict) and "skill" in tool_input
+
+
+def format_skill_header(skill_name: str) -> str:
+    """Format the markdown header for a skill invocation."""
+    return f"### Skill: {skill_name}"
+
+
 def _output_tool_section(
     tool_name: str,
     tool_input: dict,
@@ -1586,11 +1603,20 @@ def _output_tool_section(
     tool_result_sequence: int,
 ) -> None:
     """Output a tool section to conversation lines."""
-    conversation_lines.append(f"### Tool: {tool_name}")
+    # Check if this is a Skill tool - render distinct header
+    if is_skill_span(tool_name, tool_input):
+        skill_name = tool_input.get("skill", "unknown")
+        conversation_lines.append(format_skill_header(skill_name))
+        # Filter out 'skill' key and empty values from input display (shown in header)
+        display_input = {k: v for k, v in tool_input.items() if k != "skill" and v}
+    else:
+        conversation_lines.append(f"### Tool: {tool_name}")
+        display_input = tool_input
+
     conversation_lines.append("")
     conversation_lines.append("**Input**:")
     conversation_lines.append("```text")
-    conversation_lines.append(format_tool_input(tool_input))
+    conversation_lines.append(format_tool_input(display_input))
     conversation_lines.append("```")
     conversation_lines.append("")
 
