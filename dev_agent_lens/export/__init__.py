@@ -16,6 +16,12 @@ from dev_agent_lens.export.parquet import (
     export_to_parquet,
     ParquetExporter,
 )
+from dev_agent_lens.export.parquet_events import (
+    export_claude_to_events_parquet,
+    export_claude_sessions_to_events_parquet,
+    extract_events_from_session,
+    ExportResult,
+)
 from dev_agent_lens.export.markdown import (
     export_session_to_markdown,
     export_to_files,
@@ -32,6 +38,11 @@ __all__ = [
     "KEEP_FIELDS",
     "export_to_parquet",
     "ParquetExporter",
+    # Events Parquet export
+    "export_claude_to_events_parquet",
+    "export_claude_sessions_to_events_parquet",
+    "extract_events_from_session",
+    "ExportResult",
     # Markdown export
     "export_session_to_markdown",
     "export_to_files",

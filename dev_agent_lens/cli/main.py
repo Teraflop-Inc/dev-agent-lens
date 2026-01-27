@@ -4721,6 +4721,148 @@ def export_parquet(
     click.echo(f"  {stats['spans_path']}")
 
 
+@main.command("export-events")
+@click.option(
+    "--source",
+    "source_name",
+    type=str,
+    default="claude-local",
+    help="Source name (default: claude-local)",
+)
+@click.option(
+    "--output",
+    "-o",
+    "output_path",
+    type=str,
+    default=None,
+    help="Output path for Parquet file (default: ./events.parquet)",
+)
+@click.option(
+    "--session-id",
+    "session_id",
+    type=str,
+    default=None,
+    help="Export only a specific session ID",
+)
+@click.option(
+    "--limit",
+    type=int,
+    default=None,
+    help="Maximum number of sessions to export",
+)
+@click.option(
+    "--compression",
+    type=click.Choice(["zstd", "snappy", "gzip", "none"]),
+    default="zstd",
+    help="Parquet compression codec (default: zstd)",
+)
+@click.option(
+    "--claude-dir",
+    type=str,
+    default=None,
+    help="Custom Claude sessions directory (default: ~/.claude/projects)",
+)
+def export_events(
+    source_name: str,
+    output_path: str | None,
+    session_id: str | None,
+    limit: int | None,
+    compression: str,
+    claude_dir: str | None,
+) -> None:
+    """Export Claude sessions to events Parquet format.
+
+    Exports Claude Code sessions to an events-based Parquet format
+    optimized for DuckDB analytics queries. Each row represents a
+    conversation event (user message, assistant response, tool call, etc.).
+
+    Examples:
+
+        dal export-events
+
+        dal export-events --session-id abc123
+
+        dal export-events --output ~/analysis/events.parquet
+
+        dal export-events --limit 10 --compression snappy
+    """
+    from pathlib import Path
+
+    from dev_agent_lens.clients.claude import ClaudeClient
+    from dev_agent_lens.export.parquet_events import (
+        export_claude_to_events_parquet,
+    )
+
+    # Set up Claude client
+    client = ClaudeClient(claude_dir=claude_dir)
+
+    if not client.test_connection():
+        click.echo(
+            click.style(
+                f"Error: Claude sessions directory not found: {client.claude_dir}",
+                fg="red",
+            )
+        )
+        raise SystemExit(1)
+
+    # Find session files
+    if session_id:
+        session_file = client.get_session_file_path(session_id)
+        if session_file is None:
+            click.echo(
+                click.style(
+                    f"Error: Session not found: {session_id}",
+                    fg="red",
+                )
+            )
+            raise SystemExit(1)
+        session_files = [session_file]
+        click.echo(f"Exporting session: {session_id}")
+    else:
+        sessions = client.list_sessions(limit=limit)
+        if not sessions:
+            click.echo(
+                click.style(
+                    "No Claude sessions found.",
+                    fg="yellow",
+                )
+            )
+            raise SystemExit(0)
+        session_files = [s.file_path for s in sessions]
+        click.echo(f"Found {len(sessions)} sessions")
+
+    # Determine output path
+    if output_path:
+        out_path = Path(output_path).expanduser()
+    else:
+        out_path = Path("events.parquet")
+
+    click.echo(f"Source: {source_name}")
+    click.echo(f"Output: {out_path}")
+    click.echo(f"Compression: {compression}")
+    click.echo()
+
+    # Export
+    click.echo("Exporting to events Parquet...")
+    result = export_claude_to_events_parquet(
+        session_files=session_files,
+        output_path=out_path,
+        compression=compression,
+    )
+
+    click.echo()
+    click.echo(click.style("Export complete!", fg="green", bold=True))
+    click.echo(f"  Sessions: {result.session_count:,}")
+    click.echo(f"  Events: {result.event_count:,}")
+    click.echo(f"  Output size: {result.bytes_written / 1024:.1f} KB")
+    click.echo()
+    click.echo("Event types:")
+    for event_type, count in sorted(result.event_type_counts.items()):
+        click.echo(f"  {event_type}: {count:,}")
+    click.echo()
+    click.echo(f"Output: {result.output_path}")
+
+
 @main.command("reconstruct")
 @click.option(
     "--source",
