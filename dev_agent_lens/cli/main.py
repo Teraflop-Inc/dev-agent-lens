@@ -6509,28 +6509,9 @@ def chain_export_cmd(
     default=".",
     help="Output directory for markdown files (default: current directory)",
 )
-@click.option(
-    "--max-result-length",
-    type=int,
-    default=1000,
-    help="Maximum length for tool result content (default: 1000)",
-)
-@click.option(
-    "--include-timestamps/--no-timestamps",
-    default=True,
-    help="Include timestamps on messages (default: yes)",
-)
-@click.option(
-    "--include-snapshots/--no-snapshots",
-    default=False,
-    help="Include file-history-snapshot entries (default: no)",
-)
 def session_to_markdown(
     session_file: str,
     output_dir: str,
-    max_result_length: int,
-    include_timestamps: bool,
-    include_snapshots: bool,
 ) -> None:
     """Export a Claude Code session JSONL file to readable markdown.
 
@@ -6542,8 +6523,6 @@ def session_to_markdown(
         dal claude-session-logs-to-markdown ~/.claude/projects/-Users-me-myproject/abc123.jsonl
 
         dal claude-session-logs-to-markdown session.jsonl -o ./exports/
-
-        dal claude-session-logs-to-markdown session.jsonl --max-result-length 2000
     """
     from dev_agent_lens.export.markdown import (
         export_session_to_markdown,
@@ -6553,12 +6532,7 @@ def session_to_markdown(
     click.echo(f"Exporting: {session_file}")
 
     try:
-        export = export_session_to_markdown(
-            session_file,
-            max_tool_result_length=max_result_length,
-            include_file_snapshots=include_snapshots,
-            include_timestamps=include_timestamps,
-        )
+        export = export_session_to_markdown(session_file)
 
         files = export_to_files(export, output_dir)
 
