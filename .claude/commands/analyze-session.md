@@ -6,44 +6,75 @@ Help the user find and analyze their Claude Code sessions based on what they rem
 
 The user will describe a session semantically - e.g., "the conversation where I was debugging authentication" or "my session about refactoring the database layer". Your job is to search through their sessions to find the right one.
 
-## Session Storage
+## Step 1: Ensure Parquet Export Exists
 
-Sessions are stored in `~/.claude/projects/`:
-- `{encoded-project-path}/{session-id}.jsonl` - Main sessions
-- `{encoded-project-path}/agent-{id}.jsonl` - Subagent traces (ignore these when searching)
-
-Project paths use dashes: `/Users/me/myproject` → `-Users-me-myproject`
-
-## Step 1: Search for the Session
-
-Based on the user's description, search session content to find matching conversations:
+Check for the cached Parquet export. If missing or stale, create it:
 
 ```bash
-# Search for keywords from their description
-grep -l "authentication" ~/.claude/projects/*/*.jsonl | grep -v agent-
+# Check if export exists
+ls -la ~/.dal/claude-sessions.parquet 2>/dev/null || dal export-events --output ~/.dal/claude-sessions.parquet
+```
+
+## Step 2: Search with DuckDB
+
+Query the Parquet file to find matching sessions:
+
+```bash
+# Search by content keywords
+duckdb -c "
+SELECT DISTINCT session_id, project_path, timestamp
+FROM '~/.dal/claude-sessions.parquet'
+WHERE text ILIKE '%authentication%'
+  AND event_type = 'user'
+ORDER BY timestamp DESC
+LIMIT 10
+"
 
 # Search multiple terms
-grep -l "database\|refactor" ~/.claude/projects/*/*.jsonl | grep -v agent-
+duckdb -c "
+SELECT DISTINCT session_id, project_path, timestamp
+FROM '~/.dal/claude-sessions.parquet'
+WHERE (text ILIKE '%database%' OR text ILIKE '%refactor%')
+ORDER BY timestamp DESC
+LIMIT 10
+"
 
-# Find recent sessions if they say "recent" or "yesterday"
-ls -lt ~/.claude/projects/*/*.jsonl | grep -v agent- | head -20
+# Find recent sessions
+duckdb -c "
+SELECT DISTINCT session_id, project_path, MAX(timestamp) as last_msg
+FROM '~/.dal/claude-sessions.parquet'
+WHERE event_type = 'user'
+GROUP BY session_id, project_path
+ORDER BY last_msg DESC
+LIMIT 20
+"
 ```
 
-If you find multiple matches, show them to the user and ask which one. You can peek at the first message to help identify sessions:
+If multiple matches, show them to the user. Preview first message to help identify:
 
 ```bash
-head -5 <session-file> | grep -o '"content":"[^"]*"' | head -1
+duckdb -c "
+SELECT text
+FROM '~/.dal/claude-sessions.parquet'
+WHERE session_id = '<session_id>' AND event_type = 'user'
+ORDER BY timestamp
+LIMIT 1
+"
 ```
 
-## Step 2: Export to Markdown
+## Step 3: Locate JSONL and Export
 
-Once you've identified the session:
+The `project_path` from DuckDB maps to the JSONL location:
 
 ```bash
-dal claude-session-logs-to-markdown <session-path> -o /tmp/session-analysis/
+# JSONL path pattern
+~/.claude/projects/{encoded-project-path}/{session_id}.jsonl
+
+# Export to markdown
+dal claude-session-logs-to-markdown <session-jsonl-path> -o /tmp/session-analysis/
 ```
 
-## Step 3: Read and Analyze
+## Step 4: Read and Analyze
 
 Read the exported markdown files and provide:
 
@@ -56,13 +87,10 @@ Read the exported markdown files and provide:
 ## Examples
 
 User: "Analyze my session where I was fixing the login bug"
-→ Search for "login", "auth", "bug", "fix" in session files
+-> Query Parquet for "login", "auth", "bug", "fix"
 
 User: "Look at the conversation from this morning about API refactoring"
-→ List recent sessions, search for "API", "refactor"
-
-User: "Find where I was working on the markdown export feature"
-→ Search for "markdown", "export" in sessions
+-> Query recent sessions, filter by "API", "refactor"
 
 ## Reference
 

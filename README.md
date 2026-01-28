@@ -10,49 +10,79 @@ cd dev-agent-lens
 uv sync
 ```
 
-## Quickstart: Export Sessions to Markdown
+## Quickstart: Analyze Your Claude Sessions
 
-Export your Claude Code sessions to readable markdown for analysis. No proxy setup required - works with existing `~/.claude` sessions.
+Export your Claude Code sessions to readable markdown for analysis. No proxy setup required—works with existing `~/.claude` sessions.
 
-**Using Claude Code?** Just run `/analyze-session` - see [.claude/commands/analyze-session.md](.claude/commands/analyze-session.md)
+**Using Claude Code?** Just run `/analyze-session` to find and analyze sessions automatically.
 
 ### 1. Find Your Session
 
-Sessions live in `~/.claude/projects/`. You can search manually or ask Claude Code to find them:
+**If you already know which session:** Sessions live in `~/.claude/projects/`. Locate the file and skip to step 2.
 
 ```bash
-# List all projects
-ls ~/.claude/projects/
-
-# List recent sessions (exclude agent files)
+# List recent sessions
 ls -lt ~/.claude/projects/-Users-*/*.jsonl | grep -v agent- | head -10
 
-# Search for sessions mentioning a keyword
-grep -l "my search term" ~/.claude/projects/*/*.jsonl | grep -v agent-
+# Search by keyword
+grep -l "authentication" ~/.claude/projects/*/*.jsonl | grep -v agent-
 ```
 
-Or just tell Claude Code: *"Find my session where I was working on authentication"*
+**If you need to discover it:** Export to Parquet and query with DuckDB to find sessions by patterns, metrics, or outliers.
+
+```bash
+dal export-events --output ~/claude-sessions.parquet
+```
+
+```python
+import duckdb
+
+conn = duckdb.connect()
+result = conn.execute("""
+    SELECT session_id, COUNT(*) as subagent_calls
+    FROM '~/claude-sessions.parquet'
+    WHERE event_type = 'subagent'
+    GROUP BY session_id
+    ORDER BY subagent_calls DESC
+    LIMIT 5
+""").fetchall()
+
+for session_id, count in result:
+    print(f"{session_id}: {count} subagents")
+```
+
+Find sessions related to a Linear or Jira ticket:
+
+```python
+result = conn.execute("""
+    SELECT DISTINCT session_id
+    FROM '~/claude-sessions.parquet'
+    WHERE text ILIKE '%ENG-123%' OR text ILIKE '%PROJ-456%'
+""").fetchall()
+```
+
+Write other queries to fit your needs—find sessions by tool usage, error patterns, compaction events, or time range.
 
 ### 2. Export to Markdown
 
 ```bash
-dal claude-session-logs-to-markdown ~/.claude/projects/-Users-me-project/abc123.jsonl -o ./exports/
+dal claude-session-logs-to-markdown <session-file> -o ./exports/
 ```
 
-This creates:
-- `{session-id}.md` - Main conversation
-- `subagent_{type}_{n}.md` - Subagent conversations (if any)
+The export preserves the full conversation structure including subagents (as linked files) and compactions (inline with context summaries). See [docs/unified_markdown_format.md](docs/unified_markdown_format.md) for the format specification—it can help guide your agent in analyzing sessions that exceed context windows.
 
 ### 3. Analyze
 
-Give the markdown to any AI agent, or have Claude Code read it directly:
+Read the markdown into your Claude Code session, or attach to any AI chat:
 
 ```
 Analyze this session export. Summarize what was accomplished,
 identify any errors, and suggest improvements.
 ```
 
-See [docs/quickstart_session_export.md](docs/quickstart_session_export.md) for CLI options and LiteLLM chain exports.
+*More tooling to accelerate markdown analysis is coming soon.*
+
+See [docs/quickstart_session_export.md](docs/quickstart_session_export.md) for CLI options and advanced usage.
 
 ---
 
