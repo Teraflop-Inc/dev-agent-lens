@@ -102,6 +102,17 @@ class TestExtractEventsFromSession:
         assert "main.py" in tool_event["tool_input"]
         assert "def main()" in tool_event["tool_result"]
 
+    def test_tool_events_have_parent_event_id(self, minimal_session):
+        """Tool events link to parent assistant message via parent_event_id."""
+        events = extract_events_from_session(minimal_session)
+
+        tool_events = [e for e in events if e["event_type"] == "tool"]
+        assert len(tool_events) == 1
+
+        tool_event = tool_events[0]
+        # Tool events should have a parent_event_id (links to assistant message)
+        assert tool_event["parent_event_id"] is not None
+
     def test_order_index_sequential(self, minimal_session):
         """Order index increases sequentially."""
         events = extract_events_from_session(minimal_session)
