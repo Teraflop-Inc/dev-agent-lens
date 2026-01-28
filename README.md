@@ -86,6 +86,68 @@ See [docs/quickstart_session_export.md](docs/quickstart_session_export.md) for C
 
 ---
 
+## Team Collaboration
+
+Share Claude session data with your team for aggregate analysis. This integrates with the existing [Oxen](https://oxen.ai) data version control already used by the DAL toolkit.
+
+### Export with Your Name
+
+Use a unique source name so team members' data doesn't conflict:
+
+```bash
+dal export-events --source claude-local-alex    # Use your name/handle
+```
+
+This creates `~/.dal/data/parquet/claude-local-alex_events.parquet`.
+
+### Push to Your Team's Repo
+
+```bash
+dal push -s claude-local-alex --parquet-only -m "Weekly sync"
+```
+
+The `--parquet-only` flag skips large intermediate files, keeping pushes fast.
+
+### Pull Team Data
+
+```bash
+dal pull
+```
+
+Now you have everyone's session data locally.
+
+### Query Across the Team
+
+```python
+import duckdb
+
+conn = duckdb.connect()
+
+# Compare tool usage across teammates
+conn.execute("""
+    SELECT
+        regexp_extract(source, 'claude-local-(\w+)', 1) as teammate,
+        tool_name,
+        COUNT(*) as uses
+    FROM '~/.dal/data/parquet/claude-local-*_events.parquet'
+    WHERE event_type = 'tool_use'
+    GROUP BY 1, 2
+    ORDER BY teammate, uses DESC
+""").fetchdf()
+
+# Find how teammates approached a specific ticket
+conn.execute("""
+    SELECT source, session_id, MIN(timestamp) as started
+    FROM '~/.dal/data/parquet/claude-local-*_events.parquet'
+    WHERE text ILIKE '%ENG-456%'
+    GROUP BY 1, 2
+""").fetchdf()
+```
+
+> **Note**: Raw session files in `~/.claude/projects/` stay local. Only processed Parquet exports are shared.
+
+---
+
 ## What's Here
 
 **1. DAL Toolkit** - A Python package (`dev_agent_lens`) and CLI (`dal`) for exporting, syncing, and querying Claude Code trace data.
