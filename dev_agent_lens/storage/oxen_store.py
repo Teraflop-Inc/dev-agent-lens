@@ -188,9 +188,9 @@ class OxenStore:
         """List all sources with data.
 
         Returns:
-            List of source names that have data directories.
+            List of source names that have data directories or parquet files.
         """
-        sources = []
+        sources = set()
 
         # Check sessions directory for source subdirectories
         if self._sessions_base.exists():
@@ -198,7 +198,15 @@ class OxenStore:
                 if path.is_dir() and not path.name.startswith("_"):
                     # Skip special directories
                     if path.name not in (self.LEGACY_DIR, self.COMBINED_DIR):
-                        sources.append(path.name)
+                        sources.add(path.name)
+
+        # Check parquet directory for *_events.parquet files (e.g., claude-local_events.parquet)
+        parquet_dir = self._data_path / "parquet"
+        if parquet_dir.exists():
+            for path in parquet_dir.glob("*_events.parquet"):
+                # Extract source name from filename (e.g., "claude-local_events.parquet" -> "claude-local")
+                source_name = path.stem.replace("_events", "")
+                sources.add(source_name)
 
         return sorted(sources)
 
@@ -391,7 +399,13 @@ class OxenStore:
         except Exception:
             return False
 
-    def commit(self, message: str) -> bool:
+    def commit(
+        self,
+        message: str,
+        include_unified: bool = True,
+        include_parquet: bool = True,
+        sources: list[str] | None = None,
+    ) -> bool:
         """
         Commit unified session files and Parquet exports to Oxen.
 
@@ -400,6 +414,11 @@ class OxenStore:
 
         Args:
             message: Commit message.
+            include_unified: Whether to include unified/*.jsonl files.
+            include_parquet: Whether to include parquet/*.parquet files.
+            sources: If provided, only include files matching these source names.
+                     E.g., ["claude-local"] would only include claude-local_*.parquet
+                     and claude-local_*.jsonl files.
 
         Returns:
             True if commit succeeded or nothing to commit, False on error.
@@ -418,12 +437,38 @@ class OxenStore:
 
             repo = oxen.Repo(str(self._data_path))
 
-            # Add unified directory
-            repo.add(str(self._unified_base.relative_to(self._data_path)))
+            files_added = False
 
-            # Add parquet directory if it exists and has files
-            if parquet_dir.exists() and any(parquet_dir.iterdir()):
-                repo.add("parquet")
+            # Add unified files
+            if include_unified and self._unified_base.exists():
+                if sources:
+                    # Add only matching source files
+                    for source in sources:
+                        for pattern in [f"{source}_*.jsonl", f"{source}.jsonl"]:
+                            for f in self._unified_base.glob(pattern):
+                                repo.add(str(f.relative_to(self._data_path)))
+                                files_added = True
+                else:
+                    # Add entire unified directory
+                    repo.add(str(self._unified_base.relative_to(self._data_path)))
+                    files_added = True
+
+            # Add parquet files
+            if include_parquet and parquet_dir.exists() and any(parquet_dir.iterdir()):
+                if sources:
+                    # Add only matching source files
+                    for source in sources:
+                        for pattern in [f"{source}_*.parquet", f"{source}.parquet"]:
+                            for f in parquet_dir.glob(pattern):
+                                repo.add(str(f.relative_to(self._data_path)))
+                                files_added = True
+                else:
+                    # Add entire parquet directory
+                    repo.add("parquet")
+                    files_added = True
+
+            if not files_added:
+                return True  # Nothing to add, but not an error
 
             try:
                 repo.commit(message)
