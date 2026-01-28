@@ -2654,16 +2654,29 @@ def status() -> None:
     backends = state.get_all_backends()
     if not backends:
         click.echo("No sync history yet. Run 'dal sync' to start.")
-        return
-
-    for backend_id in backends:
-        last_sync = state.get_last_sync(backend_id)
-        if last_sync:
-            click.echo(f"{backend_id}: Last sync {last_sync.isoformat()}")
-        else:
-            click.echo(f"{backend_id}: Never synced")
+    else:
+        for backend_id in backends:
+            last_sync = state.get_last_sync(backend_id)
+            if last_sync:
+                click.echo(f"{backend_id}: Last sync {last_sync.isoformat()}")
+            else:
+                click.echo(f"{backend_id}: Never synced")
 
     click.echo()
+
+    # Show available sources (includes parquet sources like claude-local)
+    sources = store.list_sources()
+    if sources:
+        click.echo(click.style("Available Sources", bold=True))
+        for source in sources:
+            # Check if this source has a parquet file
+            parquet_file = store.data_path / "parquet" / f"{source}_events.parquet"
+            if parquet_file.exists():
+                size_kb = parquet_file.stat().st_size / 1024
+                click.echo(f"  {source}: {size_kb:.1f} KB (events parquet)")
+            else:
+                click.echo(f"  {source}")
+        click.echo()
 
     # Show storage stats
     raw_files = store.get_raw_files()
@@ -4430,18 +4443,50 @@ def export_sessions(source_name: str, output_path: str | None, update: bool) -> 
     default=None,
     help="Commit message (auto-generated if not provided)",
 )
-def push(message: str | None):
+@click.option(
+    "--source",
+    "-s",
+    "sources",
+    type=str,
+    multiple=True,
+    help="Only push files for specific source(s). Can be repeated. E.g., -s claude-local -s phoenix-alex",
+)
+@click.option(
+    "--parquet-only",
+    is_flag=True,
+    default=False,
+    help="Only push parquet files, skip unified JSONL files (much faster)",
+)
+@click.option(
+    "--unified-only",
+    is_flag=True,
+    default=False,
+    help="Only push unified JSONL files, skip parquet files",
+)
+def push(message: str | None, sources: tuple[str, ...], parquet_only: bool, unified_only: bool):
     """Push unified session files to Oxen remote.
 
-    Commits any changes in the unified/ directory and pushes to the
-    configured Oxen remote. Run 'dal export-sessions' first to create
-    unified session files.
+    Commits any changes in the unified/ and parquet/ directories and pushes
+    to the configured Oxen remote.
 
-    Example:
-        dal export-sessions --source phoenix-alex
-        dal push -m "Add phoenix-alex sessions"
+    Multi-user workflow: Each user should name their source 'claude-local-<name>'
+    so multiple people can push to the same repo without conflicts.
+
+    Examples:
+
+        dal push                              # Push all files
+
+        dal push --parquet-only               # Skip large unified JSONL files
+
+        dal push -s claude-local-alex --parquet-only  # Push only your Claude data
+
+        dal push -s claude-local-alex -s phoenix-local-alex --parquet-only
     """
     from dev_agent_lens.config import get_oxen_remote, is_oxen_configured
+
+    if parquet_only and unified_only:
+        click.echo(click.style("Error: Cannot use both --parquet-only and --unified-only", fg="red"))
+        raise SystemExit(1)
 
     if not is_oxen_configured():
         click.echo(
@@ -4456,20 +4501,68 @@ def push(message: str | None):
     remote_url = get_oxen_remote()
     store = OxenStore()
 
+    # Determine what to include
+    include_unified = not parquet_only
+    include_parquet = not unified_only
+    source_list = list(sources) if sources else None
+
     # Check if unified directory has content
     unified_files = list(store.unified_dir.glob("*.jsonl")) if store.unified_dir.exists() else []
-    if not unified_files:
-        click.echo(
-            click.style(
-                "No unified session files found.\n"
-                "Run 'dal export-sessions' first to create unified session files.",
-                fg="yellow",
+    if source_list:
+        unified_files = [f for f in unified_files if any(f.stem.startswith(s) for s in source_list)]
+
+    # Check if parquet directory has content
+    parquet_dir = store.data_path / "parquet"
+    parquet_files = list(parquet_dir.glob("*.parquet")) if parquet_dir.exists() else []
+    if source_list:
+        parquet_files = [f for f in parquet_files if any(f.stem.startswith(s) for s in source_list)]
+
+    # Filter based on flags
+    if parquet_only:
+        unified_files = []
+    if unified_only:
+        parquet_files = []
+
+    if not unified_files and not parquet_files:
+        if source_list:
+            click.echo(
+                click.style(
+                    f"No files found for source(s): {', '.join(source_list)}\n"
+                    "Run 'dal status' to see available sources.",
+                    fg="yellow",
+                )
             )
-        )
+        else:
+            click.echo(
+                click.style(
+                    "No files to push.\n"
+                    "Run 'dal export-sessions' for unified session files or\n"
+                    "'dal export-events' for Claude events parquet.",
+                    fg="yellow",
+                )
+            )
         raise SystemExit(1)
 
     click.echo(f"Oxen remote: {remote_url}")
-    click.echo(f"Unified files: {len(unified_files)}")
+    if source_list:
+        click.echo(f"Filtering to source(s): {', '.join(source_list)}")
+    if parquet_only:
+        click.echo("Mode: parquet-only (skipping unified JSONL)")
+    elif unified_only:
+        click.echo("Mode: unified-only (skipping parquet)")
+
+    if unified_files and include_unified:
+        total_size_mb = sum(f.stat().st_size for f in unified_files) / (1024 * 1024)
+        click.echo(f"Unified files: {len(unified_files)} ({total_size_mb:.1f} MB total)")
+        for f in unified_files:
+            size_mb = f.stat().st_size / (1024 * 1024)
+            click.echo(f"  - {f.name} ({size_mb:.1f} MB)")
+    if parquet_files and include_parquet:
+        total_size_mb = sum(f.stat().st_size for f in parquet_files) / (1024 * 1024)
+        click.echo(f"Parquet files: {len(parquet_files)} ({total_size_mb:.1f} MB total)")
+        for f in parquet_files:
+            size_mb = f.stat().st_size / (1024 * 1024)
+            click.echo(f"  - {f.name} ({size_mb:.1f} MB)")
     click.echo()
 
     # Initialize repo if needed
@@ -4487,14 +4580,28 @@ def push(message: str | None):
         from datetime import datetime
 
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
-        file_names = ", ".join(f.stem for f in unified_files[:3])
-        if len(unified_files) > 3:
-            file_names += f" +{len(unified_files) - 3} more"
-        message = f"Update unified sessions: {file_names} ({timestamp})"
+        all_files = unified_files + parquet_files
+        if all_files:
+            file_names = ", ".join(f.stem for f in all_files[:3])
+            if len(all_files) > 3:
+                file_names += f" +{len(all_files) - 3} more"
+            if parquet_only:
+                message = f"Update parquet: {file_names} ({timestamp})"
+            elif unified_only:
+                message = f"Update unified: {file_names} ({timestamp})"
+            else:
+                message = f"Update data: {file_names} ({timestamp})"
+        else:
+            message = f"Update data ({timestamp})"
 
-    # Commit
+    # Commit with selective options
     click.echo(f"Committing: {message}")
-    if not store.commit(message):
+    if not store.commit(
+        message,
+        include_unified=include_unified,
+        include_parquet=include_parquet,
+        sources=source_list,
+    ):
         click.echo(click.style("Failed to commit changes.", fg="red"))
         raise SystemExit(1)
 
@@ -4553,11 +4660,20 @@ def pull():
 
     # Show what we have now
     unified_files = list(store.unified_dir.glob("*.jsonl")) if store.unified_dir.exists() else []
+    parquet_dir = store.data_path / "parquet"
+    parquet_files = list(parquet_dir.glob("*.parquet")) if parquet_dir.exists() else []
+
     click.echo(click.style("Pull complete!", fg="green", bold=True))
-    click.echo(f"Unified session files: {len(unified_files)}")
-    for f in unified_files:
-        size_mb = f.stat().st_size / (1024 * 1024)
-        click.echo(f"  - {f.name} ({size_mb:.1f} MB)")
+    if unified_files:
+        click.echo(f"Unified session files: {len(unified_files)}")
+        for f in unified_files:
+            size_mb = f.stat().st_size / (1024 * 1024)
+            click.echo(f"  - {f.name} ({size_mb:.1f} MB)")
+    if parquet_files:
+        click.echo(f"Parquet files: {len(parquet_files)}")
+        for f in parquet_files:
+            size_kb = f.stat().st_size / 1024
+            click.echo(f"  - {f.name} ({size_kb:.1f} KB)")
 
 
 # Add oxen subcommand to config group
@@ -4727,7 +4843,7 @@ def export_parquet(
     "source_name",
     type=str,
     default="claude-local",
-    help="Source name (default: claude-local)",
+    help="Source name. Use 'claude-local-<yourname>' for multi-user repos (e.g., claude-local-alex)",
 )
 @click.option(
     "--output",
@@ -4735,7 +4851,7 @@ def export_parquet(
     "output_path",
     type=str,
     default=None,
-    help="Output path for Parquet file (default: ./events.parquet)",
+    help="Output path for Parquet file (default: ~/.dal/data/parquet/<source>_events.parquet)",
 )
 @click.option(
     "--session-id",
@@ -4776,15 +4892,18 @@ def export_events(
     optimized for DuckDB analytics queries. Each row represents a
     conversation event (user message, assistant response, tool call, etc.).
 
+    Best Practice: Use 'claude-local-<yourname>' as source name when sharing
+    via Oxen, so multiple users can push their data to the same repo.
+
     Examples:
 
-        dal export-events
+        dal export-events --source claude-local-alex
+
+        dal export-events --source claude-local-alex --limit 100
 
         dal export-events --session-id abc123
 
         dal export-events --output ~/analysis/events.parquet
-
-        dal export-events --limit 10 --compression snappy
     """
     from pathlib import Path
 
@@ -4831,11 +4950,15 @@ def export_events(
         session_files = [s.file_path for s in sessions]
         click.echo(f"Found {len(sessions)} sessions")
 
-    # Determine output path
+    # Determine output path - default to ~/.dal/data/parquet/<source>_events.parquet
     if output_path:
         out_path = Path(output_path).expanduser()
     else:
-        out_path = Path("events.parquet")
+        from dev_agent_lens.storage.oxen_store import get_default_data_path
+
+        parquet_dir = get_default_data_path() / "parquet"
+        parquet_dir.mkdir(parents=True, exist_ok=True)
+        out_path = parquet_dir / f"{source_name}_events.parquet"
 
     click.echo(f"Source: {source_name}")
     click.echo(f"Output: {out_path}")
@@ -4861,6 +4984,401 @@ def export_events(
         click.echo(f"  {event_type}: {count:,}")
     click.echo()
     click.echo(f"Output: {result.output_path}")
+
+
+@main.command("query-events")
+@click.option(
+    "--source",
+    "source_name",
+    type=str,
+    default="claude-local",
+    help="Source name (default: claude-local)",
+)
+@click.option(
+    "--session-id",
+    "session_id",
+    type=str,
+    default=None,
+    help="Filter to a specific session ID",
+)
+@click.option(
+    "--event-type",
+    "event_type",
+    type=str,
+    default=None,
+    help="Filter by event type: user, assistant, tool, subagent, compaction",
+)
+@click.option(
+    "--tool-name",
+    "tool_name",
+    type=str,
+    default=None,
+    help="Filter by tool name (e.g., Read, Edit, Bash)",
+)
+@click.option(
+    "--text",
+    "text_contains",
+    type=str,
+    default=None,
+    help="Search for text in event content (case-insensitive)",
+)
+@click.option(
+    "--limit",
+    type=int,
+    default=None,
+    help="Maximum number of events to return",
+)
+@click.option(
+    "--stats",
+    is_flag=True,
+    default=False,
+    help="Show statistics instead of events",
+)
+@click.option(
+    "--format",
+    "output_format",
+    type=click.Choice(["table", "json"]),
+    default="table",
+    help="Output format (default: table)",
+)
+def query_events_cmd(
+    source_name: str,
+    session_id: str | None,
+    event_type: str | None,
+    tool_name: str | None,
+    text_contains: str | None,
+    limit: int | None,
+    stats: bool,
+    output_format: str,
+) -> None:
+    """Query events from Claude sessions Parquet file.
+
+    Provides conversation-aware queries for Claude Code session events.
+    Supports filtering by event type, tool name, and text search.
+
+    Examples:
+
+        dal query-events --source claude-local --limit 10
+
+        dal query-events --source claude-local --stats
+
+        dal query-events --source claude-local --event-type tool --tool-name Read
+
+        dal query-events --source claude-local --text "def "
+
+        dal query-events --source claude-local --session-id abc123
+    """
+    import json as json_module
+
+    from dev_agent_lens.query.events_query import (
+        find_events_files,
+        get_events_stats,
+        query_events,
+    )
+
+    # Find events file for the source
+    events_files = find_events_files(source=source_name)
+
+    if source_name not in events_files:
+        click.echo(
+            click.style(
+                f"Error: No events file found for source '{source_name}'",
+                fg="red",
+            )
+        )
+        click.echo(
+            f"Run 'dal export-events --source {source_name}' first to generate it."
+        )
+        raise SystemExit(1)
+
+    events_path = events_files[source_name]
+
+    # Stats mode
+    if stats:
+        stats_result = get_events_stats(
+            events_path,
+            session_id=session_id,
+            event_type=event_type,
+            tool_name=tool_name,
+            text_contains=text_contains,
+        )
+        click.echo(click.style("Events Statistics", fg="cyan", bold=True))
+        if stats_result.get("filters"):
+            click.echo(click.style("  Filters:", fg="yellow"))
+            for k, v in stats_result["filters"].items():
+                click.echo(f"    {k}: {v}")
+        click.echo(f"  File: {stats_result['file_path']}")
+        click.echo(f"  Size: {stats_result['file_size_bytes'] / 1024:.1f} KB")
+        click.echo(f"  Total events: {stats_result['total_events']:,}")
+        click.echo(f"  Sessions: {stats_result['session_count']:,}")
+        click.echo()
+        click.echo(click.style("Event Type Counts:", fg="cyan"))
+        for etype, count in stats_result["event_type_counts"].items():
+            click.echo(f"  {etype}: {count:,}")
+        click.echo()
+        if stats_result["top_tools"]:
+            click.echo(click.style("Top Tools:", fg="cyan"))
+            for tname, count in list(stats_result["top_tools"].items())[:10]:
+                click.echo(f"  {tname}: {count:,}")
+        raise SystemExit(0)
+
+    # Query events
+    result = query_events(
+        events_path=events_path,
+        session_id=session_id,
+        event_type=event_type,
+        tool_name=tool_name,
+        text_contains=text_contains,
+        limit=limit,
+    )
+
+    if result.total_events == 0:
+        click.echo(click.style("No events found.", fg="yellow"))
+        raise SystemExit(0)
+
+    # Output results
+    if output_format == "json":
+        output = {
+            "total_events": result.total_events,
+            "session_ids": result.session_ids,
+            "events": result.events,
+        }
+        click.echo(json_module.dumps(output, indent=2, default=str))
+    else:
+        # Table format
+        click.echo(
+            click.style(
+                f"Found {result.total_events} events across {len(result.session_ids)} session(s)",
+                fg="green",
+            )
+        )
+        click.echo()
+
+        for event in result.events:
+            session_id_display = event.get("session_id", "")[:8]
+            order_idx = event.get("order_idx", "?")
+            event_type_display = event.get("event_type", "?")
+            tool_name_display = event.get("tool_name") or ""
+
+            # Get a preview of text content
+            text = event.get("text") or event.get("tool_input") or ""
+            if isinstance(text, str) and len(text) > 80:
+                text = text[:77] + "..."
+
+            click.echo(
+                f"{click.style(session_id_display, fg='blue')} "
+                f"[{order_idx:3}] "
+                f"{click.style(event_type_display, fg='cyan'):12} "
+                f"{click.style(tool_name_display, fg='yellow'):15} "
+                f"{text}"
+            )
+
+
+@main.command("query-spans")
+@click.option(
+    "--source",
+    "source_name",
+    type=str,
+    required=True,
+    help="Source name (e.g., phoenix-local-alex, arize-sightline)",
+)
+@click.option(
+    "--session-id",
+    "session_id",
+    type=str,
+    default=None,
+    help="Filter to a specific session ID",
+)
+@click.option(
+    "--status-code",
+    "status_code",
+    type=str,
+    default=None,
+    help="Filter by status code: OK, ERROR, UNSET",
+)
+@click.option(
+    "--model",
+    "model_name",
+    type=str,
+    default=None,
+    help="Filter by LLM model name (case-insensitive partial match)",
+)
+@click.option(
+    "--name",
+    "name_pattern",
+    type=str,
+    default=None,
+    help="Filter by span name pattern (e.g., 'Tool', 'Bash')",
+)
+@click.option(
+    "--limit",
+    type=int,
+    default=None,
+    help="Maximum number of spans to return",
+)
+@click.option(
+    "--stats",
+    is_flag=True,
+    default=False,
+    help="Show statistics instead of spans",
+)
+@click.option(
+    "--format",
+    "output_format",
+    type=click.Choice(["table", "json"]),
+    default="table",
+    help="Output format (default: table)",
+)
+def query_spans_cmd(
+    source_name: str,
+    session_id: str | None,
+    status_code: str | None,
+    model_name: str | None,
+    name_pattern: str | None,
+    limit: int | None,
+    stats: bool,
+    output_format: str,
+) -> None:
+    """Query spans from Phoenix/Arize Parquet files.
+
+    Provides high-performance queries for LiteLLM/Phoenix pipeline spans.
+    Supports filtering by session, status, model, and span name.
+
+    Examples:
+
+        dal query-spans --source phoenix-local-alex --stats
+
+        dal query-spans --source phoenix-local-alex --status-code ERROR
+
+        dal query-spans --source phoenix-local-alex --name Tool --limit 20
+
+        dal query-spans --source phoenix-local-alex --model claude --stats
+
+        dal query-spans --source arize-sightline --session-id abc123
+    """
+    import json as json_module
+
+    from dev_agent_lens.query.parquet_query import (
+        find_parquet_files,
+        get_spans_stats,
+        query_spans_simple,
+    )
+
+    # Find parquet file for the source
+    parquet_files = find_parquet_files(source=source_name)
+
+    if source_name not in parquet_files:
+        click.echo(
+            click.style(
+                f"Error: No spans file found for source '{source_name}'",
+                fg="red",
+            )
+        )
+        # List available sources
+        all_files = find_parquet_files()
+        if all_files:
+            click.echo("Available sources:")
+            for src in sorted(all_files.keys()):
+                click.echo(f"  - {src}")
+        raise SystemExit(1)
+
+    spans_path = parquet_files[source_name]["spans"]
+
+    # Stats mode
+    if stats:
+        stats_result = get_spans_stats(
+            spans_path,
+            session_id=session_id,
+            status_code=status_code,
+            model_name=model_name,
+            name_pattern=name_pattern,
+        )
+        click.echo(click.style("Spans Statistics", fg="cyan", bold=True))
+        if stats_result.get("filters"):
+            click.echo(click.style("  Filters:", fg="yellow"))
+            for k, v in stats_result["filters"].items():
+                click.echo(f"    {k}: {v}")
+        click.echo(f"  File: {stats_result['file_path']}")
+        click.echo(f"  Size: {stats_result['file_size_bytes'] / 1024 / 1024:.1f} MB")
+        click.echo(f"  Total spans: {stats_result['total_spans']:,}")
+        click.echo(f"  Sessions: {stats_result['session_count']:,}")
+        click.echo()
+        click.echo(click.style("Status Code Counts:", fg="cyan"))
+        for scode, count in stats_result["status_code_counts"].items():
+            click.echo(f"  {scode}: {count:,}")
+        click.echo()
+        if stats_result["span_name_counts"]:
+            click.echo(click.style("Top Span Names:", fg="cyan"))
+            for sname, count in list(stats_result["span_name_counts"].items())[:15]:
+                click.echo(f"  {sname}: {count:,}")
+        click.echo()
+        if stats_result["top_models"]:
+            click.echo(click.style("Top Models:", fg="cyan"))
+            for mname, count in list(stats_result["top_models"].items())[:10]:
+                click.echo(f"  {mname}: {count:,}")
+        raise SystemExit(0)
+
+    # Query spans using the simple function for listing
+    spans = query_spans_simple(
+        spans_path=spans_path,
+        session_id=session_id,
+        status_code=status_code,
+        model_name=model_name,
+        name_pattern=name_pattern,
+        limit=limit or 50,
+    )
+
+    if not spans:
+        click.echo(click.style("No spans found.", fg="yellow"))
+        raise SystemExit(0)
+
+    # Get unique session count for display
+    session_ids = set(s.get("session_id") for s in spans if s.get("session_id"))
+
+    # Output results
+    if output_format == "json":
+        output = {
+            "total_spans": len(spans),
+            "total_sessions": len(session_ids),
+            "spans": spans,
+        }
+        click.echo(json_module.dumps(output, indent=2, default=str))
+    else:
+        # Table format
+        click.echo(
+            click.style(
+                f"Found {len(spans):,} spans across {len(session_ids)} session(s)",
+                fg="green",
+            )
+        )
+        click.echo()
+
+        for span in spans:
+            session_id_display = (span.get("session_id") or "")[:8]
+            span_name = span.get("name", "?")
+            status = span.get("status_code", "?")
+            start = span.get("start_time", "?")
+            if hasattr(start, 'isoformat'):
+                start = start.strftime("%Y-%m-%d %H:%M:%S")
+            elif hasattr(start, 'strftime'):
+                start = start.strftime("%Y-%m-%d %H:%M:%S")
+            elif isinstance(start, str) and len(start) > 19:
+                start = start[:19]
+
+            # Color-code status
+            if status == "OK":
+                status_styled = click.style(status, fg="green")
+            elif status == "ERROR":
+                status_styled = click.style(status, fg="red")
+            else:
+                status_styled = click.style(status, fg="yellow")
+
+            click.echo(
+                f"{click.style(session_id_display, fg='blue')} "
+                f"{start} "
+                f"{status_styled:5} "
+                f"{span_name}"
+            )
 
 
 @main.command("reconstruct")
