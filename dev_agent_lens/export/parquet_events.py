@@ -252,15 +252,22 @@ def extract_events_from_session(
 
             # Check if subagent result
             if isinstance(result, dict) and result.get("agentId"):
-                agent_id = result.get("agentId", "")
+                # Extract tool_use_id from message content
+                tool_use_id = None
+                msg_content = msg.get("message", {}).get("content", [])
+                if isinstance(msg_content, list):
+                    for block in msg_content:
+                        if isinstance(block, dict) and block.get("type") == "tool_result":
+                            tool_use_id = block.get("tool_use_id")
+                            break
 
-                # Find matching Task tool
+                # Look up Task tool by tool_use_id
                 task_info = None
-                for tid, info in list(pending_tools.items()):
-                    if info.get("name") == "Task":
-                        task_info = info
-                        del pending_tools[tid]
-                        break
+                parent_event_id = None
+                if tool_use_id and tool_use_id in pending_tools:
+                    task_info = pending_tools[tool_use_id]
+                    parent_event_id = task_info.get("parent_event_id")
+                    del pending_tools[tool_use_id]
 
                 if task_info:
                     subagent_type = task_info["input"].get("subagent_type", "unknown")
@@ -274,7 +281,7 @@ def extract_events_from_session(
                 events.append({
                     "session_id": session_id,
                     "event_id": str(uuid.uuid4()),
-                    "parent_event_id": None,
+                    "parent_event_id": parent_event_id,
                     "order_idx": order_idx,
                     "timestamp": timestamp,
                     "event_type": "subagent",
@@ -291,25 +298,33 @@ def extract_events_from_session(
 
             else:
                 # Regular tool result
-                result_str = str(result) if result else ""
+                if result is None:
+                    result_str = ""
+                elif isinstance(result, str):
+                    result_str = result
+                else:
+                    result_str = json.dumps(result)
 
-                # Find matching tool call (skip Task tools)
+                # Extract tool_use_id from message content for proper matching
+                tool_use_id = None
+                msg_content = msg.get("message", {}).get("content", [])
+                if isinstance(msg_content, list):
+                    for block in msg_content:
+                        if isinstance(block, dict) and block.get("type") == "tool_result":
+                            tool_use_id = block.get("tool_use_id")
+                            break
+
+                # Look up tool by tool_use_id (not FIFO)
                 tool_info = None
-                tool_id = None
-                for tid, info in list(pending_tools.items()):
-                    if not info.get("result_received") and info.get("name") != "Task":
-                        tool_info = info
-                        tool_id = tid
-                        break
+                if tool_use_id and tool_use_id in pending_tools:
+                    tool_info = pending_tools[tool_use_id]
 
                 if tool_info:
-                    tool_info["result_received"] = True
-
                     # Emit tool event with merged call and result
                     events.append({
                         "session_id": session_id,
                         "event_id": str(uuid.uuid4()),
-                        "parent_event_id": None,
+                        "parent_event_id": tool_info.get("parent_event_id"),
                         "order_idx": order_idx,
                         "timestamp": timestamp,
                         "event_type": "tool",
@@ -324,8 +339,7 @@ def extract_events_from_session(
                     })
                     order_idx += 1
 
-                    if tool_id:
-                        del pending_tools[tool_id]
+                    del pending_tools[tool_use_id]
 
             i += 1
             continue
@@ -357,6 +371,9 @@ def extract_events_from_session(
 
         # Assistant message
         if msg_type == "assistant":
+            # Generate event_id for this assistant message (used as parent for tool events)
+            assistant_event_id = str(uuid.uuid4())
+
             # Register tool uses for later matching with results
             if isinstance(content, list):
                 for block in content:
@@ -365,7 +382,7 @@ def extract_events_from_session(
                         pending_tools[tool_id] = {
                             "name": block.get("name"),
                             "input": block.get("input", {}),
-                            "result_received": False,
+                            "parent_event_id": assistant_event_id,
                         }
 
             # Extract text content from assistant
@@ -373,7 +390,7 @@ def extract_events_from_session(
             if text_content and text_content.strip():
                 events.append({
                     "session_id": session_id,
-                    "event_id": str(uuid.uuid4()),
+                    "event_id": assistant_event_id,
                     "parent_event_id": None,
                     "order_idx": order_idx,
                     "timestamp": timestamp,
