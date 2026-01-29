@@ -4,10 +4,10 @@ DAL CLI - Dev Agent Lens Command Line Interface
 Provides unified CLI for trace data collection, querying, and analysis.
 
 Commands:
-    dal sync              Incremental sync trace data from backends
+    dal sync              Robust sync with checkpointing, retry, and session unification
     dal sync --full       Full sync ignoring state
-    dal sync --push       Sync and push to Oxen remote
-    dal sync-historical   One-time historical backfill (for large exports)
+    dal sync --status     Show in-progress sync status
+    dal sync --history    Show completed sync history
     dal config            Show configuration
     dal status            Show sync status
 """
@@ -89,11 +89,7 @@ def main():
 
 
 @main.command()
-@click.option(
-    "--full",
-    is_flag=True,
-    help="Full sync, ignore state and fetch all data",
-)
+# Source selection
 @click.option(
     "--source",
     "source_name",
@@ -101,49 +97,11 @@ def main():
     help="Sync from a named source (configured via 'dal config add-source')",
 )
 @click.option(
-    "--backend",
-    type=click.Choice(list(BACKENDS.keys())),
-    help="[Deprecated] Use --source instead. Sync specific legacy backend.",
-)
-@click.option(
     "--all-sources",
     is_flag=True,
     help="Sync from all configured sources",
 )
-@click.option(
-    "--push",
-    is_flag=True,
-    help="Push to Oxen remote after sync (requires OXEN_REMOTE_URL)",
-)
-@click.option(
-    "--with-annotations",
-    is_flag=True,
-    help="Also fetch annotations (slower, disabled by default)",
-)
-@click.option(
-    "--limit",
-    type=int,
-    default=10000,
-    help="Maximum number of spans to fetch per batch (default: 10000)",
-)
-@click.option(
-    "--days",
-    type=int,
-    default=30,
-    help="Number of days to sync (default: 30)",
-)
-@click.option(
-    "--batch-days",
-    type=int,
-    default=None,
-    help="Split sync into batches of N days each (useful for large datasets)",
-)
-@click.option(
-    "--timeout",
-    type=int,
-    default=30,
-    help="Timeout in seconds for each API request (default: 30, increase for large batches)",
-)
+# Date range (priority: --start-date > --days > last_sync > default 30 days)
 @click.option(
     "--start-date",
     type=str,
@@ -157,624 +115,105 @@ def main():
     help="End date for sync (YYYY-MM-DD). Default: now.",
 )
 @click.option(
-    "--no-update-state",
-    is_flag=True,
-    help="Don't update last_sync state after sync. Useful for filling gaps without affecting incremental sync.",
-)
-def sync(
-    full: bool,
-    source_name: str | None,
-    backend: str | None,
-    all_sources: bool,
-    push: bool,
-    with_annotations: bool,
-    limit: int,
-    days: int,
-    batch_days: int | None,
-    timeout: int,
-    start_date: str | None,
-    end_date: str | None,
-    no_update_state: bool,
-) -> None:
-    """Sync trace data from configured sources or backends.
-
-    By default, performs incremental sync using saved state.
-    Use --full to ignore state and fetch all available data.
-
-    Examples:
-
-        dal sync                        # Sync from configured sources/backends
-
-        dal sync --source phoenix-alex  # Sync from named source
-
-        dal sync --all-sources          # Sync from all configured sources
-
-        dal sync --full                 # Full sync, ignore state
-
-        dal sync --start-date 2024-12-01 --end-date 2024-12-05  # Sync specific range
-
-        dal sync --start-date 2024-12-01 --no-update-state      # Fill gap without updating state
-
-        dal sync --push                 # Sync and push to Oxen remote
-    """
-    from dev_agent_lens.core.sources import SourceConfig, SourceManager, SourceType
-
-    sync_start = time.time()
-
-    # Determine sync mode: named sources or legacy backends
-    source_manager = SourceManager()
-    sources_to_sync: list[SourceConfig] = []
-    backends_to_sync: list[str] = []
-    use_legacy_mode = False
-
-    if source_name:
-        # Sync from specific named source
-        source = source_manager.get_source(source_name)
-        if not source:
-            click.echo(
-                click.style(
-                    f"Error: Source '{source_name}' not found. "
-                    f"Use 'dal config list-sources' to see available sources.",
-                    fg="red",
-                )
-            )
-            raise SystemExit(1)
-        sources_to_sync = [source]
-        click.echo(f"Syncing from source: {source_name}")
-    elif all_sources:
-        # Sync from all configured sources
-        sources_to_sync = source_manager.list_sources()
-        if not sources_to_sync:
-            click.echo(
-                click.style(
-                    "Error: No sources configured. "
-                    "Use 'dal config add-source' to add sources, "
-                    "or use --backend for legacy mode.",
-                    fg="yellow",
-                )
-            )
-            raise SystemExit(1)
-        click.echo(f"Syncing from all sources: {', '.join(s.name for s in sources_to_sync)}")
-    elif backend:
-        # Legacy mode with specific backend
-        use_legacy_mode = True
-        backends_to_sync = [backend]
-        if not os.getenv(BACKENDS[backend]["env_check"]):
-            click.echo(
-                click.style(
-                    f"Error: Backend '{backend}' is not configured. "
-                    f"Set {BACKENDS[backend]['env_check']} environment variable.",
-                    fg="red",
-                )
-            )
-            raise SystemExit(1)
-        click.echo(click.style("Note: --backend is deprecated. Use 'dal config add-source' instead.", fg="yellow"))
-    else:
-        # Auto-detect: prefer named sources, fall back to legacy backends
-        sources_to_sync = source_manager.list_sources()
-        if sources_to_sync:
-            click.echo(f"Syncing from configured sources: {', '.join(s.name for s in sources_to_sync)}")
-        else:
-            # Fall back to legacy backend mode
-            use_legacy_mode = True
-            backends_to_sync = get_configured_backends()
-            if not backends_to_sync:
-                click.echo(
-                    click.style(
-                        "Error: No sources or backends configured.\n"
-                        "  - Use 'dal config add-source' to add named sources (recommended)\n"
-                        "  - Or set DAL_PHOENIX_URL or ARIZE_API_KEY for legacy mode",
-                        fg="red",
-                    )
-                )
-                raise SystemExit(1)
-
-    if use_legacy_mode:
-        click.echo(f"Syncing from (legacy): {', '.join(backends_to_sync)}")
-
-    click.echo(f"Mode: {'full' if full else 'incremental'}")
-    click.echo(f"Time range: {days} days")
-    if batch_days:
-        click.echo(f"Batch size: {batch_days} days per batch")
-    if with_annotations:
-        click.echo("Annotations: enabled")
-    click.echo()
-
-    # Initialize components
-    state = SyncState()
-
-    # For named sources, we'll process them differently
-    # For legacy mode, use flat storage
-    store = OxenStore()
-
-    total_spans = 0
-    total_new_sessions = 0
-    total_continued_sessions = 0
-    sync_errors = []
-
-    # Import timedelta for time-based batching
-    from datetime import timedelta
-    import pandas as pd
-
-    # Parse date range parameters
-    parsed_start_date: datetime | None = None
-    parsed_end_date: datetime | None = None
-
-    if start_date:
-        try:
-            parsed_start_date = datetime.strptime(start_date, "%Y-%m-%d")
-            click.echo(f"Using start date: {start_date}")
-        except ValueError:
-            click.echo(click.style(f"Error: Invalid start-date format '{start_date}'. Use YYYY-MM-DD.", fg="red"))
-            raise SystemExit(1)
-
-    if end_date:
-        try:
-            end_date_parsed = datetime.strptime(end_date, "%Y-%m-%d")
-            # If end date is today, use now() to get current time
-            if end_date_parsed.date() == datetime.now().date():
-                parsed_end_date = datetime.now()
-                click.echo(f"Using end date: today (now)")
-            else:
-                # For past dates, use end of day
-                parsed_end_date = end_date_parsed.replace(hour=23, minute=59, second=59)
-                click.echo(f"Using end date: {end_date} (end of day)")
-        except ValueError:
-            click.echo(click.style(f"Error: Invalid end-date format '{end_date}'. Use YYYY-MM-DD.", fg="red"))
-            raise SystemExit(1)
-
-    if no_update_state:
-        click.echo(click.style("State will NOT be updated after sync", fg="yellow"))
-
-    # Helper function to sync a single source/backend
-    def sync_single(
-        source_or_backend_id: str,
-        client_class: type,
-        normalizer: callable,
-        display_name: str,
-        source_store: OxenStore,
-        is_phoenix: bool = False,
-        client_timeout: int = 30,
-    ) -> tuple[int, int, int]:
-        """Sync a single source and return (spans, new_sessions, continued_sessions)."""
-        click.echo(f"[{display_name}] Starting sync...")
-
-        # Calculate time range
-        # Priority: --start-date/--end-date > --full > last_sync > --days
-        end_time = parsed_end_date if parsed_end_date else datetime.now()
-
-        if parsed_start_date:
-            # Explicit date range overrides everything
-            start_time = parsed_start_date
-            click.echo(f"  Date range: {start_time.date()} to {end_time.date()}")
-        elif full:
-            start_time = end_time - timedelta(days=days)
-            click.echo(f"  Full sync: last {days} days")
-        else:
-            last_sync = state.get_last_sync(source_or_backend_id)
-            if last_sync:
-                start_time = last_sync
-                click.echo(f"  Incremental from: {last_sync.isoformat()}")
-            else:
-                start_time = end_time - timedelta(days=days)
-                click.echo(f"  First sync: last {days} days")
-
-        # Create client with timeout (Phoenix supports timeout, Arize may not)
-        if is_phoenix:
-            client = client_class(timeout=float(client_timeout))
-        else:
-            client = client_class()
-
-        # Determine batches
-        if batch_days:
-            batches = []
-            batch_start = start_time
-            while batch_start < end_time:
-                batch_end = min(batch_start + timedelta(days=batch_days), end_time)
-                batches.append((batch_start, batch_end))
-                batch_start = batch_end
-            click.echo(f"  Processing {len(batches)} batches...")
-        else:
-            batches = [(start_time, end_time)]
-
-        # Fetch spans in batches, looping until we get all data
-        all_spans = []
-        max_fetched_time = None  # Track max timestamp for state update
-        total_iterations = 0
-        max_iterations = 100  # Safety limit to prevent infinite loops
-
-        for i, (batch_start, batch_end) in enumerate(batches):
-            if batch_days:
-                click.echo(f"  Batch {i+1}/{len(batches)}: {batch_start.date()} to {batch_end.date()}")
-
-            # Loop within each batch until we get all spans
-            current_start = batch_start
-            batch_iteration = 0
-            keep_fetching = True
-
-            while keep_fetching and total_iterations < max_iterations:
-                total_iterations += 1
-                batch_iteration += 1
-
-                if batch_iteration > 1:
-                    click.echo(f"    Continuation {batch_iteration}: from {current_start.isoformat()}")
-
-                click.echo(f"  Fetching spans (limit {limit})...")
-                batch_df = client.get_spans_dataframe(
-                    start_time=current_start,
-                    end_time=batch_end,
-                    limit=limit,
-                )
-
-                if batch_df.empty:
-                    click.echo(f"    No spans in this range")
-                    keep_fetching = False
-                    break
-
-                all_spans.append(batch_df)
-                click.echo(f"    Got {len(batch_df)} spans")
-
-                # Track max timestamp from fetched spans
-                if "start_time" in batch_df.columns:
-                    batch_max = batch_df["start_time"].max()
-                    if batch_max is not None:
-                        if max_fetched_time is None or batch_max > max_fetched_time:
-                            max_fetched_time = batch_max
-
-                # Check if we hit the limit - need to continue fetching
-                if len(batch_df) >= limit:
-                    # Convert pandas Timestamp to datetime if needed
-                    if hasattr(batch_max, 'to_pydatetime'):
-                        current_start = batch_max.to_pydatetime()
-                    else:
-                        current_start = batch_max
-                    click.echo(click.style(
-                        f"    Hit limit ({limit}), continuing from {current_start.isoformat()}...",
-                        fg="yellow"
-                    ))
-                    # keep_fetching stays True
-                else:
-                    # Got all spans in this batch
-                    keep_fetching = False
-
-        if total_iterations >= max_iterations:
-            click.echo(click.style(
-                f"  ⚠️  Reached max iterations ({max_iterations}). Some data may be missing.",
-                fg="red"
-            ))
-
-        # Combine all batches
-        if all_spans:
-            spans_df = pd.concat(all_spans, ignore_index=True)
-            if "context.span_id" in spans_df.columns:
-                spans_df = spans_df.drop_duplicates(subset=["context.span_id"])
-        else:
-            spans_df = pd.DataFrame()
-
-        if spans_df.empty:
-            click.echo(click.style("  No new spans found", fg="yellow"))
-            return 0, 0, 0
-
-        if total_iterations > 1:
-            click.echo(f"  Fetched {len(spans_df)} spans (after {total_iterations} iterations)")
-        else:
-            click.echo(f"  Fetched {len(spans_df)} spans")
-
-        # Normalize spans
-        click.echo("  Normalizing...")
-        normalized = normalizer(spans_df)
-
-        # Store raw data
-        click.echo("  Storing raw data...")
-        raw_file = source_store.append_spans(normalized, backend=source_or_backend_id)
-        click.echo(f"  Saved to: {raw_file.name}")
-
-        # Fetch annotations for Phoenix (opt-in)
-        if with_annotations and is_phoenix:
-            click.echo("  Fetching annotations...")
-            try:
-                annotations_df = client.get_span_annotations_dataframe(
-                    spans_dataframe=spans_df,
-                )
-                if not annotations_df.empty:
-                    normalized_annotations = normalize_phoenix_annotations(annotations_df)
-                    source_store.append_spans(
-                        normalized_annotations,
-                        backend=f"{source_or_backend_id}-annotations",
-                    )
-                    click.echo(f"  Fetched {len(annotations_df)} annotations")
-                else:
-                    click.echo("  No annotations found")
-            except Exception as ann_err:
-                click.echo(
-                    click.style(f"  Warning: Could not fetch annotations: {ann_err}", fg="yellow")
-                )
-
-        # Get existing sessions file
-        current_sessions = source_store.sessions_dir / "sessions_current.jsonl"
-
-        # Unify with existing sessions
-        click.echo("  Unifying sessions...")
-        output_file = source_store.sessions_dir / f"sessions_{datetime.now().strftime('%Y%m%d')}.jsonl"
-        unified_df, report = unify_sessions(
-            normalized,
-            existing_file=current_sessions if current_sessions.exists() else None,
-            output_file=output_file,
-        )
-
-        # Update the sessions_current symlink
-        source_store._update_current_symlink(output_file)
-
-        # Report results
-        click.echo(
-            f"  New sessions: {len(report.new_sessions)}, "
-            f"Continued: {len(report.continued_sessions)}, "
-            f"Duplicates removed: {report.duplicates_removed}"
-        )
-
-        # Update state - use max fetched timestamp if we hit max iterations, otherwise now()
-        if no_update_state:
-            click.echo(click.style(
-                f"  State NOT updated (--no-update-state flag)",
-                fg="yellow"
-            ))
-        elif total_iterations >= max_iterations and max_fetched_time is not None:
-            # We hit the safety limit, save where we got to
-            if hasattr(max_fetched_time, 'to_pydatetime'):
-                sync_time = max_fetched_time.to_pydatetime()
-            else:
-                sync_time = max_fetched_time
-            state.set_last_sync(source_or_backend_id, sync_time)
-            click.echo(click.style(
-                f"  ⚠️  State set to max fetched time ({sync_time.isoformat()}) due to iteration limit. "
-                f"Run sync again to get remaining data.",
-                fg="yellow"
-            ))
-        else:
-            # Normal completion - we got all data up to now
-            state.set_last_sync(source_or_backend_id, datetime.now())
-        click.echo(click.style(f"  [OK] {display_name} sync complete", fg="green"))
-
-        return len(spans_df), len(report.new_sessions), len(report.continued_sessions)
-
-    # Process named sources (new mode)
-    for source in sources_to_sync:
-        try:
-            # Create source-specific store
-            source_store = OxenStore.for_source(source.name)
-
-            # Determine client class and normalizer based on source type
-            if source.source_type == SourceType.PHOENIX:
-                # For Phoenix, we need to set env vars temporarily if source has custom config
-                if source.url:
-                    os.environ["DAL_PHOENIX_URL"] = source.url
-                if source.project:
-                    os.environ["DAL_PHOENIX_PROJECT"] = source.project
-
-                client_class = PhoenixClient
-                normalizer = normalize_phoenix
-                is_phoenix = True
-            else:  # ARIZE
-                if source.space_key:
-                    os.environ["ARIZE_SPACE_KEY"] = source.space_key
-                if source.model_id:
-                    os.environ["ARIZE_MODEL_ID"] = source.model_id
-
-                client_class = ArizeClient
-                normalizer = normalize_arize
-                is_phoenix = False
-
-            spans, new_sess, cont_sess = sync_single(
-                source.name,
-                client_class,
-                normalizer,
-                source.get_display_info(),
-                source_store,
-                is_phoenix=is_phoenix,
-                client_timeout=timeout,
-            )
-            total_spans += spans
-            total_new_sessions += new_sess
-            total_continued_sessions += cont_sess
-
-        except Exception as e:
-            error_msg = f"[{source.name}] Error: {e}"
-            sync_errors.append(error_msg)
-            click.echo(click.style(f"  [FAIL] {e}", fg="red"))
-            continue
-
-        click.echo()
-
-    # Process legacy backends (backward compatibility)
-    for backend_id in backends_to_sync:
-        config = BACKENDS[backend_id]
-
-        try:
-            spans, new_sess, cont_sess = sync_single(
-                backend_id,
-                config["client_class"],
-                config["normalizer"],
-                config["name"],
-                store,  # Use flat store for legacy mode
-                is_phoenix=(backend_id == "phoenix-local"),
-                client_timeout=timeout,
-            )
-            total_spans += spans
-            total_new_sessions += new_sess
-            total_continued_sessions += cont_sess
-
-        except Exception as e:
-            error_msg = f"[{config['name']}] Error: {e}"
-            sync_errors.append(error_msg)
-            click.echo(click.style(f"  [FAIL] {e}", fg="red"))
-            continue
-
-        click.echo()
-
-    # Handle Oxen push
-    if push:
-        click.echo("Pushing to Oxen remote...")
-        if not store.oxen_enabled:
-            click.echo(
-                click.style(
-                    "Warning: OXEN_REMOTE_URL not set, skipping push",
-                    fg="yellow",
-                )
-            )
-        else:
-            store.init_oxen()
-            if store.commit(f"Sync {datetime.now().isoformat()}"):
-                if store.push():
-                    click.echo(click.style("Pushed to Oxen remote", fg="green"))
-                else:
-                    click.echo(click.style("Failed to push to Oxen", fg="red"))
-            else:
-                click.echo(click.style("Failed to commit to Oxen", fg="red"))
-
-    # Final summary
-    elapsed = time.time() - sync_start
-    click.echo()
-    click.echo("=" * 50)
-    click.echo(click.style("Sync Summary", bold=True))
-    click.echo("=" * 50)
-    click.echo(f"Total spans fetched: {total_spans}")
-    click.echo(f"New sessions: {total_new_sessions}")
-    click.echo(f"Continued sessions: {total_continued_sessions}")
-    click.echo(f"Time elapsed: {elapsed:.2f}s")
-
-    if sync_errors:
-        click.echo()
-        click.echo(click.style("Errors:", fg="red"))
-        for error in sync_errors:
-            click.echo(f"  - {error}")
-        raise SystemExit(1)
-
-    click.echo()
-    click.echo(click.style("Sync complete!", fg="green"))
-
-
-@main.command("sync-historical")
-@click.option(
-    "--source",
-    "source_name",
-    type=str,
-    help="Sync from a named source (configured via 'dal config add-source')",
-)
-@click.option(
     "--days",
     type=int,
     default=None,
-    help="Number of days of historical data to sync. If not specified, syncs all available.",
+    help="Number of days to sync. If not specified, uses last_sync or defaults to 30.",
 )
 @click.option(
-    "--start-date",
-    type=str,
-    help="Start date for sync (YYYY-MM-DD). Overrides --days.",
+    "--full",
+    is_flag=True,
+    help="Ignore saved state, sync full date range (default: 30 days or --days N)",
 )
+# Batch control
 @click.option(
-    "--end-date",
-    type=str,
-    help="End date for sync (YYYY-MM-DD). Defaults to today.",
-)
-@click.option(
-    "--batch-size",
+    "--batch-days",
     type=int,
-    default=1,
-    help="Days per batch (default: 1). Smaller batches are more reliable.",
+    default=None,
+    help="Days per batch (default: auto based on sync size)",
 )
 @click.option(
     "--batch-hours",
     type=float,
     default=None,
-    help="Hours per batch (overrides --batch-size). Use 0.25 for 15-min batches.",
+    help="Hours per batch (overrides --batch-days). Use 0.25 for 15-min batches.",
 )
+# Performance
 @click.option(
     "--limit",
     type=int,
     default=None,
-    help="Maximum spans per batch (default: 50000 for HTTP, 500000 for SQLite)",
+    help="Max spans per request (default: auto based on source type)",
 )
 @click.option(
     "--timeout",
     type=int,
-    default=120,
-    help="Timeout in seconds for each API request (default: 120)",
+    default=60,
+    help="Request timeout in seconds (default: 60)",
 )
 @click.option(
-    "--backend",
-    type=click.Choice(list(BACKENDS.keys())),
-    help="[Deprecated] Use --source instead. Sync specific legacy backend.",
+    "--delay",
+    type=float,
+    default=None,
+    help="Delay between requests in seconds (default: auto based on sync size)",
 )
 @click.option(
     "--retries",
     type=int,
     default=3,
-    help="Number of retries per batch on failure (default: 3)",
+    help="Retries per batch on failure (default: 3)",
 )
-@click.option(
-    "--skip-normalize",
-    is_flag=True,
-    help="Skip normalization, save raw data only (faster for large backfills)",
-)
-@click.option(
-    "--no-auto-subdivide",
-    is_flag=True,
-    help="Disable automatic subdivision when hitting limits",
-)
-@click.option(
-    "--delay",
-    type=float,
-    default=2.0,
-    help="Delay in seconds between API requests (default: 2.0). Increase to avoid rate limiting.",
-)
-@click.option(
-    "--resume/--no-resume",
-    default=True,
-    help="Resume from previous checkpoint if available (default: resume)",
-)
-@click.option(
-    "--reset",
-    is_flag=True,
-    help="Clear any existing checkpoint and start fresh. Requires --yes to confirm.",
-)
-@click.option(
-    "--yes", "-y",
-    "confirm_reset",
-    is_flag=True,
-    help="Confirm destructive operations like --reset without prompting.",
-)
-@click.option(
-    "--force-resume",
-    is_flag=True,
-    help="Resume existing checkpoint regardless of date range specified",
-)
-@click.option(
-    "--clean",
-    is_flag=True,
-    help="Clean up completed sync state files (use with --status to see what would be cleaned)",
-)
-@click.option(
-    "--status",
-    "show_status",
-    is_flag=True,
-    help="Show status of in-progress historical syncs without syncing",
-)
-@click.option(
-    "--history",
-    "show_history",
-    is_flag=True,
-    help="Include completed syncs in --status output (shows last sync times from SyncState)",
-)
+# Processing
 @click.option(
     "--with-annotations",
     is_flag=True,
     help="Also fetch annotations (slower, disabled by default)",
 )
 @click.option(
-    "--verbose", "-v",
+    "--skip-normalize",
     is_flag=True,
-    help="Enable verbose logging for debugging sync issues",
+    help="Save raw data only without normalization (faster for large backfills)",
 )
+@click.option(
+    "--skip-unify",
+    is_flag=True,
+    help="Skip session unification after sync (default: unify sessions)",
+)
+@click.option(
+    "--no-auto-subdivide",
+    is_flag=True,
+    help="Disable automatic batch subdivision when hitting limits",
+)
+# State control
+@click.option(
+    "--no-update-state",
+    is_flag=True,
+    help="Don't update last_sync after completion. Useful for filling gaps.",
+)
+@click.option(
+    "--resume/--no-resume",
+    default=True,
+    help="Resume from checkpoint if available (default: resume)",
+)
+# Status & cleanup
+@click.option(
+    "--status",
+    "show_status",
+    is_flag=True,
+    help="Show in-progress sync status without syncing",
+)
+@click.option(
+    "--history",
+    "show_history",
+    is_flag=True,
+    help="Include completed syncs in --status output",
+)
+@click.option(
+    "--clean",
+    is_flag=True,
+    help="Clean up completed sync checkpoint files",
+)
+# SQLite mode (Phoenix only)
 @click.option(
     "--sqlite",
     is_flag=True,
@@ -784,71 +223,72 @@ def sync(
     "--sqlite-container",
     type=str,
     default=None,
-    help="Docker container name for SQLite access (e.g., 'dev-agent-lens-phoenix-1'). "
-         "Overrides source config sqlite_container setting.",
+    help="Docker container name for SQLite access (e.g., 'dev-agent-lens-phoenix-1')",
 )
-def sync_historical(
+# Verbosity
+@click.option(
+    "-v", "--verbose",
+    is_flag=True,
+    help="Enable verbose logging for debugging sync issues",
+)
+def sync(
     source_name: str | None,
-    days: int | None,
+    all_sources: bool,
     start_date: str | None,
     end_date: str | None,
-    batch_size: int,
+    days: int | None,
+    full: bool,
+    batch_days: int | None,
     batch_hours: float | None,
     limit: int | None,
     timeout: int,
-    backend: str | None,
+    delay: float | None,
     retries: int,
+    with_annotations: bool,
     skip_normalize: bool,
+    skip_unify: bool,
     no_auto_subdivide: bool,
-    delay: float,
+    no_update_state: bool,
     resume: bool,
-    reset: bool,
-    confirm_reset: bool,
-    force_resume: bool,
-    clean: bool,
     show_status: bool,
     show_history: bool,
-    with_annotations: bool,
-    verbose: bool,
+    clean: bool,
     sqlite: bool,
     sqlite_container: str | None,
+    verbose: bool,
 ) -> None:
-    """Sync all historical trace data from a source.
+    """Sync trace data from configured sources with robust checkpointing.
 
-    This command handles everything automatically:
-    - Detects the full date range of available data
-    - Downloads in daily batches (subdivides high-volume days automatically)
-    - Saves progress checkpoints so you can resume if interrupted
-    - Updates sync state so future 'dal sync' commands continue from where this left off
+    Features automatic retry, checkpointing for large syncs, and session
+    unification. Combines the best of incremental and historical sync.
 
-    The simplest usage is just: dal sync-historical --source <name>
+    Date Range Priority:
+        1. --start-date/--end-date (explicit range)
+        2. --days N (last N days)
+        3. last_sync from state (incremental)
+        4. Default: last 30 days
 
-    Features:
-    - Resume capability: Interrupted syncs continue from where they stopped
-    - Auto-subdivision: High-volume days automatically split into smaller chunks
-    - Progress tracking: See ETA and percentage complete
-    - State integration: After completion, regular 'dal sync' picks up from here
-
-    Phoenix Tips (high-volume sources):
-    - Use --limit 10000 for more frequent checkpoints and reliable syncing
-    - Use --delay 5 to avoid overwhelming the Phoenix server
-    - Auto-subdivide handles busy days automatically (splits time windows recursively)
-    - If you see connection errors, reduce --limit and increase --delay
+    Smart Defaults:
+        - Syncs < 7 days: lightweight mode (no checkpointing, 0.5s delay)
+        - Syncs >= 7 days: robust mode (checkpointing enabled, 2s delay)
 
     Examples:
 
-        dal sync-historical --source arize-ax-alex      # Sync everything (simplest)
+        dal sync                        # Incremental sync from last_sync
 
-        dal sync-historical --source arize-ax-alex --status  # Check progress
+        dal sync --source phoenix-alex  # Sync from named source
 
-        dal sync-historical --source arize-ax-alex --days 30  # Last 30 days only
+        dal sync --days 7               # Sync last 7 days
 
-        dal sync-historical --source arize-ax-alex --reset  # Start over
+        dal sync --full                 # Full sync ignoring saved state
 
-        dal sync-historical --start-date 2025-11-01     # From specific date
+        dal sync --start-date 2024-12-01 --end-date 2024-12-15
 
-        # Phoenix with high volume - use lower limit and delay
-        dal sync-historical --source my-phoenix --limit 10000 --delay 5
+        dal sync --status               # Check sync progress
+
+        dal sync --skip-unify           # Skip session unification (for large backfills)
+
+        dal sync --sqlite               # Use direct SQLite access (Phoenix only)
     """
     from datetime import timedelta
     import pandas as pd
@@ -860,6 +300,7 @@ def sync_historical(
         list_historical_syncs,
         clear_historical_sync,
     )
+    from dev_agent_lens.query.query import _group_by_session
 
     # Configure logging based on --verbose flag
     if verbose:
@@ -868,7 +309,6 @@ def sync_historical(
             format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
             datefmt="%H:%M:%S",
         )
-        # Also enable debug for our modules
         logging.getLogger("dev_agent_lens").setLevel(logging.DEBUG)
         click.echo(click.style("Verbose logging enabled", fg="cyan"))
         click.echo()
@@ -897,14 +337,13 @@ def sync_historical(
         has_in_progress = bool(syncs)
 
         if has_in_progress:
-            click.echo(click.style("Historical Sync Status", bold=True))
+            click.echo(click.style("Sync Status", bold=True))
             click.echo()
             for sync_state in syncs:
                 progress = sync_state.progress_percent
                 eta = sync_state.get_eta()
                 eta_str = f" (ETA: {eta})" if eta else ""
 
-                # Use the new get_status() method for better status detection
                 status_code = sync_state.get_status()
                 if status_code == SyncStatus.COMPLETE:
                     status = click.style("complete", fg="green")
@@ -921,7 +360,6 @@ def sync_historical(
                 click.echo(f"    Range: {sync_state.target_start.strftime('%Y-%m-%d')} to {sync_state.target_end.strftime('%Y-%m-%d')}")
                 click.echo(f"    Spans: {sync_state.stats.total_spans:,}")
 
-                # Show run info if available (for in_progress or stale syncs)
                 if sync_state.current_run:
                     run_info = f"    Run: {sync_state.current_run.run_id}"
                     if status_code == SyncStatus.IN_PROGRESS:
@@ -930,27 +368,19 @@ def sync_historical(
                         run_info += f" (PID: {sync_state.current_run.pid} - dead)"
                     click.echo(run_info)
 
-                # Show remaining ranges count for clearer progress
                 remaining_ranges = sync_state.get_remaining_ranges()
                 click.echo(f"    Batches: {sync_state.stats.batches_completed} completed, {sync_state.stats.batches_failed} failed")
                 if remaining_ranges:
                     click.echo(f"    Remaining gaps: {len(remaining_ranges)}")
                 if sync_state.failed_ranges:
                     click.echo(f"    Failed ranges pending retry: {len(sync_state.failed_ranges)}")
-                if sync_state.stats.subdivisions > 0:
-                    click.echo(f"    Subdivisions: {sync_state.stats.subdivisions}")
                 click.echo()
 
-        # Show completed syncs from SyncState if --history is specified
         if show_history:
-            from dev_agent_lens.core.state import SyncState
-            from dev_agent_lens.core.sources import SourceManager
-
             sync_state_obj = SyncState()
             source_manager = SourceManager()
             all_sources = source_manager.list_sources()
 
-            # Get sources with completed syncs (have last_sync but no in-progress checkpoint)
             in_progress_sources = {s.source for s in syncs}
             completed_sources = []
 
@@ -962,35 +392,32 @@ def sync_historical(
             if completed_sources:
                 if has_in_progress:
                     click.echo()
-                click.echo(click.style("Completed Historical Syncs", bold=True))
+                click.echo(click.style("Completed Syncs", bold=True))
                 click.echo()
                 for source, last_sync in sorted(completed_sources, key=lambda x: x[1], reverse=True):
                     status = click.style("completed", fg="green")
                     click.echo(f"  {source.name}: {status}")
                     click.echo(f"    Last sync: {last_sync.strftime('%Y-%m-%d %H:%M:%S')}")
                     click.echo(f"    Type: {source.source_type.value}")
-                    click.echo(f"    Backend: {source.get_display_info()}")
                     click.echo()
             elif not has_in_progress:
-                click.echo("No historical syncs found (in-progress or completed).")
-                click.echo("Use 'dal sync-historical --source <name>' to start a sync.")
+                click.echo("No syncs found (in-progress or completed).")
+                click.echo("Use 'dal sync --source <name>' to start a sync.")
                 return
 
         if not has_in_progress and not show_history:
-            click.echo("No historical syncs in progress.")
+            click.echo("No syncs in progress.")
             click.echo("Tip: Use --history to see completed syncs.")
         return
 
     sync_start = time.time()
 
-    # Determine what to sync: named source or legacy backends
+    # Determine sources to sync
     source_manager = SourceManager()
     sources_to_sync: list[SourceConfig] = []
-    backends_to_sync: list[str] = []
-    use_legacy_mode = False
 
     if source_name:
-        # Named source mode
+        # Sync from specific named source
         source = source_manager.get_source(source_name)
         if not source:
             click.echo(
@@ -1002,46 +429,38 @@ def sync_historical(
             )
             raise SystemExit(1)
         sources_to_sync = [source]
-    elif backend:
-        # Legacy backend mode
-        use_legacy_mode = True
-        backends_to_sync = [backend]
-        if not os.getenv(BACKENDS[backend]["env_check"]):
+    elif all_sources:
+        # Sync from all configured sources
+        sources_to_sync = source_manager.list_sources()
+        if not sources_to_sync:
             click.echo(
                 click.style(
-                    f"Error: Backend '{backend}' is not configured. "
-                    f"Set {BACKENDS[backend]['env_check']} environment variable.",
+                    "Error: No sources configured. "
+                    "Use 'dal config add-source' to add sources.",
                     fg="red",
                 )
             )
             raise SystemExit(1)
-        click.echo(click.style("Note: --backend is deprecated. Use --source instead.", fg="yellow"))
     else:
-        # Auto-detect: prefer named sources, fall back to legacy
+        # Auto-detect: use named sources
         sources_to_sync = source_manager.list_sources()
         if not sources_to_sync:
-            use_legacy_mode = True
-            backends_to_sync = get_configured_backends()
-            if not backends_to_sync:
-                click.echo(
-                    click.style(
-                        "Error: No sources or backends configured.\n"
-                        "  - Use 'dal config add-source' to add named sources\n"
-                        "  - Or set DAL_PHOENIX_URL or ARIZE_API_KEY for legacy mode",
-                        fg="red",
-                    )
+            click.echo(
+                click.style(
+                    "Error: No sources configured.\n"
+                    "  Use 'dal config add-source' to add named sources",
+                    fg="red",
                 )
-                raise SystemExit(1)
+            )
+            raise SystemExit(1)
 
-    # Parse date range
+    # Parse end date
     if end_date:
         try:
             end_date_parsed = datetime.strptime(end_date, "%Y-%m-%d")
-            # If end date is today, use now() to get current time
             if end_date_parsed.date() == datetime.now().date():
                 sync_end_time = datetime.now()
             else:
-                # For past dates, use end of day
                 sync_end_time = end_date_parsed.replace(hour=23, minute=59, second=59)
         except ValueError:
             click.echo(click.style(f"Error: Invalid end-date format '{end_date}'. Use YYYY-MM-DD.", fg="red"))
@@ -1049,106 +468,53 @@ def sync_historical(
     else:
         sync_end_time = datetime.now()
 
+    # Parse start date with priority: --start-date > --days > last_sync > default 30
+    state = SyncState()
+    sync_start_time: datetime | None = None
+    date_source = ""
+
     if start_date:
         try:
             sync_start_time = datetime.strptime(start_date, "%Y-%m-%d")
+            date_source = f"explicit start date: {start_date}"
         except ValueError:
             click.echo(click.style(f"Error: Invalid start-date format '{start_date}'. Use YYYY-MM-DD.", fg="red"))
             raise SystemExit(1)
     elif days is not None:
-        # Use --days
-        if days > 365:
-            click.echo(
-                click.style("Warning: Limiting to 365 days (maximum)", fg="yellow")
-            )
-            days = 365
         sync_start_time = sync_end_time - timedelta(days=days)
-    else:
-        # No date range specified - default to 90 days
-        # NOTE: Auto-detection is not practical for Arize because:
-        # - The Arize SDK has no API to query date ranges without downloading data
-        # - Probing would require downloading all data in a large window
-        # - This defeats the purpose of incremental batching
-        # Users should specify --start-date or --days based on their knowledge of the data.
-        click.echo("No date range specified, defaulting to last 90 days.")
-        click.echo("  Tip: Use --start-date YYYY-MM-DD or --days N for a specific range.")
-        sync_start_time = sync_end_time - timedelta(days=90)
+        date_source = f"--days {days}"
+    elif not full:
+        # Try to use last_sync for incremental (use first source for now)
+        if sources_to_sync:
+            last_sync = state.get_last_sync(sources_to_sync[0].name)
+            if last_sync:
+                sync_start_time = last_sync
+                date_source = f"incremental from last_sync: {last_sync.strftime('%Y-%m-%d %H:%M')}"
 
-    # Handle --reset flag with safety checks
-    if reset:
-        sources_with_state = []
+    if sync_start_time is None:
+        # Default to 30 days
+        default_days = 30
+        sync_start_time = sync_end_time - timedelta(days=default_days)
+        date_source = f"default {default_days} days"
 
-        # Check which sources have existing state that would be lost
-        for source in sources_to_sync:
-            existing_state = HistoricalSyncState.load(source.name)
-            if existing_state:
-                sources_with_state.append((source.name, existing_state))
-        for backend_id in backends_to_sync:
-            existing_state = HistoricalSyncState.load(backend_id)
-            if existing_state:
-                sources_with_state.append((backend_id, existing_state))
+    # Calculate sync duration for smart defaults
+    sync_duration = sync_end_time - sync_start_time
+    sync_days = sync_duration.days
+    is_large_sync = sync_days >= 7
 
-        if sources_with_state:
-            # Show warning about what will be lost
-            click.echo(click.style("\n⚠️  WARNING: --reset will delete the following sync progress:", fg="yellow", bold=True))
-            click.echo("")
-            for name, state in sources_with_state:
-                click.echo(f"  Source: {click.style(name, fg='cyan', bold=True)}")
-                click.echo(f"    Progress: {state.progress_percent:.1f}% complete")
-                click.echo(f"    Spans synced: {state.stats.total_spans:,}")
-                click.echo(f"    Batches completed: {state.stats.batches_completed}")
-                if state.stats.batches_failed > 0:
-                    click.echo(f"    Batches failed (pending retry): {state.stats.batches_failed}")
-                click.echo(f"    Date range: {state.target_start.date()} to {state.target_end.date()}")
-                click.echo("")
+    # Smart defaults based on sync size
+    effective_delay = delay if delay is not None else (2.0 if is_large_sync else 0.5)
+    effective_batch_days = batch_days if batch_days is not None else (1 if is_large_sync else None)
+    use_checkpointing = is_large_sync
 
-            click.echo(click.style("  This will NOT delete your parquet data, only the checkpoint/progress tracking.", fg="white"))
-            click.echo(click.style("  You may need to re-sync data you've already downloaded.", fg="white"))
-            click.echo("")
+    # Set effective limit based on source type (will be determined per-source)
+    effective_limit = limit if limit is not None else 50000
 
-            if not confirm_reset:
-                click.echo(click.style("To confirm, re-run with --yes or -y flag:", fg="yellow"))
-                click.echo(f"  dal sync-historical --source <name> --reset --yes")
-                click.echo("")
-                raise SystemExit(1)
-
-            # User confirmed, proceed with reset
-            for name, _ in sources_with_state:
-                if clear_historical_sync(name):
-                    click.echo(click.style(f"✓ Cleared checkpoint for '{name}'", fg="green"))
-        else:
-            click.echo("No existing checkpoints to clear.")
-
-    # Determine batch duration
-    if batch_hours:
-        batch_duration = timedelta(hours=batch_hours)
-        batch_description = f"{batch_hours} hours"
-    else:
-        batch_duration = timedelta(days=batch_size)
-        batch_description = f"{batch_size} day{'s' if batch_size > 1 else ''}"
-
-    # Create sync config
-    sync_config = SyncConfig(
-        batch_hours=batch_hours,
-        batch_days=batch_size,
-        limit=limit,
-        timeout=timeout,
-        delay=delay,
-    )
-
-    # Handle --sqlite flag: validate and resolve container name
+    # Handle --sqlite flag validation
     use_sqlite = False
     resolved_sqlite_container: str | None = None
 
     if sqlite or sqlite_container:
-        # SQLite mode requested - validate
-        if use_legacy_mode:
-            click.echo(click.style(
-                "Error: --sqlite is not supported with legacy backends. Use --source instead.",
-                fg="red",
-            ))
-            raise SystemExit(1)
-
         if len(sources_to_sync) > 1:
             click.echo(click.style(
                 "Error: --sqlite only supports a single source at a time.",
@@ -1157,7 +523,6 @@ def sync_historical(
             raise SystemExit(1)
 
         source = sources_to_sync[0]
-
         if source.source_type != SourceType.PHOENIX:
             click.echo(click.style(
                 f"Error: --sqlite only works with Phoenix sources ('{source.name}' is {source.source_type.value}).",
@@ -1165,17 +530,11 @@ def sync_historical(
             ))
             raise SystemExit(1)
 
-        # Resolve container name: CLI flag > source config > error
         resolved_sqlite_container = sqlite_container or source.sqlite_container
-
         if not resolved_sqlite_container:
             click.echo(click.style(
                 f"Error: --sqlite requires a Docker container name.\n"
-                f"  Either:\n"
-                f"    1. Use --sqlite-container <name> (e.g., --sqlite-container dev-agent-lens-phoenix-1)\n"
-                f"    2. Add sqlite_container to source config:\n"
-                f"       dal config add-source {source.name} phoenix --url {source.url or 'URL'} "
-                f"--sqlite-container CONTAINER_NAME",
+                f"  Use --sqlite-container <name> or add sqlite_container to source config.",
                 fg="red",
             ))
             raise SystemExit(1)
@@ -1186,118 +545,82 @@ def sync_historical(
             fg="cyan",
         ))
 
-    # Set effective limit based on mode
-    # SQLite can handle large queries efficiently, but we still need a memory-safe limit
-    # HTTP API needs lower limits to avoid timeouts and for subdivision to work
-    effective_limit: int | None
-    if limit is not None:
-        # User explicitly specified a limit, use it
-        effective_limit = limit
-    elif use_sqlite:
-        # SQLite mode: high limit (500k) to avoid OOM on very high volume days
-        # ~500k spans ≈ 2-3GB memory, safe for most systems
-        # User can override with --limit if needed
-        effective_limit = 500_000
-    else:
-        # HTTP mode: default to 50000 for safe batching and subdivision
-        effective_limit = 50000
-
-    # Update sync_config with effective limit for state tracking
-    sync_config.limit = effective_limit
-
-    # Calculate estimated batches (may increase with auto-subdivision)
-    total_duration = sync_end_time - sync_start_time
-    estimated_batches = max(1, int(total_duration / batch_duration) + 1)
-
-    click.echo(click.style("Historical Sync", bold=True))
-    if sources_to_sync:
-        click.echo(f"Sources: {', '.join(s.name for s in sources_to_sync)}")
-    else:
-        click.echo(f"Backends (legacy): {', '.join(backends_to_sync)}")
-    click.echo(f"Date range: {sync_start_time.strftime('%Y-%m-%d')} to {sync_end_time.strftime('%Y-%m-%d')}")
-    click.echo(f"Batch size: {batch_description} (~{estimated_batches} batches)")
-    click.echo(f"Limit per batch: {'unlimited' if effective_limit is None else f'{effective_limit:,}'}")
-    click.echo(f"Auto-subdivide: {'disabled' if no_auto_subdivide else 'enabled'}")
-    click.echo(f"Timeout: {timeout}s")
-    click.echo(f"Retries per batch: {retries}")
-    click.echo(f"Request delay: {delay}s")
+    # Display sync plan
+    click.echo(click.style("Sync Configuration", bold=True))
+    click.echo(f"  Sources: {', '.join(s.name for s in sources_to_sync)}")
+    click.echo(f"  Date range: {sync_start_time.strftime('%Y-%m-%d')} to {sync_end_time.strftime('%Y-%m-%d')} ({date_source})")
+    click.echo(f"  Duration: {sync_days} days")
+    click.echo(f"  Mode: {'robust (checkpointing enabled)' if use_checkpointing else 'lightweight'}")
+    click.echo(f"  Delay: {effective_delay}s between requests")
+    if effective_batch_days:
+        click.echo(f"  Batch size: {effective_batch_days} day(s)")
+    if batch_hours:
+        click.echo(f"  Batch size: {batch_hours} hour(s)")
+    click.echo(f"  Session unification: {'disabled (--skip-unify)' if skip_unify else 'enabled'}")
+    if no_update_state:
+        click.echo(click.style("  State update: DISABLED", fg="yellow"))
     click.echo()
+
+    # Create sync config
+    sync_config = SyncConfig(
+        batch_hours=batch_hours,
+        batch_days=effective_batch_days or 1,
+        limit=effective_limit,
+        timeout=timeout,
+        delay=effective_delay,
+    )
+
+    # Minimum subdivision window
+    MIN_SUBDIVISION = timedelta(minutes=1)
 
     total_spans = 0
     total_batches_completed = 0
     total_batches_failed = 0
     total_subdivisions = 0
-    all_errors = []
-
-    # Minimum subdivision window (1 minute) to handle extremely dense time periods
-    MIN_SUBDIVISION = timedelta(minutes=1)
+    all_errors: list[str] = []
+    synced_sources: list[str] = []  # Track successfully synced sources for unification
 
     def pre_subdivide_ranges(
         ranges: list[tuple[datetime, datetime]],
         initial_window: timedelta,
     ) -> list[tuple[datetime, datetime]]:
-        """Pre-subdivide ranges into smaller chunks for aggressive querying.
-
-        When a batch has failed multiple times, we pre-subdivide into smaller
-        time windows before making any Phoenix queries. This helps Phoenix
-        handle high-volume days by never asking for the full 24h at once.
-
-        Args:
-            ranges: List of (start, end) tuples to subdivide
-            initial_window: The maximum window size for each chunk
-
-        Returns:
-            List of (start, end) tuples, each no larger than initial_window
-        """
+        """Pre-subdivide ranges into smaller chunks for aggressive querying."""
         if initial_window <= timedelta(0):
             return ranges
-
         result = []
         for range_start, range_end in ranges:
             range_duration = range_end - range_start
             if range_duration <= initial_window:
-                # Already small enough
                 result.append((range_start, range_end))
             else:
-                # Subdivide into chunks of initial_window size
                 current = range_start
                 while current < range_end:
                     chunk_end = min(current + initial_window, range_end)
                     result.append((current, chunk_end))
                     current = chunk_end
-
         return result
 
-    # Helper function to fetch with auto-subdivision and incremental persistence
     def fetch_with_subdivision(
         client,
         batch_start: datetime,
         batch_end: datetime,
         depth: int = 0,
         is_first_request: bool = True,
-        # Incremental persistence context (optional - if provided, saves immediately)
         store: OxenStore | None = None,
         checkpoint_state: HistoricalSyncState | None = None,
-        normalizer: callable | None = None,
+        normalizer_fn=None,
         backend_name: str | None = None,
         batch_key: str | None = None,
     ) -> tuple[list, int, int]:
-        """Fetch spans, auto-subdividing if limit is hit.
-
-        When incremental persistence context is provided (store, checkpoint_state, etc.),
-        each successful sub-batch is saved immediately to disk and recorded in state.
-        This prevents data loss when later sub-batches fail.
-
-        Returns (list of dataframes, subdivision_count, spans_saved_incrementally)
-        """
+        """Fetch spans with auto-subdivision and incremental persistence."""
         nonlocal total_subdivisions
 
         indent = "    " * depth if depth > 0 else ""
         incremental_mode = store is not None and checkpoint_state is not None
 
         # Add delay between requests (except for the very first one)
-        if not is_first_request and delay > 0:
-            time.sleep(delay)
+        if not is_first_request and effective_delay > 0:
+            time.sleep(effective_delay)
 
         # Attempt fetch with retries
         batch_df = None
@@ -1309,12 +632,11 @@ def sync_historical(
                     end_time=batch_end,
                     limit=effective_limit,
                 )
-                break  # Success
+                break
             except Exception as e:
                 last_error = e
                 if attempt < retries:
-                    # Exponential backoff with base delay
-                    backoff = max(delay, 2 ** attempt)
+                    backoff = max(effective_delay, 2 ** attempt)
                     time.sleep(backoff)
 
         if batch_df is None:
@@ -1328,11 +650,9 @@ def sync_historical(
         batch_count = len(batch_df)
 
         # Check if we hit the limit and should subdivide
-        # (skip subdivision check if effective_limit is None - unlimited mode)
         if effective_limit is not None and batch_count >= effective_limit and not no_auto_subdivide:
             window_size = batch_end - batch_start
             if window_size > MIN_SUBDIVISION:
-                # Subdivide into two halves
                 midpoint = batch_start + window_size / 2
                 total_subdivisions += 1
 
@@ -1342,207 +662,224 @@ def sync_historical(
                     click.echo(f"{indent}→ {batch_start.strftime('%H:%M')}-{batch_end.strftime('%H:%M')}: " +
                               click.style(f"hit limit, subdividing...", fg="yellow"))
 
-                # Fetch both halves recursively (neither is first request anymore)
-                # Pass incremental persistence context down
                 left_dfs, left_subs, left_saved = fetch_with_subdivision(
                     client, batch_start, midpoint, depth + 1, is_first_request=False,
-                    store=store, checkpoint_state=checkpoint_state, normalizer=normalizer,
+                    store=store, checkpoint_state=checkpoint_state, normalizer_fn=normalizer_fn,
                     backend_name=backend_name, batch_key=batch_key,
                 )
                 right_dfs, right_subs, right_saved = fetch_with_subdivision(
                     client, midpoint, batch_end, depth + 1, is_first_request=False,
-                    store=store, checkpoint_state=checkpoint_state, normalizer=normalizer,
+                    store=store, checkpoint_state=checkpoint_state, normalizer_fn=normalizer_fn,
                     backend_name=backend_name, batch_key=batch_key,
                 )
 
                 return left_dfs + right_dfs, left_subs + right_subs + 1, left_saved + right_saved
-            else:
-                # Can't subdivide further by time - use streaming to get all spans
-                # Streaming fetches row-by-row via NDJSON to avoid Docker OOM
-                if depth == 0:
-                    click.echo(click.style(f" {batch_count:,} spans (at limit, streaming all)...", fg="yellow"))
-                else:
-                    click.echo(f"{indent}→ {batch_start.strftime('%H:%M')}-{batch_end.strftime('%H:%M')}: " +
-                              click.style(f"{batch_count:,} spans (at limit, streaming)...", fg="yellow"))
 
-                # Check if client supports streaming (SQLite client does)
-                has_streaming = hasattr(client, 'get_spans_dataframe_streaming')
-
-                if has_streaming and incremental_mode:
-                    # Use streaming - memory efficient, saves each chunk
-                    total_fetched = 0
-                    chunk_num = 0
-
-                    try:
-                        for chunk_df in client.get_spans_dataframe_streaming(
-                            start_time=batch_start,
-                            end_time=batch_end,
-                            chunk_size=effective_limit,
-                        ):
-                            chunk_num += 1
-                            chunk_count = len(chunk_df)
-                            total_fetched += chunk_count
-
-                            # Save chunk immediately
-                            try:
-                                if normalizer:
-                                    try:
-                                        normalized = normalizer(chunk_df)
-                                        store.append_spans(normalized, backend=backend_name)
-                                    except Exception:
-                                        store.append_spans(chunk_df, backend=f"{backend_name}-raw")
-                                else:
-                                    store.append_spans(chunk_df, backend=backend_name)
-                            except Exception as save_err:
-                                click.echo(click.style(f" WARN: failed to save chunk {chunk_num}: {save_err}", fg="yellow"))
-
-                            click.echo(f"{indent}  [chunk {chunk_num}] +{chunk_count:,} spans (total: {total_fetched:,})")
-
-                    except Exception as e:
-                        click.echo(click.style(f" WARN: streaming failed: {e}", fg="yellow"))
-                        # Fall through with whatever we got
-
-                    click.echo(f"{indent}  → Total from streaming: {total_fetched:,} spans")
-
-                    if batch_key:
-                        checkpoint_state.add_partial_range(batch_key, batch_start, batch_end, total_fetched)
-                    return [], 0, total_fetched
-
-                else:
-                    # Fallback: offset-based pagination (may OOM on very large sets)
-                    # Save first page immediately
-                    total_fetched = batch_count
-                    if incremental_mode and batch_key:
-                        try:
-                            if normalizer:
-                                try:
-                                    normalized = normalizer(batch_df)
-                                    store.append_spans(normalized, backend=backend_name)
-                                except Exception:
-                                    store.append_spans(batch_df, backend=f"{backend_name}-raw")
-                            else:
-                                store.append_spans(batch_df, backend=backend_name)
-                        except Exception as save_err:
-                            click.echo(click.style(f" WARN: failed to save page 1: {save_err}", fg="yellow"))
-                    else:
-                        all_dfs = [batch_df]
-
-                    offset = effective_limit
-                    page_num = 2
-
-                    while batch_count >= effective_limit:
-                        if delay > 0:
-                            time.sleep(delay)
-
-                        try:
-                            next_df = client.get_spans_dataframe(
-                                start_time=batch_start,
-                                end_time=batch_end,
-                                limit=effective_limit,
-                                offset=offset,
-                            )
-                        except Exception as e:
-                            click.echo(click.style(f" WARN: pagination failed at offset {offset}: {e}", fg="yellow"))
-                            break
-
-                        if next_df is None or (hasattr(next_df, "empty") and next_df.empty) or len(next_df) == 0:
-                            break
-
-                        batch_count = len(next_df)
-                        total_fetched += batch_count
-
-                        if incremental_mode and batch_key:
-                            try:
-                                if normalizer:
-                                    try:
-                                        normalized = normalizer(next_df)
-                                        store.append_spans(normalized, backend=backend_name)
-                                    except Exception:
-                                        store.append_spans(next_df, backend=f"{backend_name}-raw")
-                                else:
-                                    store.append_spans(next_df, backend=backend_name)
-                            except Exception as save_err:
-                                click.echo(click.style(f" WARN: failed to save page {page_num}: {save_err}", fg="yellow"))
-                        else:
-                            all_dfs.append(next_df)
-
-                        offset += effective_limit
-                        page_num += 1
-                        click.echo(f"{indent}  [page {page_num}] +{batch_count:,} spans (total: {total_fetched:,})")
-
-                    click.echo(f"{indent}  → Total from pagination: {total_fetched:,} spans")
-
-                    if incremental_mode and batch_key:
-                        checkpoint_state.add_partial_range(batch_key, batch_start, batch_end, total_fetched)
-                        return [], 0, total_fetched
-
-                    import pandas as pd
-                    combined_df = pd.concat(all_dfs, ignore_index=True) if len(all_dfs) > 1 else all_dfs[0]
-                    return [combined_df], 0, 0
-
-        # Normal case: didn't hit limit (this is a leaf sub-batch)
+        # Normal case: didn't hit limit
         if depth > 0:
             click.echo(f"{indent}→ {batch_start.strftime('%H:%M')}-{batch_end.strftime('%H:%M')}: " +
                       click.style(f"{batch_count:,} spans", fg="green"))
 
-            # In incremental mode, save this sub-batch immediately
             if incremental_mode and batch_key:
                 try:
-                    if normalizer:
+                    if normalizer_fn and not skip_normalize:
                         try:
-                            normalized = normalizer(batch_df)
+                            normalized = normalizer_fn(batch_df)
                             store.append_spans(normalized, backend=backend_name)
                         except Exception:
                             store.append_spans(batch_df, backend=f"{backend_name}-raw")
                     else:
                         store.append_spans(batch_df, backend=backend_name)
                     checkpoint_state.add_partial_range(batch_key, batch_start, batch_end, batch_count)
-                    return [], 0, batch_count  # Return empty list since data is saved
+                    return [], 0, batch_count
                 except Exception as save_err:
                     click.echo(click.style(f" WARN: failed to save partial: {save_err}", fg="yellow"))
 
         return [batch_df], 0, 0
 
-    # Helper function to process a single source/backend
-    def process_historical_sync(
-        name: str,
-        display_name: str,
-        client_class: type,
-        normalizer: callable,
-        store: OxenStore,
-        is_phoenix: bool = False,
-        sqlite_client=None,  # Pre-created SQLite client (overrides client_class if provided)
+    def process_source_sync(
+        source: SourceConfig,
+        source_start: datetime,
+        source_end: datetime,
     ) -> tuple[int, int, int]:
-        """Process historical sync and return (spans, completed, failed)."""
+        """Process sync for a single source. Returns (spans, completed_batches, failed_batches)."""
+        nonlocal total_subdivisions
+
+        # Create source-specific store
+        source_store = OxenStore.for_source(source.name)
+
+        # Set up environment and determine client/normalizer
+        sqlite_client = None
+
+        if source.source_type == SourceType.PHOENIX:
+            if source.url:
+                os.environ["DAL_PHOENIX_URL"] = source.url
+            if source.project:
+                os.environ["DAL_PHOENIX_PROJECT"] = source.project
+
+            if use_sqlite and resolved_sqlite_container:
+                db_path = f"docker://{resolved_sqlite_container}:/root/.phoenix/phoenix.db"
+                sqlite_client = PhoenixSQLiteClient(
+                    db_path=db_path,
+                    project=source.project or os.getenv("DAL_PHOENIX_PROJECT", "dev-agent-lens"),
+                )
+                try:
+                    if not sqlite_client.test_connection():
+                        click.echo(click.style(
+                            f"Error: Could not connect to Phoenix SQLite database",
+                            fg="red",
+                        ))
+                        return 0, 0, 1
+                except Exception as e:
+                    click.echo(click.style(f"Error: SQLite connection test failed: {e}", fg="red"))
+                    return 0, 0, 1
+
+            client_class = PhoenixClient
+            normalizer_fn = normalize_phoenix
+            is_phoenix = True
+        else:  # ARIZE
+            if source.space_key:
+                os.environ["ARIZE_SPACE_KEY"] = source.space_key
+            if source.model_id:
+                os.environ["ARIZE_MODEL_ID"] = source.model_id
+            client_class = ArizeClient
+            normalizer_fn = normalize_arize
+            is_phoenix = False
+
+        # For large syncs (7+ days), use checkpointing
+        if use_checkpointing:
+            return _process_with_checkpointing(
+                source, source_start, source_end,
+                source_store, client_class, normalizer_fn, is_phoenix, sqlite_client
+            )
+        else:
+            return _process_lightweight(
+                source, source_start, source_end,
+                source_store, client_class, normalizer_fn, is_phoenix, sqlite_client
+            )
+
+    def _process_lightweight(
+        source: SourceConfig,
+        source_start: datetime,
+        source_end: datetime,
+        source_store: OxenStore,
+        client_class: type,
+        normalizer_fn,
+        is_phoenix: bool,
+        sqlite_client=None,
+    ) -> tuple[int, int, int]:
+        """Lightweight sync without checkpointing (for small syncs < 7 days)."""
+        click.echo(f"[{source.name}] Starting sync (lightweight mode)...")
+
+        # Create client
+        if sqlite_client:
+            client = sqlite_client
+        elif is_phoenix:
+            client = client_class(timeout=float(timeout))
+        else:
+            client = client_class()
+
+        # Generate batches
+        batches = []
+        if batch_hours:
+            batch_duration = timedelta(hours=batch_hours)
+        elif effective_batch_days:
+            batch_duration = timedelta(days=effective_batch_days)
+        else:
+            batch_duration = source_end - source_start  # Single batch
+
+        batch_end = source_end
+        while batch_end > source_start:
+            batch_start_calc = max(batch_end - batch_duration, source_start)
+            batches.append((batch_start_calc, batch_end))
+            batch_end = batch_start_calc
+
+        batches.sort(key=lambda x: x[1], reverse=True)
+
+        if len(batches) > 1:
+            click.echo(f"  Processing {len(batches)} batches...")
+
+        source_spans = 0
+        completed = 0
+        failed = 0
+
+        for i, (b_start, b_end) in enumerate(batches):
+            if i > 0 and effective_delay > 0:
+                time.sleep(effective_delay)
+
+            click.echo(f"  Batch {i+1}/{len(batches)}: {b_start.strftime('%Y-%m-%d %H:%M')} to {b_end.strftime('%Y-%m-%d %H:%M')}", nl=False)
+
+            try:
+                dataframes, subdivisions, _ = fetch_with_subdivision(
+                    client, b_start, b_end,
+                    store=source_store,
+                    normalizer_fn=normalizer_fn,
+                    backend_name=source.name,
+                )
+
+                if dataframes:
+                    combined_df = pd.concat(dataframes, ignore_index=True) if len(dataframes) > 1 else dataframes[0]
+                    batch_count = len(combined_df)
+
+                    # Save results
+                    if skip_normalize:
+                        source_store.append_spans(combined_df, backend=source.name)
+                    else:
+                        try:
+                            normalized = normalizer_fn(combined_df)
+                            source_store.append_spans(normalized, backend=source.name)
+                        except Exception:
+                            source_store.append_spans(combined_df, backend=f"{source.name}-raw")
+
+                    source_spans += batch_count
+                    click.echo(click.style(f" {batch_count:,} spans", fg="green"))
+                else:
+                    click.echo(click.style(" no spans", fg="yellow"))
+
+                completed += 1
+
+            except Exception as e:
+                click.echo(click.style(f" FAILED: {e}", fg="red"))
+                failed += 1
+
+        click.echo(f"  [{source.name}] Total: {source_spans:,} spans")
+        return source_spans, completed, failed
+
+    def _process_with_checkpointing(
+        source: SourceConfig,
+        source_start: datetime,
+        source_end: datetime,
+        source_store: OxenStore,
+        client_class: type,
+        normalizer_fn,
+        is_phoenix: bool,
+        sqlite_client=None,
+    ) -> tuple[int, int, int]:
+        """Robust sync with checkpointing (for large syncs >= 7 days)."""
 
         # Load or create checkpoint state
         checkpoint_state, is_resuming = HistoricalSyncState.load_or_create(
-            source=name,
-            target_start=sync_start_time,
-            target_end=sync_end_time,
+            source=source.name,
+            target_start=source_start,
+            target_end=source_end,
             config=sync_config,
-            force_resume=force_resume,
+            force_resume=False,
         )
 
         if is_resuming and resume:
             progress = checkpoint_state.progress_percent
-            click.echo(f"[{display_name}] Resuming from checkpoint ({progress:.1f}% complete)")
+            click.echo(f"[{source.name}] Resuming from checkpoint ({progress:.1f}% complete)")
             click.echo(f"  Previously synced: {checkpoint_state.stats.total_spans:,} spans")
         else:
-            click.echo(f"[{display_name}] Starting historical sync...")
+            click.echo(f"[{source.name}] Starting sync (robust mode with checkpointing)...")
 
-        # Create client with timeout (or use pre-created SQLite client)
-        try:
-            if sqlite_client is not None:
-                client = sqlite_client
-                click.echo(f"  Using SQLite direct access")
-            elif is_phoenix:
-                client = client_class(timeout=float(timeout))
-            else:
-                client = client_class()
-        except Exception as e:
-            click.echo(click.style(f"  [FAIL] Could not create client: {e}", fg="red"))
-            return 0, 0, 1
+        # Create client
+        if sqlite_client:
+            client = sqlite_client
+        elif is_phoenix:
+            client = client_class(timeout=float(timeout))
+        else:
+            client = client_class()
 
         # Get remaining ranges to process
         if is_resuming and resume:
@@ -1551,433 +888,264 @@ def sync_historical(
                 click.echo(click.style(f"  Already complete!", fg="green"))
                 return checkpoint_state.stats.total_spans, checkpoint_state.stats.batches_completed, 0
         else:
-            remaining_ranges = [(sync_start_time, sync_end_time)]
+            remaining_ranges = [(source_start, source_end)]
 
-        # Generate batches from remaining ranges (most recent first)
+        # Generate batches from remaining ranges
+        batch_duration = sync_config.batch_duration
         batches = []
         for range_start, range_end in remaining_ranges:
             batch_end = range_end
             while batch_end > range_start:
-                batch_start = max(batch_end - batch_duration, range_start)
-                batches.append((batch_start, batch_end))
-                batch_end = batch_start
+                b_start = max(batch_end - batch_duration, range_start)
+                batches.append((b_start, batch_end))
+                batch_end = b_start
 
-        # Sort by end time descending (most recent first)
         batches.sort(key=lambda x: x[1], reverse=True)
 
-        # Also get previously failed batches from checkpoint for retry
-        persisted_failed_ranges = [
-            (r.start, r.end) for r in checkpoint_state.failed_ranges
-        ]
+        persisted_failed_ranges = [(r.start, r.end) for r in checkpoint_state.failed_ranges]
 
         if not batches and not persisted_failed_ranges:
             click.echo(click.style(f"  No batches to process.", fg="yellow"))
             return checkpoint_state.stats.total_spans, checkpoint_state.stats.batches_completed, 0
 
         if batches:
-            click.echo(f"  Processing {len(batches)} batches sequentially...")
+            click.echo(f"  Processing {len(batches)} batches...")
         if persisted_failed_ranges:
             click.echo(click.style(f"  {len(persisted_failed_ranges)} previously failed batches to retry", fg="cyan"))
-
-        # Show ETA if resuming
-        if is_resuming and resume:
-            eta = checkpoint_state.get_eta()
-            if eta:
-                click.echo(f"  Estimated time remaining: {eta}")
-        click.echo()
 
         source_spans = checkpoint_state.stats.total_spans if (is_resuming and resume) else 0
         completed = checkpoint_state.stats.batches_completed if (is_resuming and resume) else 0
         failed = 0
-        failed_batches: list[tuple[datetime, datetime]] = []  # Queue for retry
+        failed_batches: list[tuple[datetime, datetime]] = []
 
-        def process_batch(batch_start: datetime, batch_end: datetime, batch_num: int, total: int, is_retry: bool = False) -> bool:
-            """Process a single batch. Returns True if successful."""
-            nonlocal source_spans, completed, failed
+        try:
+            for i, (b_start, b_end) in enumerate(batches):
+                if i > 0 and effective_delay > 0:
+                    time.sleep(effective_delay)
 
-            # Format time range based on batch granularity
-            if batch_hours:
-                time_format = "%Y-%m-%d %H:%M"
-            else:
-                time_format = "%Y-%m-%d"
+                overall_progress = checkpoint_state.progress_percent
+                batch_key = b_start.strftime("%Y-%m-%d %H:%M:%S")
 
-            # Calculate overall progress
-            overall_progress = checkpoint_state.progress_percent
-            retry_tag = click.style(" [retry]", fg="cyan") if is_retry else ""
+                click.echo(
+                    f"  [{overall_progress:.0f}%] Batch {i+1}/{len(batches)}: "
+                    f"{b_start.strftime('%Y-%m-%d')} to {b_end.strftime('%Y-%m-%d')}",
+                    nl=False,
+                )
 
-            # Check for existing partial ranges (from previous interrupted subdivisions)
-            batch_key = batch_start.strftime("%Y-%m-%d %H:%M:%S")
-            partial_spans = checkpoint_state.get_partial_spans_count(batch_key)
-            unfetched_ranges = checkpoint_state.get_unfetched_ranges(batch_start, batch_end)
+                try:
+                    checkpoint_state.mark_batch_started(b_start, b_end)
 
-            # If we have partial progress, show it
-            partial_tag = ""
-            if partial_spans > 0:
-                partial_tag = click.style(f" [resuming, {partial_spans:,} spans already saved]", fg="cyan")
-
-            click.echo(
-                f"  [{overall_progress:.0f}%] Batch {batch_num}/{total}: "
-                f"{batch_start.strftime(time_format)} to {batch_end.strftime(time_format)}{retry_tag}{partial_tag}",
-                nl=False,
-            )
-
-            # If all ranges are already fetched, complete immediately
-            if not unfetched_ranges:
-                logger.info(f"Batch {batch_key}: All ranges already fetched, completing from partials")
-                total_spans = checkpoint_state.complete_partial_day(batch_key, batch_start, batch_end)
-                source_spans += total_spans
-                click.echo(click.style(f" {total_spans:,} spans (from partial ranges)", fg="green"))
-                completed += 1
-                return True
-
-            try:
-                # Mark batch as started in checkpoint
-                checkpoint_state.mark_batch_started(batch_start, batch_end)
-                logger.debug(f"Batch {batch_key}: Starting with {len(unfetched_ranges)} unfetched range(s)")
-
-                # Backend name for storage
-                backend_name = f"{name}-historical"
-
-                # Check failure history for aggressive pre-subdivision
-                failure_count = checkpoint_state.get_failure_count(batch_key)
-                batch_duration = batch_end - batch_start
-                recommended_window = checkpoint_state.get_recommended_initial_window(batch_key, batch_duration)
-
-                # If we need aggressive subdivision, pre-split ranges before querying
-                ranges_to_fetch = unfetched_ranges
-                if failure_count > 0 and recommended_window < batch_duration:
-                    ranges_to_fetch = pre_subdivide_ranges(unfetched_ranges, recommended_window)
-                    if len(ranges_to_fetch) > len(unfetched_ranges):
-                        click.echo()
-                        click.echo(
-                            f"    {click.style('Aggressive mode:', fg='cyan')} "
-                            f"{failure_count} failures → pre-splitting into {len(ranges_to_fetch)} chunks "
-                            f"(max {recommended_window.total_seconds() / 3600:.1f}h each)"
-                        )
-
-                # Process each unfetched range
-                all_dataframes = []
-                total_subdivisions_batch = 0
-                total_saved_incrementally = partial_spans  # Start with already-saved spans
-
-                # In aggressive mode, save each chunk immediately to prevent data loss
-                aggressive_mode = failure_count > 0 and len(ranges_to_fetch) > len(unfetched_ranges)
-
-                for chunk_idx, (range_start, range_end) in enumerate(ranges_to_fetch):
-                    logger.debug(f"Fetching range: {range_start.strftime('%Y-%m-%d %H:%M')} to {range_end.strftime('%Y-%m-%d %H:%M')}")
-                    # Fetch with auto-subdivision and incremental persistence
-                    # Pass context so sub-batches are saved immediately
                     dataframes, subdivisions, saved_incrementally = fetch_with_subdivision(
-                        client, range_start, range_end,
-                        store=store,
+                        client, b_start, b_end,
+                        store=source_store,
                         checkpoint_state=checkpoint_state,
-                        normalizer=None if skip_normalize else normalizer,
-                        backend_name=backend_name,
+                        normalizer_fn=normalizer_fn,
+                        backend_name=f"{source.name}-historical",
                         batch_key=batch_key,
                     )
-                    total_subdivisions_batch += subdivisions
-                    total_saved_incrementally += saved_incrementally
 
-                    # In aggressive mode, save each chunk's DataFrames immediately
-                    # This ensures we don't lose progress if a later chunk fails
-                    if aggressive_mode and dataframes:
-                        for df in dataframes:
+                    # Handle non-incrementally saved data
+                    if dataframes:
+                        combined_df = pd.concat(dataframes, ignore_index=True) if len(dataframes) > 1 else dataframes[0]
+                        batch_count = len(combined_df)
+
+                        if skip_normalize:
+                            source_store.append_spans(combined_df, backend=f"{source.name}-historical")
+                        else:
                             try:
-                                df_count = len(df)
-                                if skip_normalize:
-                                    store.append_spans(df, backend=backend_name)
-                                else:
-                                    try:
-                                        normalized = normalizer(df)
-                                        store.append_spans(normalized, backend=backend_name)
-                                    except Exception:
-                                        store.append_spans(df, backend=f"{backend_name}-raw")
-                                checkpoint_state.add_partial_range(batch_key, range_start, range_end, df_count)
-                                total_saved_incrementally += df_count
-                                click.echo(
-                                    f"    [chunk {chunk_idx + 1}/{len(ranges_to_fetch)}] "
-                                    f"{range_start.strftime('%H:%M')}-{range_end.strftime('%H:%M')}: "
-                                    + click.style(f"{df_count:,} spans saved", fg="green")
-                                )
-                            except Exception as save_err:
-                                click.echo(click.style(f"    WARN: failed to save chunk: {save_err}", fg="yellow"))
-                                all_dataframes.extend(dataframes)  # Keep for later attempt
-                    else:
-                        all_dataframes.extend(dataframes)
+                                normalized = normalizer_fn(combined_df)
+                                source_store.append_spans(normalized, backend=f"{source.name}-historical")
+                            except Exception:
+                                source_store.append_spans(combined_df, backend=f"{source.name}-historical-raw")
 
-                # Handle any remaining dataframes not saved incrementally (non-subdivided data)
-                if all_dataframes:
-                    if len(all_dataframes) == 1:
-                        combined_df = all_dataframes[0]
-                    else:
-                        combined_df = pd.concat(all_dataframes, ignore_index=True)
+                        saved_incrementally += batch_count
 
-                    batch_count = len(combined_df)
+                    checkpoint_state.clear_partial_ranges(batch_key)
+                    checkpoint_state.mark_batch_completed(b_start, b_end, saved_incrementally)
+                    source_spans += saved_incrementally
+                    completed += 1
 
-                    # Save results (only the non-incrementally-saved portion)
-                    if skip_normalize:
-                        store.append_spans(combined_df, backend=backend_name)
-                    else:
-                        try:
-                            normalized = normalizer(combined_df)
-                            store.append_spans(normalized, backend=backend_name)
-                        except Exception as e:
-                            click.echo(
-                                click.style(f" WARN: normalize failed, saving raw - {e}", fg="yellow")
-                            )
-                            store.append_spans(combined_df, backend=f"{backend_name}-raw")
+                    click.echo(click.style(f" {saved_incrementally:,} spans", fg="green"))
 
-                    total_saved_incrementally += batch_count
-
-                # Total spans for this batch (incremental + final)
-                batch_total = total_saved_incrementally
-                source_spans += batch_total - partial_spans  # Don't double-count partial_spans
-
-                # Fetch annotations for Phoenix (opt-in) - only for non-incrementally saved data
-                annotations_count = 0
-                if with_annotations and is_phoenix and all_dataframes:
-                    try:
-                        combined_for_annotations = pd.concat(all_dataframes, ignore_index=True) if len(all_dataframes) > 1 else all_dataframes[0]
-                        annotations_df = client.get_span_annotations_dataframe(
-                            spans_dataframe=combined_for_annotations,
-                        )
-                        if not annotations_df.empty:
-                            normalized_annotations = normalize_phoenix_annotations(annotations_df)
-                            store.append_spans(
-                                normalized_annotations,
-                                backend=f"{name}-historical-annotations",
-                            )
-                            annotations_count = len(annotations_df)
-                    except Exception as ann_err:
-                        click.echo(
-                            click.style(f" WARN: annotations fetch failed - {ann_err}", fg="yellow")
-                        )
-
-                # Clear partial ranges and mark batch as completed
-                checkpoint_state.clear_partial_ranges(batch_key)
-
-                # Show result
-                annotations_suffix = f", {annotations_count:,} annotations" if annotations_count > 0 else ""
-                if total_subdivisions_batch == 0 and partial_spans == 0:
-                    click.echo(click.style(f" {batch_total:,} spans{annotations_suffix}", fg="green"))
-                else:
-                    sub_count = total_subdivisions_batch + (1 if partial_spans > 0 else 0)
-                    click.echo(f"    Total: " + click.style(f"{batch_total:,} spans{annotations_suffix}", fg="green") +
-                              f" (from {sub_count + 1} sub-batches)")
-
-                # Mark batch as completed in checkpoint
-                checkpoint_state.mark_batch_completed(batch_start, batch_end, batch_total)
-                if total_subdivisions_batch > 0:
-                    for _ in range(total_subdivisions_batch):
-                        checkpoint_state.add_subdivision()
-
-                completed += 1
-                return True
-
-            except KeyboardInterrupt:
-                raise  # Re-raise to handle at outer level
-
-            except Exception as e:
-                error_str = str(e).lower()
-                partial_saved = checkpoint_state.get_partial_spans_count(batch_key)
-                if "rate" in error_str or "limit" in error_str or "exhausted" in error_str:
-                    click.echo(click.style(f" RATE LIMITED - will retry later", fg="yellow"))
-                    logger.warning(f"Batch {batch_key}: Rate limited, {partial_saved:,} spans saved before failure")
-                else:
+                except KeyboardInterrupt:
+                    raise
+                except Exception as e:
                     click.echo(click.style(f" FAILED: {e}", fg="red"))
-                    logger.error(f"Batch {batch_key}: Failed with error: {e}, {partial_saved:,} spans saved before failure", exc_info=True)
-                checkpoint_state.mark_batch_failed()
-                failed += 1
-                return False
-
-        # First pass: process all batches
-        try:
-            for i, (batch_start, batch_end) in enumerate(batches):
-                batch_num = i + 1
-
-                # Add delay between main batches (not on first batch)
-                if i > 0 and delay > 0:
-                    time.sleep(delay)
-
-                success = process_batch(batch_start, batch_end, batch_num, len(batches))
-                if not success:
-                    failed_batches.append((batch_start, batch_end))
+                    checkpoint_state.mark_batch_failed()
+                    failed += 1
+                    failed_batches.append((b_start, b_end))
 
         except KeyboardInterrupt:
             click.echo()
             click.echo(click.style("  Interrupted! Progress saved.", fg="yellow"))
-            click.echo(f"  Resume with: dal sync-historical --source {name}")
+            click.echo(f"  Resume with: dal sync --source {source.name}")
             raise SystemExit(130)
 
-        # Retry pass: retry failed batches with longer delay
+        # Retry failed batches
         if failed_batches:
             click.echo()
-            click.echo(click.style(f"  Retrying {len(failed_batches)} failed batches with 10s delay...", fg="cyan"))
-            retry_delay = max(delay * 5, 10.0)  # At least 10 seconds between retries
+            click.echo(click.style(f"  Retrying {len(failed_batches)} failed batches...", fg="cyan"))
+            retry_delay = max(effective_delay * 5, 10.0)
 
-            still_failed = []
-            try:
-                for i, (batch_start, batch_end) in enumerate(failed_batches):
-                    # Longer delay for retries
-                    if i > 0:
-                        time.sleep(retry_delay)
-                    else:
-                        time.sleep(retry_delay)  # Also wait before first retry
+            for i, (b_start, b_end) in enumerate(failed_batches):
+                time.sleep(retry_delay)
+                failed -= 1  # Pre-decrement since we're retrying
 
-                    # Decrement failed count since we're retrying
-                    failed -= 1
+                batch_key = b_start.strftime("%Y-%m-%d %H:%M:%S")
+                click.echo(f"  [retry] {b_start.strftime('%Y-%m-%d')} to {b_end.strftime('%Y-%m-%d')}", nl=False)
 
-                    success = process_batch(batch_start, batch_end, i + 1, len(failed_batches), is_retry=True)
-                    if not success:
-                        still_failed.append((batch_start, batch_end))
+                try:
+                    checkpoint_state.mark_batch_started(b_start, b_end)
+                    dataframes, _, saved = fetch_with_subdivision(
+                        client, b_start, b_end,
+                        store=source_store, checkpoint_state=checkpoint_state,
+                        normalizer_fn=normalizer_fn, backend_name=f"{source.name}-historical",
+                        batch_key=batch_key,
+                    )
 
-            except KeyboardInterrupt:
-                click.echo()
-                click.echo(click.style("  Interrupted during retry! Progress saved.", fg="yellow"))
-                click.echo(f"  Resume with: dal sync-historical --source {name}")
-                raise SystemExit(130)
+                    if dataframes:
+                        combined_df = pd.concat(dataframes, ignore_index=True) if len(dataframes) > 1 else dataframes[0]
+                        if skip_normalize:
+                            source_store.append_spans(combined_df, backend=f"{source.name}-historical")
+                        else:
+                            try:
+                                normalized = normalizer_fn(combined_df)
+                                source_store.append_spans(normalized, backend=f"{source.name}-historical")
+                            except Exception:
+                                source_store.append_spans(combined_df, backend=f"{source.name}-historical-raw")
+                        saved += len(combined_df)
 
-            if still_failed:
-                click.echo()
-                click.echo(click.style(f"  {len(still_failed)} batches still failed after retry:", fg="red"))
-                for batch_start, batch_end in still_failed[:5]:
-                    click.echo(f"    - {batch_start.strftime('%Y-%m-%d')} to {batch_end.strftime('%Y-%m-%d')}")
-                if len(still_failed) > 5:
-                    click.echo(f"    ... and {len(still_failed) - 5} more")
+                    checkpoint_state.clear_partial_ranges(batch_key)
+                    checkpoint_state.mark_batch_completed(b_start, b_end, saved)
+                    source_spans += saved
+                    completed += 1
+                    click.echo(click.style(f" {saved:,} spans", fg="green"))
 
-        # Retry pass for previously failed batches (from earlier runs)
-        if persisted_failed_ranges:
-            click.echo()
-            click.echo(click.style(f"  Retrying {len(persisted_failed_ranges)} previously failed batches...", fg="cyan"))
-            persisted_retry_delay = max(delay * 5, 10.0)  # At least 10 seconds between retries
-
-            persisted_still_failed = []
-            try:
-                for i, (batch_start, batch_end) in enumerate(persisted_failed_ranges):
-                    # Wait before each retry
-                    if i > 0:
-                        time.sleep(persisted_retry_delay)
-                    else:
-                        time.sleep(persisted_retry_delay)  # Also wait before first retry
-
-                    # Clear from failed_ranges to mark retry attempt
-                    checkpoint_state.clear_failed_range(batch_start, batch_end)
-
-                    success = process_batch(batch_start, batch_end, i + 1, len(persisted_failed_ranges), is_retry=True)
-                    if not success:
-                        persisted_still_failed.append((batch_start, batch_end))
-
-            except KeyboardInterrupt:
-                click.echo()
-                click.echo(click.style("  Interrupted during persisted retry! Progress saved.", fg="yellow"))
-                click.echo(f"  Resume with: dal sync-historical --source {name}")
-                raise SystemExit(130)
-
-            if persisted_still_failed:
-                click.echo()
-                click.echo(click.style(f"  {len(persisted_still_failed)} previously failed batches still failed:", fg="red"))
-                for batch_start, batch_end in persisted_still_failed[:5]:
-                    click.echo(f"    - {batch_start.strftime('%Y-%m-%d')} to {batch_end.strftime('%Y-%m-%d')}")
-                if len(persisted_still_failed) > 5:
-                    click.echo(f"    ... and {len(persisted_still_failed) - 5} more")
-            else:
-                click.echo(click.style(f"  All {len(persisted_failed_ranges)} previously failed batches recovered!", fg="green"))
+                except Exception as e:
+                    click.echo(click.style(f" FAILED: {e}", fg="red"))
+                    checkpoint_state.mark_batch_failed()
+                    failed += 1
 
         click.echo()
-        click.echo(f"  [{display_name}] Total: {source_spans:,} spans")
+        click.echo(f"  [{source.name}] Total: {source_spans:,} spans")
 
-        # Check if sync is complete
         if checkpoint_state.is_complete:
-            click.echo(click.style(f"  Historical sync complete for {name}!", fg="green"))
+            click.echo(click.style(f"  Sync complete for {source.name}!", fg="green"))
 
         return source_spans, completed, failed
 
-    # Process named sources
+    # Process each source
     for source in sources_to_sync:
-        # Create source-specific store
-        source_store = OxenStore.for_source(source.name)
-
-        # Set up environment and determine client/normalizer
-        sqlite_client = None  # Pre-created SQLite client if using SQLite mode
-
-        if source.source_type == SourceType.PHOENIX:
-            if source.url:
-                os.environ["DAL_PHOENIX_URL"] = source.url
-            if source.project:
-                os.environ["DAL_PHOENIX_PROJECT"] = source.project
-
-            # Use SQLite client if enabled
-            if use_sqlite and resolved_sqlite_container:
-                db_path = f"docker://{resolved_sqlite_container}:/root/.phoenix/phoenix.db"
-                sqlite_client = PhoenixSQLiteClient(
-                    db_path=db_path,
-                    project=source.project or os.getenv("DAL_PHOENIX_PROJECT", "dev-agent-lens"),
-                )
-                # Test connection before proceeding
-                try:
-                    if not sqlite_client.test_connection():
-                        click.echo(click.style(
-                            f"Error: Could not connect to Phoenix SQLite database in container '{resolved_sqlite_container}'",
-                            fg="red",
-                        ))
-                        raise SystemExit(1)
-                except Exception as e:
-                    click.echo(click.style(
-                        f"Error: SQLite connection test failed: {e}",
-                        fg="red",
-                    ))
-                    raise SystemExit(1)
-
-            client_class = PhoenixClient
-            normalizer = normalize_phoenix
-            is_phoenix = True
-        else:  # ARIZE
-            if source.space_key:
-                os.environ["ARIZE_SPACE_KEY"] = source.space_key
-            if source.model_id:
-                os.environ["ARIZE_MODEL_ID"] = source.model_id
-            client_class = ArizeClient
-            normalizer = normalize_arize
-            is_phoenix = False
-
-        spans, completed, failed = process_historical_sync(
-            source.name,
-            source.get_display_info(),
-            client_class,
-            normalizer,
-            source_store,
-            is_phoenix=is_phoenix,
-            sqlite_client=sqlite_client,
-        )
-        total_spans += spans
-        total_batches_completed += completed
-        total_batches_failed += failed
-        click.echo()
-
-    # Process legacy backends (backward compatibility)
-    if use_legacy_mode:
-        store = OxenStore()
-        for backend_id in backends_to_sync:
-            config = BACKENDS[backend_id]
-            spans, completed, failed = process_historical_sync(
-                backend_id,
-                config["name"],
-                config["client_class"],
-                config["normalizer"],
-                store,
-                is_phoenix=(backend_id == "phoenix-local"),
-            )
+        try:
+            spans, completed, failed = process_source_sync(source, sync_start_time, sync_end_time)
             total_spans += spans
             total_batches_completed += completed
             total_batches_failed += failed
-            if failed > 0:
-                all_errors.append(f"{backend_id}: {failed} batches failed")
-            click.echo()
+
+            if failed == 0:
+                synced_sources.append(source.name)
+
+        except Exception as e:
+            error_msg = f"[{source.name}] Error: {e}"
+            all_errors.append(error_msg)
+            click.echo(click.style(f"  [FAIL] {e}", fg="red"))
+
+        click.echo()
+
+    # Session unification (if not skipped and we had successful syncs)
+    if not skip_unify and synced_sources:
+        click.echo(click.style("Session Unification", bold=True))
+        for source_name_to_unify in synced_sources:
+            try:
+                click.echo(f"  Unifying sessions for {source_name_to_unify}...", nl=False)
+
+                # Get storage paths
+                from dev_agent_lens.storage import get_storage_path
+                from pathlib import Path
+                import json
+
+                storage_path = get_storage_path()
+                sessions_dir = Path(storage_path) / "sessions" / source_name_to_unify
+                raw_dir = Path(storage_path) / "raw" / source_name_to_unify
+
+                # Determine data source
+                sessions_exist = sessions_dir.exists() and any(sessions_dir.glob("sessions_*.jsonl"))
+                raw_exists = raw_dir.exists() and any(raw_dir.glob("sync_*.jsonl"))
+
+                if not sessions_exist and not raw_exists:
+                    click.echo(click.style(" no data found", fg="yellow"))
+                    continue
+
+                # Read spans
+                if sessions_exist:
+                    sessions_file = sessions_dir / "sessions_current.jsonl"
+                    if not sessions_file.exists():
+                        jsonl_files = list(sessions_dir.glob("sessions_*.jsonl"))
+                        if jsonl_files:
+                            sessions_file = max(jsonl_files, key=lambda f: f.stat().st_mtime)
+                        else:
+                            sessions_file = None
+
+                    if sessions_file:
+                        from dev_agent_lens.core.unify import read_sessions_file
+                        df = read_sessions_file(sessions_file)
+                        spans = df.to_dict(orient="records") if not df.empty else []
+                    else:
+                        spans = []
+                else:
+                    spans = []
+                    for raw_file in sorted(raw_dir.glob("sync_*.jsonl")):
+                        with open(raw_file) as f:
+                            for line in f:
+                                if line.strip():
+                                    try:
+                                        spans.append(json.loads(line))
+                                    except json.JSONDecodeError:
+                                        continue
+
+                if not spans:
+                    click.echo(click.style(" no spans to unify", fg="yellow"))
+                    continue
+
+                # Group by session
+                sessions = _group_by_session(spans)
+
+                # Write unified sessions
+                unified_dir = Path(storage_path) / "unified"
+                unified_dir.mkdir(parents=True, exist_ok=True)
+                out_file = unified_dir / f"{source_name_to_unify}_sessions.jsonl"
+
+                with open(out_file, "w") as f:
+                    for session in sessions:
+                        json.dump(session, f, default=str)
+                        f.write("\n")
+
+                total_session_spans = sum(s.get("span_count", 0) for s in sessions)
+                click.echo(click.style(f" {len(sessions):,} sessions ({total_session_spans:,} spans)", fg="green"))
+
+            except Exception as e:
+                click.echo(click.style(f" FAILED: {e}", fg="red"))
+                # Don't fail the whole sync if unification fails
+                click.echo(click.style(
+                    f"    Raw data was saved. Retry with: dal export-sessions --source {source_name_to_unify}",
+                    fg="yellow"
+                ))
+
+    # Update sync state
+    if not no_update_state and total_batches_completed > 0 and total_batches_failed == 0:
+        for source in sources_to_sync:
+            state.set_last_sync(source.name, sync_end_time)
+            click.echo(f"Updated sync state for '{source.name}' to {sync_end_time.strftime('%Y-%m-%d %H:%M')}")
+
+            # Clean up completed historical sync checkpoint if it exists
+            if use_checkpointing:
+                clear_historical_sync(source.name)
 
     # Final summary
     elapsed = time.time() - sync_start
+    click.echo()
     click.echo("=" * 50)
-    click.echo(click.style("Historical Sync Summary", bold=True))
+    click.echo(click.style("Sync Summary", bold=True))
     click.echo("=" * 50)
     click.echo(f"Total spans fetched: {total_spans:,}")
     click.echo(f"Batches completed: {total_batches_completed}")
@@ -1989,35 +1157,17 @@ def sync_historical(
     if all_errors:
         click.echo()
         click.echo(click.style("Errors:", fg="red"))
-        for error in all_errors[:10]:  # Show first 10 errors
+        for error in all_errors[:10]:
             click.echo(f"  - {error}")
         if len(all_errors) > 10:
             click.echo(f"  ... and {len(all_errors) - 10} more")
         raise SystemExit(1)
 
-    # Update sync state so dal sync picks up from here
-    # Only update if we had successful batches and no failures
-    if total_batches_completed > 0 and total_batches_failed == 0:
-        from dev_agent_lens.core.state import SyncState
-        state = SyncState()
-        sync_time = sync_end_time  # Use the end time of the sync, not current time
-
-        for source in sources_to_sync:
-            state.set_last_sync(source.name, sync_time)
-            click.echo(f"Updated sync state for '{source.name}' to {sync_time.strftime('%Y-%m-%d')}")
-            # Clean up completed historical sync checkpoint
-            clear_historical_sync(source.name)
-
-        for backend_id in backends_to_sync:
-            state.set_last_sync(backend_id, sync_time)
-            click.echo(f"Updated sync state for '{backend_id}' to {sync_time.strftime('%Y-%m-%d')}")
-            clear_historical_sync(backend_id)
-
-        click.echo()
-        click.echo("Future 'dal sync' commands will continue from this point.")
-
     click.echo()
-    click.echo(click.style("Historical sync complete!", fg="green"))
+    click.echo(click.style("Sync complete!", fg="green"))
+
+
+# End of sync command - sync-historical has been removed and unified into sync
 
 
 @main.group()
