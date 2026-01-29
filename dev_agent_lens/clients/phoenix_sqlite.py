@@ -381,13 +381,14 @@ conn.close()
         params: list[Any] = [self.project]
 
         # Add time filters
+        # SQLite stores dates with space separator (2026-01-27 00:00:00), not ISO format with T
         if start_time is not None:
             query += " AND s.start_time >= ?"
-            params.append(start_time.isoformat())
+            params.append(start_time.strftime("%Y-%m-%d %H:%M:%S"))
 
         if end_time is not None:
             query += " AND s.start_time < ?"
-            params.append(end_time.isoformat())
+            params.append(end_time.strftime("%Y-%m-%d %H:%M:%S"))
 
         # Add ordering
         query += " ORDER BY s.start_time ASC"
@@ -490,13 +491,14 @@ conn.close()
 
         params: list[Any] = [self.project]
 
+        # SQLite stores dates with space separator (2026-01-27 00:00:00), not ISO format with T
         if start_time is not None:
             query += " AND s.start_time >= ?"
-            params.append(start_time.isoformat())
+            params.append(start_time.strftime("%Y-%m-%d %H:%M:%S"))
 
         if end_time is not None:
             query += " AND s.start_time < ?"
-            params.append(end_time.isoformat())
+            params.append(end_time.strftime("%Y-%m-%d %H:%M:%S"))
 
         query += " ORDER BY s.start_time ASC"
 
