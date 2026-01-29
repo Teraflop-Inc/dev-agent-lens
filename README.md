@@ -186,14 +186,14 @@ Pull traces from Phoenix or Arize into local Parquet files for fast querying:
 dal config add-source my-phoenix --type phoenix \
     --url http://localhost:6006 --project default
 
-# Sync historical data
-dal sync-historical --source my-phoenix
+# Sync data (incremental by default, or use --start-date for historical)
+dal sync --source my-phoenix
 
 # Export to Parquet
 dal export-parquet --source my-phoenix
 ```
 
-Data is stored in `~/.dal/data/parquet/`. See [docs/sync-historical.md](docs/sync-historical.md) for details.
+Data is stored in `~/.dal/data/parquet/`. Run `dal sync --help` for all options.
 
 ### Querying Data
 
@@ -230,7 +230,7 @@ Claude Code ──► ~/.claude/projects/     (native sessions)
      │
      └──► LiteLLM Proxy ──► Phoenix/Arize
                                   │
-                   dal sync-historical
+                              dal sync
                                   ▼
                           ~/.dal/data/
                          (Parquet files)
@@ -248,6 +248,6 @@ Claude Code ──► ~/.claude/projects/     (native sessions)
 - [Session Storage](docs/claude_code_session_storage.md) - How Claude Code stores session data
 - [Markdown Format](docs/unified_markdown_format.md) - Unified markdown export specification
 - [Proxy Setup](docs/proxy-setup.md) - LiteLLM, Phoenix, Arize configuration
-- [Syncing Data](docs/sync-historical.md) - Historical sync from observability backends
+- [Syncing Data](docs/sync.md) - Sync from observability backends
 - [Querying Data](docs/querying.md) - CLI and Python query API
 - [SDK Examples](examples/README.md) - TypeScript and Python SDK integration
