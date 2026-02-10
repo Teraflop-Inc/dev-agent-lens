@@ -91,6 +91,7 @@ services:
     environment:
       - PHOENIX_PORT=6006
       - PHOENIX_HOST=0.0.0.0
+      - PHOENIX_WORKING_DIR=/mnt/data
     volumes:
       - phoenix_data:/mnt/data
     restart: unless-stopped
