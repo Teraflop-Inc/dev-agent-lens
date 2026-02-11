@@ -2,17 +2,56 @@
 # This allows Claude Code to select any model while maintaining observability
 
 model_list:
-  # Claude models with explicit provider prefix
+  # Explicit model entries for known models with provider specified
+  - model_name: "claude-opus-4-6"
+    litellm_params:
+      model: "claude-opus-4-6"
+      api_key: os.environ/ANTHROPIC_API_KEY
+      custom_llm_provider: "anthropic"
+
+  - model_name: "claude-sonnet-4-5"
+    litellm_params:
+      model: "claude-sonnet-4-5"
+      api_key: os.environ/ANTHROPIC_API_KEY
+      custom_llm_provider: "anthropic"
+
+  - model_name: "claude-haiku-4-5"
+    litellm_params:
+      model: "claude-haiku-4-5"
+      api_key: os.environ/ANTHROPIC_API_KEY
+      custom_llm_provider: "anthropic"
+
+  # Anthropic-prefixed models
   - model_name: "anthropic/*"
     litellm_params:
       model: "anthropic/*"
       api_key: os.environ/ANTHROPIC_API_KEY
 
-  # Route unprefixed claude-* models to Anthropic provider
+  # Claude with versions (covers claude-opus-*, claude-sonnet-*, etc.)
+  - model_name: "claude-opus-*"
+    litellm_params:
+      model: "claude-opus-*"
+      api_key: os.environ/ANTHROPIC_API_KEY
+      custom_llm_provider: "anthropic"
+
+  - model_name: "claude-sonnet-*"
+    litellm_params:
+      model: "claude-sonnet-*"
+      api_key: os.environ/ANTHROPIC_API_KEY
+      custom_llm_provider: "anthropic"
+
+  - model_name: "claude-haiku-*"
+    litellm_params:
+      model: "claude-haiku-*"
+      api_key: os.environ/ANTHROPIC_API_KEY
+      custom_llm_provider: "anthropic"
+
+  # Broad Claude catch-all
   - model_name: "claude-*"
     litellm_params:
-      model: "anthropic/claude-*"
+      model: "claude-*"
       api_key: os.environ/ANTHROPIC_API_KEY
+      custom_llm_provider: "anthropic"
 
 litellm_settings:
   # Enable Arize Phoenix callbacks for local observability
@@ -43,4 +82,3 @@ router_settings:
 environment_variables:
   PHOENIX_COLLECTOR_ENDPOINT: "http://phoenix:4317"
   PHOENIX_COLLECTOR_HTTP_ENDPOINT: "http://phoenix:6006/v1/traces"
-
