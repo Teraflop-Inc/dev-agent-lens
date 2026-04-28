@@ -189,6 +189,14 @@ def query_parquet(
     if not spans_path.exists():
         raise FileNotFoundError(f"Parquet file not found: {spans_path}")
 
+    # Determine read_parquet source — file or partitioned directory
+    if spans_path.is_dir():
+        # Partitioned layout: read all part files with Hive partitioning
+        read_source = f"{spans_path}/**/*.parquet', hive_partitioning=true, union_by_name=true"
+        read_parquet_expr = f"read_parquet('{read_source})"
+    else:
+        read_parquet_expr = f"read_parquet('{spans_path}')"
+
     # Build query params for result
     query_params = {
         "pattern": pattern,
@@ -243,7 +251,7 @@ def query_parquet(
 
     sql = f"""
         SELECT {select_sql}
-        FROM read_parquet('{spans_path}')
+        FROM {read_parquet_expr}
         {where_clause}
         ORDER BY session_id, start_time
         {limit_clause}
@@ -518,6 +526,10 @@ def find_parquet_files(
     """
     Find available Parquet files for sources.
 
+    Supports both partitioned layout (Hive-style) and legacy flat layout:
+    - Partitioned: spans/source=<name>/week=*/part-*.parquet
+    - Legacy: <name>_spans.parquet
+
     Args:
         source: Optional source name to filter to
         data_path: Base data path (defaults to ~/.dal/data)
@@ -527,7 +539,8 @@ def find_parquet_files(
         {
             "phoenix-alex": {
                 "sessions": Path("...sessions.parquet"),
-                "spans": Path("...spans.parquet"),
+                "spans": Path("...spans.parquet"),  # or glob pattern for partitioned
+                "partitioned": True/False,
             },
             ...
         }
@@ -544,16 +557,39 @@ def find_parquet_files(
 
     sources = {}
 
+    # Check for partitioned layout first (spans/source=<name>/)
+    spans_dir = parquet_dir / "spans"
+    if spans_dir.exists():
+        for source_dir in spans_dir.iterdir():
+            if not source_dir.is_dir() or not source_dir.name.startswith("source="):
+                continue
+            source_name = source_dir.name.replace("source=", "")
+            if source is not None and source_name != source:
+                continue
+
+            # Partitioned sessions: sessions/source=<name>.parquet
+            sessions_file = parquet_dir / "sessions" / f"source={source_name}.parquet"
+
+            sources[source_name] = {
+                "spans": source_dir,  # Directory, not file
+                "sessions": sessions_file if sessions_file.exists() else None,
+                "partitioned": True,
+            }
+
+    # Fall back to legacy flat layout
     for file in parquet_dir.glob("*_spans.parquet"):
         source_name = file.stem.replace("_spans", "")
         if source is not None and source_name != source:
             continue
+        if source_name in sources:
+            continue  # Partitioned version takes precedence
 
         sessions_file = parquet_dir / f"{source_name}_sessions.parquet"
 
         sources[source_name] = {
             "spans": file,
             "sessions": sessions_file if sessions_file.exists() else None,
+            "partitioned": False,
         }
 
     return sources

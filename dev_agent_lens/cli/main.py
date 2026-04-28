@@ -3891,22 +3891,26 @@ def config_oxen(remote: str):
     is_flag=True,
     help="Keep null/empty values in raw_attributes",
 )
+@click.option(
+    "--partitioned/--no-partitioned",
+    default=True,
+    help="Write Hive-style partitioned output (default: partitioned)",
+)
 def export_parquet(
     source_name: str,
     output_dir: str | None,
     compression: str,
     no_dedupe: bool,
     no_strip_nulls: bool,
+    partitioned: bool,
 ) -> None:
     """Export unified sessions to Parquet format.
 
-    Exports session data to efficient columnar Parquet format with built-in
-    compression. Creates two files:
-    - {source}_sessions.parquet: Session-level aggregates
-    - {source}_spans.parquet: Individual spans with session FK
+    By default, exports to a partitioned Hive-style layout:
+    - spans/source=<name>/week=<YYYY-WNN>/part-NNNNN.parquet
+    - sessions/source=<name>.parquet
 
-    By default, deduplicates and strips null values from raw_attributes
-    to minimize file size (typically 80-90% smaller than JSONL).
+    Use --no-partitioned for legacy single-file output.
 
     Examples:
 
@@ -3914,7 +3918,7 @@ def export_parquet(
 
         dal export-parquet --source arize-ax-alex --compression snappy
 
-        dal export-parquet --source phoenix-local-alex --no-dedupe
+        dal export-parquet --source phoenix-local-alex --no-partitioned
     """
     from pathlib import Path
 
@@ -3948,11 +3952,11 @@ def export_parquet(
     click.echo(f"Input: {input_file} ({input_size / 1024 / 1024:.1f} MB)")
     click.echo(f"Output: {out_dir}")
     click.echo(f"Compression: {compression}")
+    click.echo(f"Partitioned: {'yes' if partitioned else 'no'}")
     click.echo(f"Dedupe: {'no' if no_dedupe else 'yes'}")
     click.echo(f"Strip nulls: {'no' if no_strip_nulls else 'yes'}")
     click.echo()
 
-    # Export
     exporter = ParquetExporter(
         compression=compression,
         dedupe=not no_dedupe,
@@ -3964,12 +3968,20 @@ def export_parquet(
             click.echo(f"  Processed {n:,} sessions...")
 
     click.echo("Exporting to Parquet...")
-    stats = exporter.export_source(
-        source=source_name,
-        input_path=input_file,
-        output_dir=out_dir,
-        progress_callback=progress,
-    )
+    if partitioned:
+        stats = exporter.export_source_partitioned(
+            source=source_name,
+            input_path=input_file,
+            output_dir=out_dir,
+            progress_callback=progress,
+        )
+    else:
+        stats = exporter.export_source(
+            source=source_name,
+            input_path=input_file,
+            output_dir=out_dir,
+            progress_callback=progress,
+        )
 
     click.echo()
     click.echo(click.style("Export complete!", fg="green", bold=True))
@@ -3981,10 +3993,18 @@ def export_parquet(
         f"  Savings: {stats['savings_bytes'] / 1024 / 1024:.1f} MB "
         f"({stats['savings_percent']:.1f}%)"
     )
-    click.echo()
-    click.echo("Output files:")
-    click.echo(f"  {stats['sessions_path']}")
-    click.echo(f"  {stats['spans_path']}")
+    if partitioned:
+        click.echo(f"  Part files: {stats.get('part_files', 'N/A')}")
+        click.echo(f"  Weeks: {stats.get('weeks', 'N/A')}")
+        click.echo()
+        click.echo("Output:")
+        click.echo(f"  Sessions: {stats['sessions_path']}")
+        click.echo(f"  Spans: {stats['spans_dir']}/")
+    else:
+        click.echo()
+        click.echo("Output files:")
+        click.echo(f"  {stats['sessions_path']}")
+        click.echo(f"  {stats['spans_path']}")
 
 
 @main.command("export-events")
