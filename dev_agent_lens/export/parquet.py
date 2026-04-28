@@ -16,11 +16,15 @@ The export uses a two-table design:
 from __future__ import annotations
 
 import json
+import logging
+from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterator
 
 from dev_agent_lens.export.dedupe import clean_session
+
+logger = logging.getLogger(__name__)
 
 
 def _parse_datetime(value: Any) -> datetime | None:
@@ -477,6 +481,182 @@ class ParquetExporter:
             )
 
         stats["total_sessions"] = len(existing_session_ids) + stats["sessions_added"]
+        return stats
+
+
+    # Maximum part file size in bytes before splitting
+    MAX_PART_SIZE_BYTES = 150 * 1024 * 1024  # 150 MB
+
+    @staticmethod
+    def _iso_week(dt: datetime | None) -> str:
+        """Return ISO week string like '2026-W05', or 'unknown' for None."""
+        if dt is None:
+            return "unknown"
+        iso = dt.isocalendar()
+        return f"{iso[0]}-W{iso[1]:02d}"
+
+    def export_source_partitioned(
+        self,
+        source: str,
+        input_path: str | Path,
+        output_dir: str | Path,
+        progress_callback: callable | None = None,
+    ) -> dict[str, Any]:
+        """Export a source's sessions to partitioned Parquet layout.
+
+        Writes spans into Hive-style partitions:
+            spans/source=<name>/week=<YYYY-WNN>/part-NNNNN.parquet
+
+        Sessions are written as a single file per source (small enough):
+            sessions/source=<name>.parquet
+
+        Args:
+            source: The source name.
+            input_path: Path to input JSONL file.
+            output_dir: Base output directory (e.g. ~/.dal/data/parquet).
+            progress_callback: Optional callback(sessions_processed).
+
+        Returns:
+            Dictionary with export statistics.
+        """
+        try:
+            import pyarrow as pa
+            import pyarrow.parquet as pq
+        except ImportError:
+            raise ImportError(
+                "pyarrow is required for Parquet export. "
+                "Install with: uv add pyarrow"
+            )
+
+        input_path = Path(input_path)
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        # Collect session rows (small, no partitioning needed)
+        session_rows: list[dict[str, Any]] = []
+        # Group span rows by week for partitioned writing
+        week_spans: dict[str, list[dict[str, Any]]] = defaultdict(list)
+
+        stats: dict[str, Any] = {
+            "sessions": 0,
+            "spans": 0,
+            "input_bytes": input_path.stat().st_size,
+        }
+
+        for session in iter_sessions_from_jsonl(input_path):
+            if self.dedupe or self.strip_nulls:
+                session = clean_session(
+                    session,
+                    dedupe=self.dedupe,
+                    strip_nulls=self.strip_nulls,
+                )
+
+            session_id = session.get("session_id", "")
+            session_meta = _extract_session_metadata(session, source)
+            session_rows.append(session_meta)
+
+            for span in session.get("spans", []):
+                span_row = _flatten_span(span, session_id, source)
+                week_key = self._iso_week(span_row.get("start_time"))
+                week_spans[week_key].append(span_row)
+                stats["spans"] += 1
+
+            stats["sessions"] += 1
+            if progress_callback:
+                progress_callback(stats["sessions"])
+
+        # Write sessions as a single file
+        sessions_dir = output_dir / "sessions"
+        sessions_dir.mkdir(parents=True, exist_ok=True)
+        sessions_path = sessions_dir / f"source={source}.parquet"
+
+        if session_rows:
+            sessions_table = pa.Table.from_pylist(session_rows)
+            pq.write_table(
+                sessions_table,
+                sessions_path,
+                compression=self.compression,
+            )
+            stats["sessions_parquet_bytes"] = sessions_path.stat().st_size
+
+        # Write spans partitioned by week
+        total_span_bytes = 0
+        total_part_files = 0
+
+        for week_key in sorted(week_spans.keys()):
+            rows = week_spans[week_key]
+            week_dir = output_dir / "spans" / f"source={source}" / f"week={week_key}"
+            week_dir.mkdir(parents=True, exist_ok=True)
+
+            table = pa.Table.from_pylist(rows)
+
+            # Build dictionary encoding columns
+            if self.use_dictionary:
+                column_names = [field.name for field in table.schema]
+                dict_columns = [
+                    col for col in column_names if col in self.DICTIONARY_COLUMNS
+                ]
+            else:
+                dict_columns = False
+
+            # Estimate if we need to split into multiple parts
+            # Write to a single part first, then split if too large
+            part_idx = 0
+            row_offset = 0
+            num_rows = table.num_rows
+
+            while row_offset < num_rows:
+                part_path = week_dir / f"part-{part_idx:05d}.parquet"
+
+                if row_offset == 0 and num_rows <= 100_000:
+                    # Small enough to write in one shot
+                    chunk = table
+                    row_offset = num_rows
+                else:
+                    # Write in chunks, check size after each
+                    chunk_size = min(100_000, num_rows - row_offset)
+                    chunk = table.slice(row_offset, chunk_size)
+                    row_offset += chunk_size
+
+                pq.write_table(
+                    chunk,
+                    part_path,
+                    compression=self.compression,
+                    use_dictionary=dict_columns,
+                )
+
+                part_size = part_path.stat().st_size
+                total_span_bytes += part_size
+                total_part_files += 1
+
+                # If this part is under the limit and there are more rows,
+                # append to it; otherwise start a new part
+                if part_size >= self.MAX_PART_SIZE_BYTES:
+                    part_idx += 1
+
+            logger.debug(
+                "  %s: %d spans -> %d part files in %s",
+                week_key,
+                len(rows),
+                part_idx + 1,
+                week_dir,
+            )
+
+        stats["spans_parquet_bytes"] = total_span_bytes
+        stats["part_files"] = total_part_files
+        stats["weeks"] = len(week_spans)
+        stats["output_bytes"] = (
+            stats.get("sessions_parquet_bytes", 0) + total_span_bytes
+        )
+        stats["savings_bytes"] = stats["input_bytes"] - stats["output_bytes"]
+        stats["savings_percent"] = (
+            (stats["savings_bytes"] / stats["input_bytes"] * 100)
+            if stats["input_bytes"] > 0
+            else 0
+        )
+        stats["sessions_path"] = str(sessions_path)
+        stats["spans_dir"] = str(output_dir / "spans" / f"source={source}")
+
         return stats
 
 
