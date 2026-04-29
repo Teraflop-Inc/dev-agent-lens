@@ -565,28 +565,86 @@ class ParquetExporter:
             if progress_callback:
                 progress_callback(stats["sessions"])
 
-        # Write sessions as a single file
+        # Write sessions as a single file (with dedup against existing)
         sessions_dir = output_dir / "sessions"
         sessions_dir.mkdir(parents=True, exist_ok=True)
         sessions_path = sessions_dir / f"source={source}.parquet"
 
         if session_rows:
-            sessions_table = pa.Table.from_pylist(session_rows)
+            new_sessions_table = pa.Table.from_pylist(session_rows)
+
+            if sessions_path.exists():
+                existing_sessions = pq.read_table(sessions_path)
+                existing_ids = set(
+                    existing_sessions.column("session_id").to_pylist()
+                )
+                # Filter to only new sessions
+                new_ids = [
+                    r["session_id"] for r in session_rows
+                    if r["session_id"] not in existing_ids
+                ]
+                if new_ids:
+                    mask = [
+                        r["session_id"] not in existing_ids
+                        for r in session_rows
+                    ]
+                    filtered = pa.Table.from_pylist(
+                        [r for r, m in zip(session_rows, mask) if m]
+                    )
+                    new_sessions_table = pa.concat_tables(
+                        [existing_sessions, filtered],
+                        promote_options="permissive",
+                    )
+                else:
+                    new_sessions_table = existing_sessions
+
             pq.write_table(
-                sessions_table,
+                new_sessions_table,
                 sessions_path,
                 compression=self.compression,
             )
             stats["sessions_parquet_bytes"] = sessions_path.stat().st_size
 
-        # Write spans partitioned by week
+        # Write spans partitioned by week, with dedup against existing parts
         total_span_bytes = 0
         total_part_files = 0
+        stats["spans_skipped"] = 0
 
         for week_key in sorted(week_spans.keys()):
             rows = week_spans[week_key]
             week_dir = output_dir / "spans" / f"source={source}" / f"week={week_key}"
             week_dir.mkdir(parents=True, exist_ok=True)
+
+            # Check for existing part files and collect their span_ids
+            existing_parts = sorted(week_dir.glob("part-*.parquet"))
+            existing_span_ids: set[str] = set()
+            last_part_size = 0
+
+            for ep in existing_parts:
+                pf = pq.ParquetFile(ep)
+                for rg_idx in range(pf.metadata.num_row_groups):
+                    rg = pf.read_row_group(rg_idx, columns=["span_id"])
+                    existing_span_ids.update(rg.column("span_id").to_pylist())
+                last_part_size = ep.stat().st_size
+
+            # Filter out spans that already exist
+            if existing_span_ids:
+                original_count = len(rows)
+                rows = [r for r in rows if r.get("span_id") not in existing_span_ids]
+                skipped = original_count - len(rows)
+                stats["spans_skipped"] += skipped
+                if skipped:
+                    logger.debug(
+                        "  %s: skipped %d existing spans, %d new",
+                        week_key, skipped, len(rows),
+                    )
+
+            if not rows:
+                # All spans already exist, count existing files in totals
+                for ep in existing_parts:
+                    total_span_bytes += ep.stat().st_size
+                    total_part_files += 1
+                continue
 
             table = pa.Table.from_pylist(rows)
 
@@ -599,9 +657,35 @@ class ParquetExporter:
             else:
                 dict_columns = False
 
-            # Estimate if we need to split into multiple parts
-            # Write to a single part first, then split if too large
-            part_idx = 0
+            # Determine starting part index (append after existing parts)
+            if existing_parts:
+                # Find the last part index
+                last_part_name = existing_parts[-1].stem  # e.g. "part-00003"
+                last_part_idx = int(last_part_name.split("-")[1])
+                # Append to last part if under size limit, else start new
+                if last_part_size < self.MAX_PART_SIZE_BYTES:
+                    # Read existing last part, append new rows, rewrite
+                    last_pf = pq.ParquetFile(existing_parts[-1])
+                    last_part_table = last_pf.read().cast(table.schema)
+                    table = pa.concat_tables(
+                        [last_part_table, table],
+                        promote_options="permissive",
+                    )
+                    part_idx = last_part_idx
+                    # Don't count existing parts except the one we're rewriting
+                    for ep in existing_parts[:-1]:
+                        total_span_bytes += ep.stat().st_size
+                        total_part_files += 1
+                else:
+                    part_idx = last_part_idx + 1
+                    # Count all existing parts
+                    for ep in existing_parts:
+                        total_span_bytes += ep.stat().st_size
+                        total_part_files += 1
+            else:
+                part_idx = 0
+
+            # Write part files
             row_offset = 0
             num_rows = table.num_rows
 
@@ -609,11 +693,9 @@ class ParquetExporter:
                 part_path = week_dir / f"part-{part_idx:05d}.parquet"
 
                 if row_offset == 0 and num_rows <= 100_000:
-                    # Small enough to write in one shot
                     chunk = table
                     row_offset = num_rows
                 else:
-                    # Write in chunks, check size after each
                     chunk_size = min(100_000, num_rows - row_offset)
                     chunk = table.slice(row_offset, chunk_size)
                     row_offset += chunk_size
@@ -629,16 +711,13 @@ class ParquetExporter:
                 total_span_bytes += part_size
                 total_part_files += 1
 
-                # If this part is under the limit and there are more rows,
-                # append to it; otherwise start a new part
                 if part_size >= self.MAX_PART_SIZE_BYTES:
                     part_idx += 1
 
             logger.debug(
-                "  %s: %d spans -> %d part files in %s",
+                "  %s: %d new spans -> part files in %s",
                 week_key,
                 len(rows),
-                part_idx + 1,
                 week_dir,
             )
 
