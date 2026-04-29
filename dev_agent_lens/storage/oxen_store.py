@@ -453,15 +453,31 @@ class OxenStore:
                     repo.add(str(self._unified_base.relative_to(self._data_path)))
                     files_added = True
 
-            # Add parquet files
+            # Add parquet files (supports both legacy flat and partitioned layout)
             if include_parquet and parquet_dir.exists() and any(parquet_dir.iterdir()):
                 if sources:
-                    # Add only matching source files
                     for source in sources:
+                        # Legacy flat files: {source}_spans.parquet, {source}_sessions.parquet
                         for pattern in [f"{source}_*.parquet", f"{source}.parquet"]:
                             for f in parquet_dir.glob(pattern):
                                 repo.add(str(f.relative_to(self._data_path)))
                                 files_added = True
+                        # Partitioned spans: spans/source={source}/week=*/part-*.parquet
+                        spans_source_dir = parquet_dir / "spans" / f"source={source}"
+                        if spans_source_dir.exists():
+                            for f in spans_source_dir.rglob("*.parquet"):
+                                repo.add(str(f.relative_to(self._data_path)))
+                                files_added = True
+                        # Partitioned sessions: sessions/source={source}.parquet
+                        sessions_file = parquet_dir / "sessions" / f"source={source}.parquet"
+                        if sessions_file.exists():
+                            repo.add(str(sessions_file.relative_to(self._data_path)))
+                            files_added = True
+                        # Partitioned events: events/source={source}.parquet
+                        events_file = parquet_dir / "events" / f"source={source}.parquet"
+                        if events_file.exists():
+                            repo.add(str(events_file.relative_to(self._data_path)))
+                            files_added = True
                 else:
                     # Add entire parquet directory
                     repo.add("parquet")
