@@ -3517,23 +3517,104 @@ def export_sessions(source_name: str, output_path: str | None, update: bool) -> 
         if update:
             click.echo(click.style("No existing export found, doing full export.", fg="yellow"))
 
+        sessions = None  # Set by chunked path, or by _group_by_session below
+
         if use_raw:
-            # Read from raw files
+            # Read from raw files in chunks to avoid OOM on large datasets
             click.echo(click.style("Using raw sync files (no session files found)", fg="cyan"))
             raw_files = sorted(raw_dir.glob("sync_*.jsonl"))
             click.echo(f"Found {len(raw_files)} raw files in {raw_dir}")
 
-            spans = []
-            for raw_file in raw_files:
-                click.echo(f"  Reading {raw_file.name}...")
-                with open(raw_file) as f:
-                    for line in f:
-                        if line.strip():
-                            try:
-                                spans.append(json.loads(line))
-                            except json.JSONDecodeError:
-                                continue
-            click.echo(f"Loaded {len(spans):,} spans from raw files")
+            RAW_CHUNK_SIZE = 50  # files per chunk
+            total_raw_size = sum(f.stat().st_size for f in raw_files)
+            use_chunked = total_raw_size > 2 * 1024 * 1024 * 1024  # >2GB
+
+            if use_chunked:
+                click.echo(click.style(
+                    f"Large dataset ({total_raw_size / 1024**3:.1f} GB) — using chunked processing",
+                    fg="cyan",
+                ))
+                import tempfile
+
+                # Process in chunks, write temp unified JSONL per chunk
+                temp_dir = Path(tempfile.mkdtemp(prefix="dal_export_"))
+                all_sessions = []
+                total_spans_loaded = 0
+
+                for chunk_idx in range(0, len(raw_files), RAW_CHUNK_SIZE):
+                    chunk_files = raw_files[chunk_idx:chunk_idx + RAW_CHUNK_SIZE]
+                    chunk_num = chunk_idx // RAW_CHUNK_SIZE + 1
+                    total_chunks = (len(raw_files) + RAW_CHUNK_SIZE - 1) // RAW_CHUNK_SIZE
+                    click.echo(f"  Chunk {chunk_num}/{total_chunks}: {len(chunk_files)} files...")
+
+                    chunk_spans = []
+                    for raw_file in chunk_files:
+                        with open(raw_file) as f:
+                            for line in f:
+                                if line.strip():
+                                    try:
+                                        chunk_spans.append(json.loads(line))
+                                    except json.JSONDecodeError:
+                                        continue
+
+                    if chunk_spans:
+                        chunk_sessions = _group_by_session(chunk_spans)
+                        all_sessions.extend(chunk_sessions)
+                        total_spans_loaded += len(chunk_spans)
+                        click.echo(f"    {len(chunk_spans):,} spans -> {len(chunk_sessions):,} sessions")
+                        del chunk_spans  # Free memory
+
+                click.echo(f"Loaded {total_spans_loaded:,} spans -> {len(all_sessions):,} session chunks")
+
+                # Merge sessions with the same session_id across chunks
+                click.echo("Merging sessions across chunks...")
+                merged_map: dict[str | None, dict] = {}
+                for session in all_sessions:
+                    sid = session.get("session_id")
+                    if sid in merged_map:
+                        # Append spans, dedup by span_id
+                        existing_span_ids = {
+                            s.get("span_id") for s in merged_map[sid].get("spans", [])
+                        }
+                        new_spans = [
+                            s for s in session.get("spans", [])
+                            if s.get("span_id") not in existing_span_ids
+                        ]
+                        merged_map[sid]["spans"].extend(new_spans)
+                        merged_map[sid]["span_count"] = len(merged_map[sid]["spans"])
+                    else:
+                        merged_map[sid] = session
+                del all_sessions
+
+                sessions = list(merged_map.values())
+                del merged_map
+
+                # Sort spans within each session
+                for session in sessions:
+                    session["spans"].sort(key=lambda s: s.get("start_time") or "")
+                    start_times = [s.get("start_time") for s in session["spans"] if s.get("start_time")]
+                    end_times = [s.get("end_time") for s in session["spans"] if s.get("end_time")]
+                    session["start_time"] = min(start_times) if start_times else None
+                    session["end_time"] = max(end_times) if end_times else None
+
+                sessions.sort(key=lambda s: s.get("end_time") or s.get("start_time") or "", reverse=True)
+                click.echo(f"Merged to {len(sessions):,} unique sessions")
+
+                # Clean up temp dir
+                import shutil
+                shutil.rmtree(temp_dir, ignore_errors=True)
+            else:
+                spans = []
+                for raw_file in raw_files:
+                    click.echo(f"  Reading {raw_file.name}...")
+                    with open(raw_file) as f:
+                        for line in f:
+                            if line.strip():
+                                try:
+                                    spans.append(json.loads(line))
+                                except json.JSONDecodeError:
+                                    continue
+                click.echo(f"Loaded {len(spans):,} spans from raw files")
         else:
             # Find sessions file
             sessions_file = sessions_dir / "sessions_current.jsonl"
@@ -3556,10 +3637,11 @@ def export_sessions(source_name: str, output_path: str | None, update: bool) -> 
             spans = df.to_dict(orient="records")
             click.echo(f"Loaded {len(spans):,} spans")
 
-        # Group by session
-        click.echo("Grouping spans by session...")
-        sessions = _group_by_session(spans)
-        click.echo(f"Found {len(sessions):,} sessions")
+        # Group by session (chunked raw path already produces sessions)
+        if sessions is None:
+            click.echo("Grouping spans by session...")
+            sessions = _group_by_session(spans)
+            click.echo(f"Found {len(sessions):,} sessions")
 
         # Write unified sessions
         out_file.parent.mkdir(parents=True, exist_ok=True)
