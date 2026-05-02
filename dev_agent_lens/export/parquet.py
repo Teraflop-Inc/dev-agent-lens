@@ -911,8 +911,20 @@ class ParquetExporter:
                 if part_path.exists() and part_path.stat().st_size < self.MAX_PART_SIZE_BYTES:
                     existing_pf = pq.ParquetFile(part_path)
                     existing_table = existing_pf.read()
-                    # Unify schemas: use the existing file's schema as the
-                    # target since it has concrete types for nullable columns
+                    # Normalize timestamp columns to tz-naive to avoid
+                    # "Cannot merge timestamp with timezone and without" errors
+                    for col_name in ["start_time", "end_time"]:
+                        for tbl_ref in ("existing_table", "table"):
+                            tbl = existing_table if tbl_ref == "existing_table" else table
+                            if col_name in tbl.schema.names:
+                                col_type = tbl.schema.field(col_name).type
+                                if hasattr(col_type, "tz") and col_type.tz is not None:
+                                    idx = tbl.schema.get_field_index(col_name)
+                                    col = tbl.column(col_name).cast(pa.timestamp("us"))
+                                    if tbl_ref == "existing_table":
+                                        existing_table = existing_table.set_column(idx, col_name, col)
+                                    else:
+                                        table = table.set_column(idx, col_name, col)
                     table = pa.concat_tables(
                         [existing_table, table], promote_options="permissive",
                     )
