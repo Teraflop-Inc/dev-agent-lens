@@ -910,7 +910,9 @@ class ParquetExporter:
                 # If appending to existing part, read and concat
                 if part_path.exists() and part_path.stat().st_size < self.MAX_PART_SIZE_BYTES:
                     existing_pf = pq.ParquetFile(part_path)
-                    existing_table = existing_pf.read().cast(table.schema)
+                    existing_table = existing_pf.read()
+                    # Unify schemas: use the existing file's schema as the
+                    # target since it has concrete types for nullable columns
                     table = pa.concat_tables(
                         [existing_table, table], promote_options="permissive",
                     )
