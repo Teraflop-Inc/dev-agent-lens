@@ -739,6 +739,241 @@ class ParquetExporter:
         return stats
 
 
+    def export_raw_to_partitioned(
+        self,
+        source: str,
+        raw_dir: str | Path,
+        output_dir: str | Path,
+        chunk_size: int = 50,
+        progress_callback: callable | None = None,
+    ) -> dict[str, Any]:
+        """Export raw sync files directly to partitioned Parquet.
+
+        Skips the unified JSONL intermediate step. Processes raw files in
+        chunks, groups by session, flattens spans, and writes directly to
+        partitioned parquet with span_id dedup against existing parts.
+
+        Args:
+            source: The source name.
+            raw_dir: Directory containing raw sync JSONL files.
+            output_dir: Base output directory for partitioned parquet.
+            chunk_size: Number of raw files to process per chunk.
+            progress_callback: Optional callback(chunk_number, total_chunks).
+
+        Returns:
+            Dictionary with export statistics.
+        """
+        try:
+            import pyarrow as pa
+            import pyarrow.parquet as pq
+        except ImportError:
+            raise ImportError(
+                "pyarrow is required for Parquet export. "
+                "Install with: uv add pyarrow"
+            )
+
+        raw_dir = Path(raw_dir)
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        raw_files = sorted(raw_dir.glob("sync_*.jsonl")) + sorted(raw_dir.glob("sync_gap_*.jsonl"))
+        if not raw_files:
+            return {"sessions": 0, "spans": 0, "spans_skipped": 0, "part_files": 0, "weeks": 0}
+
+        total_chunks = (len(raw_files) + chunk_size - 1) // chunk_size
+        input_bytes = sum(f.stat().st_size for f in raw_files)
+
+        # Load existing span_ids from parquet once (for dedup)
+        spans_base = output_dir / "spans" / f"source={source}"
+        existing_span_ids: set[str] = set()
+        if spans_base.exists():
+            for part_file in spans_base.rglob("part-*.parquet"):
+                pf = pq.ParquetFile(part_file)
+                for rg_idx in range(pf.metadata.num_row_groups):
+                    rg = pf.read_row_group(rg_idx, columns=["span_id"])
+                    existing_span_ids.update(rg.column("span_id").to_pylist())
+            logger.info("Loaded %d existing span_ids for dedup", len(existing_span_ids))
+
+        # Track sessions across chunks (only metadata, not full spans)
+        all_session_ids: set[str] = set()
+        # Session metadata rows (small — one row per session)
+        session_rows: list[dict[str, Any]] = []
+
+        stats: dict[str, Any] = {
+            "sessions": 0,
+            "spans": 0,
+            "spans_skipped": 0,
+            "input_bytes": input_bytes,
+        }
+
+        # Per-week writers that persist across chunks
+        week_writers: dict[str, tuple[pq.ParquetWriter, Path, int]] = {}
+        week_part_idx: dict[str, int] = {}
+
+        # Initialize part indices from existing files
+        if spans_base.exists():
+            for week_dir in spans_base.iterdir():
+                if not week_dir.is_dir():
+                    continue
+                week_key = week_dir.name.replace("week=", "")
+                parts = sorted(week_dir.glob("part-*.parquet"))
+                if parts:
+                    last_idx = int(parts[-1].stem.split("-")[1])
+                    last_size = parts[-1].stat().st_size
+                    if last_size < self.MAX_PART_SIZE_BYTES:
+                        week_part_idx[week_key] = last_idx  # Will append to this
+                    else:
+                        week_part_idx[week_key] = last_idx + 1
+
+        for chunk_idx in range(0, len(raw_files), chunk_size):
+            chunk_files = raw_files[chunk_idx:chunk_idx + chunk_size]
+            chunk_num = chunk_idx // chunk_size + 1
+
+            if progress_callback:
+                progress_callback(chunk_num, total_chunks)
+
+            # Read raw spans from this chunk
+            chunk_spans = []
+            for raw_file in chunk_files:
+                with open(raw_file) as f:
+                    for line in f:
+                        if line.strip():
+                            try:
+                                chunk_spans.append(json.loads(line))
+                            except json.JSONDecodeError:
+                                continue
+
+            if not chunk_spans:
+                continue
+
+            # Import session grouping
+            from dev_agent_lens.query.query import _group_by_session
+            chunk_sessions = _group_by_session(chunk_spans)
+            del chunk_spans
+
+            # Process each session: extract metadata, flatten + dedup spans
+            week_rows: dict[str, list[dict[str, Any]]] = defaultdict(list)
+
+            for session in chunk_sessions:
+                session_id = session.get("session_id", "")
+
+                # Collect session metadata (only if new)
+                if session_id not in all_session_ids:
+                    all_session_ids.add(session_id)
+                    if self.dedupe or self.strip_nulls:
+                        session = clean_session(
+                            session, dedupe=self.dedupe, strip_nulls=self.strip_nulls,
+                        )
+                    session_rows.append(_extract_session_metadata(session, source))
+                    stats["sessions"] += 1
+
+                # Flatten spans, dedup, group by week
+                for span in session.get("spans", []):
+                    span_id = span.get("span_id")
+                    if span_id in existing_span_ids:
+                        stats["spans_skipped"] += 1
+                        continue
+                    existing_span_ids.add(span_id)
+
+                    if self.dedupe or self.strip_nulls:
+                        # Clean individual span's raw_attributes
+                        pass  # clean_session already handled this above for new sessions
+
+                    span_row = _flatten_span(span, session_id, source)
+                    week_key = self._iso_week(span_row.get("start_time"))
+                    week_rows[week_key].append(span_row)
+                    stats["spans"] += 1
+
+            del chunk_sessions
+
+            # Write this chunk's spans to partitioned parquet
+            for week_key, rows in week_rows.items():
+                if not rows:
+                    continue
+
+                week_dir = output_dir / "spans" / f"source={source}" / f"week={week_key}"
+                week_dir.mkdir(parents=True, exist_ok=True)
+
+                table = pa.Table.from_pylist(rows)
+
+                if self.use_dictionary:
+                    column_names = [field.name for field in table.schema]
+                    dict_columns = [
+                        col for col in column_names if col in self.DICTIONARY_COLUMNS
+                    ]
+                else:
+                    dict_columns = False
+
+                part_idx = week_part_idx.get(week_key, 0)
+                part_path = week_dir / f"part-{part_idx:05d}.parquet"
+
+                # If appending to existing part, read and concat
+                if part_path.exists() and part_path.stat().st_size < self.MAX_PART_SIZE_BYTES:
+                    existing_pf = pq.ParquetFile(part_path)
+                    existing_table = existing_pf.read().cast(table.schema)
+                    table = pa.concat_tables(
+                        [existing_table, table], promote_options="permissive",
+                    )
+
+                pq.write_table(
+                    table, part_path,
+                    compression=self.compression,
+                    use_dictionary=dict_columns,
+                )
+
+                # Check if we need to roll to a new part
+                if part_path.stat().st_size >= self.MAX_PART_SIZE_BYTES:
+                    week_part_idx[week_key] = part_idx + 1
+                else:
+                    week_part_idx[week_key] = part_idx
+
+            del week_rows
+            logger.debug("Chunk %d/%d: %d spans written", chunk_num, total_chunks, stats["spans"])
+
+        # Write sessions
+        sessions_dir = output_dir / "sessions"
+        sessions_dir.mkdir(parents=True, exist_ok=True)
+        sessions_path = sessions_dir / f"source={source}.parquet"
+
+        if session_rows:
+            new_sessions_table = pa.Table.from_pylist(session_rows)
+            if sessions_path.exists():
+                existing_sessions = pq.read_table(sessions_path)
+                existing_ids = set(existing_sessions.column("session_id").to_pylist())
+                filtered = [r for r in session_rows if r["session_id"] not in existing_ids]
+                if filtered:
+                    new_sessions_table = pa.concat_tables(
+                        [existing_sessions, pa.Table.from_pylist(filtered)],
+                        promote_options="permissive",
+                    )
+                else:
+                    new_sessions_table = existing_sessions
+            pq.write_table(new_sessions_table, sessions_path, compression=self.compression)
+
+        # Compute output size
+        total_span_bytes = sum(
+            f.stat().st_size for f in (output_dir / "spans").rglob("*.parquet")
+        ) if (output_dir / "spans").exists() else 0
+        sessions_bytes = sessions_path.stat().st_size if sessions_path.exists() else 0
+
+        stats["output_bytes"] = total_span_bytes + sessions_bytes
+        stats["sessions_parquet_bytes"] = sessions_bytes
+        stats["spans_parquet_bytes"] = total_span_bytes
+        stats["part_files"] = sum(1 for _ in (output_dir / "spans").rglob("*.parquet")) if (output_dir / "spans").exists() else 0
+        stats["weeks"] = len(set(
+            d.name for d in (output_dir / "spans" / f"source={source}").iterdir()
+        )) if (output_dir / "spans" / f"source={source}").exists() else 0
+        stats["savings_bytes"] = stats["input_bytes"] - stats["output_bytes"]
+        stats["savings_percent"] = (
+            (stats["savings_bytes"] / stats["input_bytes"] * 100)
+            if stats["input_bytes"] > 0 else 0
+        )
+        stats["sessions_path"] = str(sessions_path)
+        stats["spans_dir"] = str(output_dir / "spans" / f"source={source}")
+
+        return stats
+
+
 def export_to_parquet(
     source: str,
     input_path: str | Path,
