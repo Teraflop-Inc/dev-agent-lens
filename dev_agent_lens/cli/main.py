@@ -4035,6 +4035,17 @@ def config_oxen(remote: str):
     default=True,
     help="Write Hive-style partitioned output (default: partitioned)",
 )
+@click.option(
+    "--from-raw",
+    is_flag=True,
+    help="Read directly from raw sync files instead of unified JSONL (handles large datasets)",
+)
+@click.option(
+    "--chunk-size",
+    type=int,
+    default=50,
+    help="Number of raw files per chunk when using --from-raw (default: 50)",
+)
 def export_parquet(
     source_name: str,
     output_dir: str | None,
@@ -4042,20 +4053,23 @@ def export_parquet(
     no_dedupe: bool,
     no_strip_nulls: bool,
     partitioned: bool,
+    from_raw: bool,
+    chunk_size: int,
 ) -> None:
-    """Export unified sessions to Parquet format.
+    """Export to partitioned Parquet format.
 
-    By default, exports to a partitioned Hive-style layout:
-    - spans/source=<name>/week=<YYYY-WNN>/part-NNNNN.parquet
-    - sessions/source=<name>.parquet
-
-    Use --no-partitioned for legacy single-file output.
+    By default, reads from unified JSONL and exports to a partitioned
+    Hive-style layout. Use --from-raw to skip the unified JSONL step
+    and read directly from raw sync files (required for large datasets
+    that don't fit in memory).
 
     Examples:
 
         dal export-parquet --source phoenix-local-alex
 
-        dal export-parquet --source arize-ax-alex --compression snappy
+        dal export-parquet --source arize-ax-alex --from-raw
+
+        dal export-parquet --source arize-ax-alex --from-raw --chunk-size 20
 
         dal export-parquet --source phoenix-local-alex --no-partitioned
     """
@@ -4065,19 +4079,6 @@ def export_parquet(
     from dev_agent_lens.storage import get_storage_path
 
     storage_path = get_storage_path()
-    unified_dir = Path(storage_path) / "unified"
-
-    # Find input file
-    input_file = unified_dir / f"{source_name}_sessions.jsonl"
-    if not input_file.exists():
-        click.echo(
-            click.style(
-                f"Error: Unified sessions file not found: {input_file}\n"
-                f"Run 'dal export-sessions --source {source_name}' first.",
-                fg="red",
-            )
-        )
-        raise SystemExit(1)
 
     # Determine output directory
     if output_dir:
@@ -4085,6 +4086,80 @@ def export_parquet(
     else:
         out_dir = Path(storage_path) / "parquet"
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    exporter = ParquetExporter(
+        compression=compression,
+        dedupe=not no_dedupe,
+        strip_nulls=not no_strip_nulls,
+    )
+
+    if from_raw:
+        # Direct raw-to-parquet path (no unified JSONL intermediate)
+        raw_dir = Path(storage_path) / "raw" / source_name
+        if not raw_dir.exists() or not any(raw_dir.glob("sync_*.jsonl")):
+            click.echo(click.style(
+                f"Error: No raw sync files found in {raw_dir}\n"
+                f"Run 'dal sync --source {source_name}' first.",
+                fg="red",
+            ))
+            raise SystemExit(1)
+
+        raw_files = sorted(raw_dir.glob("sync_*.jsonl")) + sorted(raw_dir.glob("sync_gap_*.jsonl"))
+        total_size = sum(f.stat().st_size for f in raw_files)
+        click.echo(f"Source: {source_name}")
+        click.echo(f"Input: {raw_dir} ({len(raw_files)} files, {total_size / 1024**3:.1f} GB)")
+        click.echo(f"Output: {out_dir}")
+        click.echo(f"Compression: {compression}")
+        click.echo(f"Chunk size: {chunk_size} files")
+        click.echo()
+
+        def raw_progress(chunk_num: int, total: int) -> None:
+            click.echo(f"  Chunk {chunk_num}/{total}...")
+
+        click.echo("Exporting raw files to partitioned Parquet...")
+        stats = exporter.export_raw_to_partitioned(
+            source=source_name,
+            raw_dir=raw_dir,
+            output_dir=out_dir,
+            chunk_size=chunk_size,
+            progress_callback=raw_progress,
+        )
+
+        click.echo()
+        click.echo(click.style("Export complete!", fg="green", bold=True))
+        click.echo(f"  Sessions: {stats['sessions']:,}")
+        click.echo(f"  Spans: {stats['spans']:,}")
+        click.echo(f"  Spans skipped (dedup): {stats['spans_skipped']:,}")
+        click.echo(f"  Input size: {stats['input_bytes'] / 1024**3:.1f} GB")
+        click.echo(f"  Output size: {stats['output_bytes'] / 1024**2:.1f} MB")
+        if partitioned:
+            click.echo(f"  Part files: {stats.get('part_files', 'N/A')}")
+            click.echo(f"  Weeks: {stats.get('weeks', 'N/A')}")
+        click.echo()
+        click.echo(f"  Sessions: {stats.get('sessions_path', '')}")
+        click.echo(f"  Spans: {stats.get('spans_dir', '')}/")
+        return
+
+    # Standard path: read from unified JSONL
+    unified_dir = Path(storage_path) / "unified"
+    input_file = unified_dir / f"{source_name}_sessions.jsonl"
+    if not input_file.exists():
+        # Auto-detect: if raw files exist, suggest --from-raw
+        raw_dir = Path(storage_path) / "raw" / source_name
+        if raw_dir.exists() and any(raw_dir.glob("sync_*.jsonl")):
+            click.echo(click.style(
+                f"Error: Unified sessions file not found: {input_file}\n"
+                f"Raw files exist. Use --from-raw to export directly:\n"
+                f"  dal export-parquet --source {source_name} --from-raw",
+                fg="red",
+            ))
+        else:
+            click.echo(click.style(
+                f"Error: No data found for source '{source_name}'.\n"
+                f"Run 'dal sync --source {source_name}' first.",
+                fg="red",
+            ))
+        raise SystemExit(1)
 
     input_size = input_file.stat().st_size
     click.echo(f"Source: {source_name}")
