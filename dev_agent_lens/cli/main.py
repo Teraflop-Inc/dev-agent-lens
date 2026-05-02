@@ -3531,20 +3531,24 @@ def export_sessions(source_name: str, output_path: str | None, update: bool) -> 
 
             if use_chunked:
                 click.echo(click.style(
-                    f"Large dataset ({total_raw_size / 1024**3:.1f} GB) — using chunked processing",
+                    f"Large dataset ({total_raw_size / 1024**3:.1f} GB) — using merge-sort export",
                     fg="cyan",
                 ))
+                import heapq
+                import shutil
                 import tempfile
 
-                # Process in chunks, write temp unified JSONL per chunk
                 temp_dir = Path(tempfile.mkdtemp(prefix="dal_export_"))
-                all_sessions = []
+                total_chunks = (len(raw_files) + RAW_CHUNK_SIZE - 1) // RAW_CHUNK_SIZE
                 total_spans_loaded = 0
+                temp_files = []
 
+                # Phase 1: Chunk — read raw files in batches, group by session,
+                # write sorted temp JSONL files (sorted by session_id)
+                click.echo(click.style("Phase 1: Chunking and grouping...", bold=True))
                 for chunk_idx in range(0, len(raw_files), RAW_CHUNK_SIZE):
                     chunk_files = raw_files[chunk_idx:chunk_idx + RAW_CHUNK_SIZE]
                     chunk_num = chunk_idx // RAW_CHUNK_SIZE + 1
-                    total_chunks = (len(raw_files) + RAW_CHUNK_SIZE - 1) // RAW_CHUNK_SIZE
                     click.echo(f"  Chunk {chunk_num}/{total_chunks}: {len(chunk_files)} files...")
 
                     chunk_spans = []
@@ -3559,50 +3563,103 @@ def export_sessions(source_name: str, output_path: str | None, update: bool) -> 
 
                     if chunk_spans:
                         chunk_sessions = _group_by_session(chunk_spans)
-                        all_sessions.extend(chunk_sessions)
                         total_spans_loaded += len(chunk_spans)
                         click.echo(f"    {len(chunk_spans):,} spans -> {len(chunk_sessions):,} sessions")
-                        del chunk_spans  # Free memory
+                        del chunk_spans
 
-                click.echo(f"Loaded {total_spans_loaded:,} spans -> {len(all_sessions):,} session chunks")
+                        # Sort by session_id and write to temp file
+                        chunk_sessions.sort(key=lambda s: s.get("session_id") or "")
+                        temp_file = temp_dir / f"chunk_{chunk_num:04d}.jsonl"
+                        with open(temp_file, "w") as tf:
+                            for session in chunk_sessions:
+                                json.dump(session, tf, default=str)
+                                tf.write("\n")
+                        temp_files.append(temp_file)
+                        del chunk_sessions
 
-                # Merge sessions with the same session_id across chunks
-                click.echo("Merging sessions across chunks...")
-                merged_map: dict[str | None, dict] = {}
-                for session in all_sessions:
-                    sid = session.get("session_id")
-                    if sid in merged_map:
-                        # Append spans, dedup by span_id
-                        existing_span_ids = {
-                            s.get("span_id") for s in merged_map[sid].get("spans", [])
+                click.echo(f"Phase 1 complete: {total_spans_loaded:,} spans across {len(temp_files)} temp files")
+
+                # Phase 2: Merge-sort — open all temp files, merge sessions
+                # with same session_id, write directly to output
+                click.echo(click.style("Phase 2: Merge-sort by session_id...", bold=True))
+
+                def _iter_sorted_sessions(path):
+                    """Iterate sessions from a sorted temp file."""
+                    with open(path) as f:
+                        for line in f:
+                            if line.strip():
+                                yield json.loads(line)
+
+                # Use heapq.merge with key on session_id
+                iterators = [_iter_sorted_sessions(tf) for tf in temp_files]
+
+                # Wrap each iterator to produce (session_id, session) for heapq
+                def _keyed_iter(it):
+                    for session in it:
+                        yield (session.get("session_id") or "", session)
+
+                keyed_iters = [_keyed_iter(it) for it in iterators]
+                merged_stream = heapq.merge(*keyed_iters, key=lambda x: x[0])
+
+                # Walk the merged stream, combining sessions with same id
+                out_file.parent.mkdir(parents=True, exist_ok=True)
+                session_count = 0
+                total_span_count = 0
+
+                with open(out_file, "w") as out_f:
+                    current_sid = None
+                    current_spans: dict[str, dict] = {}  # span_id -> span (dedup)
+
+                    def _flush_session():
+                        nonlocal session_count, total_span_count
+                        if current_sid is None or not current_spans:
+                            return
+                        spans_list = list(current_spans.values())
+                        spans_list.sort(key=lambda s: s.get("start_time") or "")
+                        start_times = [s.get("start_time") for s in spans_list if s.get("start_time")]
+                        end_times = [s.get("end_time") for s in spans_list if s.get("end_time")]
+                        session_obj = {
+                            "session_id": current_sid,
+                            "spans": spans_list,
+                            "span_count": len(spans_list),
+                            "start_time": min(start_times) if start_times else None,
+                            "end_time": max(end_times) if end_times else None,
                         }
-                        new_spans = [
-                            s for s in session.get("spans", [])
-                            if s.get("span_id") not in existing_span_ids
-                        ]
-                        merged_map[sid]["spans"].extend(new_spans)
-                        merged_map[sid]["span_count"] = len(merged_map[sid]["spans"])
-                    else:
-                        merged_map[sid] = session
-                del all_sessions
+                        json.dump(session_obj, out_f, default=str)
+                        out_f.write("\n")
+                        session_count += 1
+                        total_span_count += len(spans_list)
+                        if session_count % 1000 == 0:
+                            click.echo(f"    Written {session_count:,} sessions ({total_span_count:,} spans)...")
 
-                sessions = list(merged_map.values())
-                del merged_map
+                    for sid, session in merged_stream:
+                        if sid != current_sid:
+                            _flush_session()
+                            current_sid = sid
+                            current_spans = {}
+                        # Add spans, dedup by span_id
+                        for span in session.get("spans", []):
+                            span_id = span.get("span_id")
+                            if span_id and span_id not in current_spans:
+                                current_spans[span_id] = span
 
-                # Sort spans within each session
-                for session in sessions:
-                    session["spans"].sort(key=lambda s: s.get("start_time") or "")
-                    start_times = [s.get("start_time") for s in session["spans"] if s.get("start_time")]
-                    end_times = [s.get("end_time") for s in session["spans"] if s.get("end_time")]
-                    session["start_time"] = min(start_times) if start_times else None
-                    session["end_time"] = max(end_times) if end_times else None
+                    _flush_session()  # flush last session
 
-                sessions.sort(key=lambda s: s.get("end_time") or s.get("start_time") or "", reverse=True)
-                click.echo(f"Merged to {len(sessions):,} unique sessions")
+                click.echo(f"Phase 2 complete: {session_count:,} sessions, {total_span_count:,} unique spans")
 
-                # Clean up temp dir
-                import shutil
+                # Clean up temp files
                 shutil.rmtree(temp_dir, ignore_errors=True)
+
+                # Stats for the output section below
+                sessions = None  # Signal that we already wrote to out_file
+                file_size_mb = out_file.stat().st_size / (1024 * 1024)
+                click.echo()
+                click.echo(click.style("Export complete!", fg="green", bold=True))
+                click.echo(f"  Sessions: {session_count:,}")
+                click.echo(f"  Spans:    {total_span_count:,}")
+                click.echo(f"  Size:     {file_size_mb:.1f} MB")
+                click.echo(f"  Output:   {out_file}")
+                return  # Skip the shared write path below
             else:
                 spans = []
                 for raw_file in raw_files:
