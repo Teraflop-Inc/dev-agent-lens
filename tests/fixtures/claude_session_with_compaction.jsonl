@@ -1,0 +1,5 @@
+{"type":"user","uuid":"u1","message":{"content":"Help me with this code"},"timestamp":"2026-01-19T10:00:00.000Z","sessionId":"session-004","cwd":"/project","gitBranch":"main"}
+{"type":"assistant","uuid":"a1","message":{"content":"Sure, I'd be happy to help!"},"timestamp":"2026-01-19T10:00:01.000Z","sessionId":"session-004"}
+{"type":"system","subtype":"compact_boundary","uuid":"s1","compactMetadata":{"trigger":"context_length","preTokens":150000},"timestamp":"2026-01-19T10:30:00.000Z","sessionId":"session-004"}
+{"type":"user","uuid":"u2","message":{"content":"[Compaction Summary]\nWe discussed code improvements and made several changes to main.py."},"timestamp":"2026-01-19T10:30:01.000Z","sessionId":"session-004"}
+{"type":"assistant","uuid":"a2","message":{"content":"I understand. Let's continue from where we left off."},"timestamp":"2026-01-19T10:30:02.000Z","sessionId":"session-004"}

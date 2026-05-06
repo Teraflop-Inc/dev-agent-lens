@@ -342,6 +342,57 @@ tools_df = pd.read_json('arize/arize_traces_tools.jsonl', lines=True)
 print(f"Tool calls: {len(tools_df)}")
 ```
 
+## Session Duplication Analysis (NEW)
+
+Tools for analyzing and optimizing unified session JSONL files to reduce storage overhead.
+
+### Files
+
+1. **`analyze_duplication.py`** - Analyze duplication patterns
+2. **`clean_sessions.py`** - Remove duplication from session files
+3. **`DUPLICATION_ANALYSIS_REPORT.md`** - Comprehensive analysis report
+
+### Quick Start
+
+**Analyze duplication patterns:**
+```bash
+# Analyze all unified session files
+python3 analyze_duplication.py
+
+# Analyze specific file
+python3 analyze_duplication.py ~/.dal/data/unified/arize-ax-alex_sessions.jsonl
+```
+
+**Clean session files:**
+```bash
+# Clean a file (removes duplication)
+python3 clean_sessions.py input.jsonl output.jsonl
+
+# Clean and compress
+python3 clean_sessions.py input.jsonl output.jsonl.gz --compress
+
+# Dry run (see what would be done)
+python3 clean_sessions.py input.jsonl output.jsonl --dry-run
+```
+
+**Compress for immediate savings:**
+```bash
+# Compress existing files (83% reduction)
+gzip ~/.dal/data/unified/*.jsonl
+
+# Result: 52GB → 9GB
+```
+
+### Results
+
+The analysis of unified session files reveals:
+- **Current Size**: 52GB across 4 files
+- **Compression Potential**: 5.24x average ratio (83% savings)
+- **Duplication Rate**: 99% of sessions have duplicate data
+- **Recommended Action**: Convert to Parquet for 50%+ additional savings
+
+See `DUPLICATION_ANALYSIS_REPORT.md` for complete findings and recommendations.
+
 ## Adding More Scripts
 
 To add new utility scripts to this folder:
