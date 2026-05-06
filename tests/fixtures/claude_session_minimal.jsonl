@@ -1,0 +1,5 @@
+{"type":"user","uuid":"u1","message":{"content":"Read the file"},"timestamp":"2026-01-19T10:00:00.000Z","sessionId":"session-001","cwd":"/project","gitBranch":"main"}
+{"type":"assistant","uuid":"a1","message":{"content":[{"type":"tool_use","id":"tu1","name":"Read","input":{"file_path":"main.py"}}]},"timestamp":"2026-01-19T10:00:01.000Z","sessionId":"session-001"}
+{"type":"user","uuid":"u2","message":{"content":[{"type":"tool_result","tool_use_id":"tu1","content":"def main(): pass"}]},"toolUseResult":"def main(): pass","timestamp":"2026-01-19T10:00:02.000Z","sessionId":"session-001"}
+{"type":"assistant","uuid":"a2","message":{"content":"The file contains a main function."},"timestamp":"2026-01-19T10:00:03.000Z","sessionId":"session-001"}
+{"type":"user","uuid":"u3","message":{"content":"Thanks"},"timestamp":"2026-01-19T10:00:04.000Z","sessionId":"session-001"}

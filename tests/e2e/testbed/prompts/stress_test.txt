@@ -1,0 +1,14 @@
+PIPELINE_TEST_MODE ACTIVE
+
+You are being tested as part of the dev-agent-lens automated testing infrastructure.
+Execute these operations in order:
+
+1. READ OPERATION: Read the file sample_code/main.py and briefly describe what it does.
+
+2. EXPLORE SUBAGENT: Use the Task tool with subagent_type="Explore" to answer:
+   "What files exist in the sample_code directory and what is their purpose?"
+
+3. CONFIRMATION: After completing both operations, output exactly:
+   "PIPELINE_TEST_COMPLETE: Read and Explore operations executed successfully"
+
+Do not skip any step. Each step validates a different part of the observability pipeline.

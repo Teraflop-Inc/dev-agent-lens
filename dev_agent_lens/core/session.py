@@ -1,0 +1,224 @@
+"""
+Session ID Extractor Module
+
+Provides functions for extracting session IDs from trace spans.
+Handles both Phoenix and Arize metadata formats.
+
+Session ID Patterns:
+    - Phoenix: metadata.user_id with `_session_<id>` or `session_<id>` suffix
+    - Arize: user_api_key_end_user_id or requester_metadata.user_id with `session_<id>`
+"""
+
+from __future__ import annotations
+
+import json
+import re
+from typing import Any
+
+import pandas as pd
+
+# Pattern to match session ID in various formats
+SESSION_PATTERN = re.compile(r"session_([a-zA-Z0-9_-]+)")
+
+
+def extract_session_id(metadata: Any) -> str | None:
+    """
+    Extract session ID from span metadata.
+
+    Handles multiple metadata formats from Phoenix and Arize:
+    - String format: "user_session_abc123" → "abc123"
+    - Dict with user_id: {"user_id": "session_abc123"} → "abc123"
+    - Dict with user_api_key_end_user_id: {"user_api_key_end_user_id": "session_abc123"}
+    - Dict with requester_metadata: {"requester_metadata": {"user_id": "session_abc123"}}
+
+    Args:
+        metadata: The metadata field from a span. Can be a string, dict, or JSON string.
+
+    Returns:
+        The extracted session ID string, or None if no session ID found.
+    """
+    if metadata is None or (isinstance(metadata, float) and pd.isna(metadata)):
+        return None
+
+    # Handle string metadata (may be raw string or JSON)
+    if isinstance(metadata, str):
+        # Try to parse as JSON first
+        try:
+            parsed = json.loads(metadata)
+            if isinstance(parsed, dict):
+                return _extract_from_dict(parsed)
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+        # Try to extract from string pattern
+        return _extract_from_string(metadata)
+
+    # Handle dict metadata
+    if isinstance(metadata, dict):
+        return _extract_from_dict(metadata)
+
+    return None
+
+
+def _extract_from_string(value: str) -> str | None:
+    """Extract session ID from a string value."""
+    if not value:
+        return None
+
+    match = SESSION_PATTERN.search(value)
+    if match:
+        return match.group(1)
+
+    return None
+
+
+def _extract_from_dict(metadata: dict) -> str | None:
+    """Extract session ID from a dict metadata structure."""
+    # Try Phoenix format: metadata.user_id with session_ pattern
+    user_id = metadata.get("user_id")
+    if user_id:
+        session_id = _extract_from_string(str(user_id))
+        if session_id:
+            return session_id
+
+    # Try Arize format: user_api_key_end_user_id
+    user_id = metadata.get("user_api_key_end_user_id")
+    if user_id:
+        session_id = _extract_from_string(str(user_id))
+        if session_id:
+            return session_id
+
+    # Try Arize format: requester_metadata.user_id
+    req_meta = metadata.get("requester_metadata")
+    if isinstance(req_meta, dict):
+        user_id = req_meta.get("user_id")
+        if user_id:
+            session_id = _extract_from_string(str(user_id))
+            if session_id:
+                return session_id
+
+    # Try string representation if nothing else worked
+    return None
+
+
+def extract_session_id_from_span(span: dict | pd.Series) -> str | None:
+    """
+    Extract session ID from a unified span.
+
+    This is a convenience function that handles both dict and pandas Series
+    representations of spans, looking in common metadata fields.
+
+    Session ID extraction priority:
+    1. Explicit session_id patterns in metadata fields (session_xxx)
+    2. trace_id field (used as session grouping in Phoenix/Arize)
+    3. Input value patterns (sometimes embedded in prompts)
+
+    Args:
+        span: A unified span as a dict or pandas Series.
+
+    Returns:
+        The extracted session ID string, or None if no session ID found.
+    """
+    if isinstance(span, pd.Series):
+        span = span.to_dict()
+
+    # Try various metadata field names for explicit session patterns
+    metadata_fields = [
+        "metadata",
+        "attributes.metadata",
+        "raw_attributes",
+    ]
+
+    for field in metadata_fields:
+        if field in span:
+            metadata = span[field]
+            # If this is raw_attributes, look for metadata/attributes inside it
+            if field == "raw_attributes" and isinstance(metadata, dict):
+                # =============================================================
+                # CLAUDE CODE SPECIFIC SESSION EXTRACTION (check FIRST!)
+                # =============================================================
+                # Claude Code traces store session metadata in nested dicts.
+                # The session ID is embedded in a user_id string like:
+                #   "user_<hash>_account_<uuid>_session_<uuid>"
+                #
+                # We check these BEFORE the generic extract_session_id() calls
+                # because those will fallback to trace_id if they can't find
+                # a session pattern, preventing us from reaching this code.
+                # =============================================================
+
+                # Claude Code via LiteLLM: attributes.metadata.user_api_key_end_user_id
+                # Contains the full user_account_session string from LiteLLM proxy
+                # Check nested dict path (raw_attributes.attributes.metadata)
+                if "attributes" in metadata and isinstance(metadata["attributes"], dict):
+                    attrs_metadata = metadata["attributes"].get("metadata")
+                    if isinstance(attrs_metadata, dict):
+                        # Try user_api_key_end_user_id first (LiteLLM proxy format)
+                        end_user_id = attrs_metadata.get("user_api_key_end_user_id")
+                        if end_user_id:
+                            session_id = _extract_from_string(str(end_user_id))
+                            if session_id:
+                                return session_id
+                        # Also try requester_metadata.user_id
+                        req_meta = attrs_metadata.get("requester_metadata")
+                        if isinstance(req_meta, dict):
+                            user_id = req_meta.get("user_id")
+                            if user_id:
+                                session_id = _extract_from_string(str(user_id))
+                                if session_id:
+                                    return session_id
+
+                # Also check for dotted key format (some Phoenix versions)
+                if "attributes.metadata" in metadata:
+                    session_id = extract_session_id(metadata["attributes.metadata"])
+                    if session_id:
+                        return session_id
+
+                # Claude Code via nested dicts: attributes.llm.*.metadata.user_id
+                # The structure is: attributes -> llm -> {model_key} -> metadata -> user_id
+                # where model_key can be "None", a model name, or other values
+                if "attributes" in metadata and isinstance(metadata["attributes"], dict):
+                    llm_data = metadata["attributes"].get("llm")
+                    if isinstance(llm_data, dict):
+                        # Iterate through all model keys in the llm dict
+                        for model_key in llm_data:
+                            model_data = llm_data[model_key]
+                            if isinstance(model_data, dict):
+                                model_metadata = model_data.get("metadata")
+                                if model_metadata:
+                                    session_id = extract_session_id(model_metadata)
+                                    if session_id:
+                                        return session_id
+
+                # =============================================================
+                # GENERIC EXTRACTION (fallback paths)
+                # =============================================================
+                # Try nested metadata key (Phoenix format)
+                if "metadata" in metadata:
+                    session_id = extract_session_id(metadata["metadata"])
+                    if session_id:
+                        return session_id
+                # Try nested attributes key (Arize format)
+                if "attributes" in metadata:
+                    session_id = extract_session_id(metadata["attributes"])
+                    if session_id:
+                        return session_id
+                # Fall through to try the raw_attributes dict itself
+            session_id = extract_session_id(metadata)
+            if session_id:
+                return session_id
+
+    # Fallback to trace_id - this is the standard way Phoenix and Arize group
+    # spans into sessions/traces. The trace_id represents a complete
+    # conversation or agent execution session.
+    trace_id = span.get("trace_id")
+    if trace_id and not (isinstance(trace_id, float) and pd.isna(trace_id)):
+        return str(trace_id)
+
+    # Also check input_value for session patterns (sometimes embedded in prompts)
+    input_value = span.get("input_value")
+    if input_value:
+        session_id = _extract_from_string(str(input_value))
+        if session_id:
+            return session_id
+
+    return None

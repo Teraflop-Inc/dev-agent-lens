@@ -11,3 +11,6 @@ __pycache__/
 venv/
 examples/python/__pycache__/
 oxen
+
+# Test infrastructure
+tests/e2e/testbed/runs/
