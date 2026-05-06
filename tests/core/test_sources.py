@@ -174,6 +174,80 @@ class TestSourceConfig:
         assert "Arize" in source.get_display_info()
         assert "my-model" in source.get_display_info()
 
+    def test_phoenix_postgres_source_to_dict(self):
+        """Phoenix-Postgres source serializes connection_url and schema."""
+        source = SourceConfig(
+            name="phoenix-pg",
+            source_type=SourceType.PHOENIX_POSTGRES,
+            connection_url="postgresql://u:p@h:5432/d",
+            schema="phoenix",
+            project="dev-agent-lens",
+            local_only=False,
+        )
+
+        result = source.to_dict()
+
+        assert result["type"] == "phoenix-postgres"
+        assert result["connection_url"] == "postgresql://u:p@h:5432/d"
+        assert result["schema"] == "phoenix"
+        assert result["project"] == "dev-agent-lens"
+        assert result["local_only"] is False
+
+    def test_phoenix_postgres_from_dict(self):
+        """Phoenix-Postgres source deserializes correctly."""
+        data = {
+            "type": "phoenix-postgres",
+            "connection_url": "postgresql://u:p@h:5432/d",
+            "schema": "phoenix",
+            "project": "dev-agent-lens",
+            "local_only": False,
+        }
+
+        source = SourceConfig.from_dict("phoenix-pg", data)
+
+        assert source.name == "phoenix-pg"
+        assert source.source_type == SourceType.PHOENIX_POSTGRES
+        assert source.connection_url == "postgresql://u:p@h:5432/d"
+        assert source.schema == "phoenix"
+        assert source.project == "dev-agent-lens"
+        assert source.local_only is False
+
+    def test_validate_phoenix_postgres_missing_connection_url(self):
+        """Phoenix-Postgres source requires a connection_url."""
+        source = SourceConfig(
+            name="phoenix-pg",
+            source_type=SourceType.PHOENIX_POSTGRES,
+        )
+
+        errors = source.validate()
+        assert any("connection_url" in e for e in errors)
+
+    def test_validate_phoenix_postgres_valid(self):
+        """Phoenix-Postgres source with connection_url is valid."""
+        source = SourceConfig(
+            name="phoenix-pg",
+            source_type=SourceType.PHOENIX_POSTGRES,
+            connection_url="postgresql://u:p@h:5432/d",
+        )
+
+        assert source.validate() == []
+
+    def test_get_display_info_phoenix_postgres(self):
+        """Phoenix-Postgres display masks credentials and shows schema."""
+        source = SourceConfig(
+            name="phoenix-pg",
+            source_type=SourceType.PHOENIX_POSTGRES,
+            connection_url="postgresql://user:secret@h.example.com:5432/db",
+            schema="phoenix",
+        )
+
+        info = source.get_display_info()
+        assert "Phoenix-Postgres" in info
+        assert "h.example.com:5432/db" in info
+        assert "schema=phoenix" in info
+        # Password must not leak into the display string
+        assert "secret" not in info
+
 
 class TestSourceManager:
     """Tests for SourceManager class."""

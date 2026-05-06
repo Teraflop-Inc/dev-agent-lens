@@ -195,6 +195,33 @@ dal export-parquet --source my-phoenix
 
 Data is stored in `~/.dal/data/parquet/`. Run `dal sync --help` for all options.
 
+#### Phoenix on Postgres (recommended for shared backends)
+
+When Phoenix is configured to use external Postgres (e.g. Supabase) instead of
+in-process SQLite, DAL can read straight from the database — bypassing
+Phoenix's REST API entirely. This is faster and avoids Phoenix's GraphQL
+timeout on large pulls.
+
+```bash
+# Add the source. --connection-url and --schema fall back to
+# PHOENIX_SQL_DATABASE_URL / PHOENIX_SQL_DATABASE_SCHEMA env vars,
+# so you don't need to paste the password on the command line.
+dal config add-source phoenix-supabase --type phoenix-postgres \
+    --project dev-agent-lens --shared
+
+# Or pass them explicitly:
+dal config add-source phoenix-supabase --type phoenix-postgres \
+    --connection-url "postgresql://user:pass@host.pooler.supabase.com:5432/postgres" \
+    --schema phoenix --project dev-agent-lens --shared
+
+# Sync — same UX as the REST source
+dal sync --source phoenix-supabase
+```
+
+Use Supabase's **Session pooler** connection string (port 5432 on
+`*.pooler.supabase.com`). The Direct connection is IPv6-only and the
+Transaction pooler breaks Phoenix's prepared-statement use.
+
 ### Querying Data
 
 ```bash

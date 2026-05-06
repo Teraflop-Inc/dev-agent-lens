@@ -376,6 +376,87 @@ class TestConfigCommand:
         assert result.exit_code == 1
         assert "Error" in result.output
 
+    def test_config_add_source_phoenix_postgres_explicit(
+        self, runner, monkeypatch, tmp_path
+    ):
+        """add-source --type phoenix-postgres saves connection_url + schema."""
+        monkeypatch.setenv("DAL_CONFIG_PATH", str(tmp_path / "config"))
+        # Make sure env-var fallback isn't masking missing-flag bugs
+        monkeypatch.delenv("PHOENIX_SQL_DATABASE_URL", raising=False)
+        monkeypatch.delenv("PHOENIX_SQL_DATABASE_SCHEMA", raising=False)
+
+        result = runner.invoke(
+            main,
+            [
+                "config", "add-source", "phoenix-pg",
+                "--type", "phoenix-postgres",
+                "--connection-url", "postgresql://u:p@h:5432/d",
+                "--schema", "phoenix",
+                "--project", "dev-agent-lens",
+                "--shared",
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        assert "Added source: phoenix-pg" in result.output
+        assert "phoenix-postgres" in result.output
+
+        # Round-trip the saved file
+        from dev_agent_lens.core.sources import SourceManager, SourceType
+
+        saved = SourceManager().get_source("phoenix-pg")
+        assert saved is not None
+        assert saved.source_type == SourceType.PHOENIX_POSTGRES
+        assert saved.connection_url == "postgresql://u:p@h:5432/d"
+        assert saved.schema == "phoenix"
+        assert saved.project == "dev-agent-lens"
+        assert saved.local_only is False
+
+    def test_config_add_source_phoenix_postgres_env_fallback(
+        self, runner, monkeypatch, tmp_path
+    ):
+        """phoenix-postgres falls back to PHOENIX_SQL_DATABASE_URL env var."""
+        monkeypatch.setenv("DAL_CONFIG_PATH", str(tmp_path / "config"))
+        monkeypatch.setenv("PHOENIX_SQL_DATABASE_URL", "postgresql://u:p@env:5432/d")
+        monkeypatch.setenv("PHOENIX_SQL_DATABASE_SCHEMA", "phoenix_custom")
+
+        result = runner.invoke(
+            main,
+            [
+                "config", "add-source", "phoenix-pg-env",
+                "--type", "phoenix-postgres",
+                "--project", "dev-agent-lens",
+                "--shared",
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+
+        from dev_agent_lens.core.sources import SourceManager
+
+        saved = SourceManager().get_source("phoenix-pg-env")
+        assert saved is not None
+        assert saved.connection_url == "postgresql://u:p@env:5432/d"
+        assert saved.schema == "phoenix_custom"
+
+    def test_config_add_source_phoenix_postgres_missing_url(
+        self, runner, monkeypatch, tmp_path
+    ):
+        """phoenix-postgres without connection_url errors out."""
+        monkeypatch.setenv("DAL_CONFIG_PATH", str(tmp_path / "config"))
+        monkeypatch.delenv("PHOENIX_SQL_DATABASE_URL", raising=False)
+
+        result = runner.invoke(
+            main,
+            [
+                "config", "add-source", "bad-pg",
+                "--type", "phoenix-postgres",
+            ],
+        )
+
+        assert result.exit_code == 1
+        assert "connection_url" in result.output
+
     def test_config_list_sources_empty(self, runner, monkeypatch, tmp_path):
         """Config list-sources shows message when no sources."""
         monkeypatch.setenv("DAL_CONFIG_PATH", str(tmp_path / "config"))
