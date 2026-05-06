@@ -41,6 +41,7 @@ class SourceType(str, Enum):
     """Types of trace data sources."""
 
     PHOENIX = "phoenix"
+    PHOENIX_POSTGRES = "phoenix-postgres"
     ARIZE = "arize"
     CLAUDE = "claude"
 
@@ -69,6 +70,10 @@ class SourceConfig:
     project: str | None = None
     sqlite_container: str | None = None  # Docker container name for direct SQLite access
 
+    # Phoenix-Postgres-specific
+    connection_url: str | None = None  # postgres://user:pass@host:port/db
+    schema: str | None = None  # default 'phoenix'
+
     # Arize-specific
     space_key: str | None = None
     model_id: str | None = None
@@ -93,6 +98,13 @@ class SourceConfig:
                 data["project"] = self.project
             if self.sqlite_container:
                 data["sqlite_container"] = self.sqlite_container
+        elif self.source_type == SourceType.PHOENIX_POSTGRES:
+            if self.connection_url:
+                data["connection_url"] = self.connection_url
+            if self.project:
+                data["project"] = self.project
+            if self.schema:
+                data["schema"] = self.schema
         elif self.source_type == SourceType.ARIZE:
             if self.space_key:
                 data["space_key"] = self.space_key
@@ -119,6 +131,8 @@ class SourceConfig:
             url=data.get("url"),
             project=data.get("project"),
             sqlite_container=data.get("sqlite_container"),
+            connection_url=data.get("connection_url"),
+            schema=data.get("schema"),
             space_key=data.get("space_key"),
             model_id=data.get("model_id"),
             claude_dir=data.get("claude_dir"),
@@ -139,6 +153,9 @@ class SourceConfig:
         if self.source_type == SourceType.PHOENIX:
             if not self.url:
                 errors.append("Phoenix source requires 'url'")
+        elif self.source_type == SourceType.PHOENIX_POSTGRES:
+            if not self.connection_url:
+                errors.append("Phoenix-Postgres source requires 'connection_url'")
         elif self.source_type == SourceType.ARIZE:
             if not self.space_key:
                 errors.append("Arize source requires 'space_key'")
@@ -154,6 +171,11 @@ class SourceConfig:
         """Get a human-readable display string."""
         if self.source_type == SourceType.PHOENIX:
             return f"Phoenix @ {self.url or 'localhost:6006'}"
+        elif self.source_type == SourceType.PHOENIX_POSTGRES:
+            host = "?"
+            if self.connection_url and "@" in self.connection_url:
+                host = self.connection_url.rsplit("@", 1)[-1]
+            return f"Phoenix-Postgres @ {host} (schema={self.schema or 'phoenix'})"
         elif self.source_type == SourceType.ARIZE:
             return f"Arize ({self.model_id or 'unknown'})"
         elif self.source_type == SourceType.CLAUDE:
@@ -326,14 +348,31 @@ def create_source_from_env() -> list[SourceConfig]:
     """Create source configurations from environment variables.
 
     This provides backward compatibility with the old env-based configuration.
-    Creates sources based on DAL_PHOENIX_URL and ARIZE_API_KEY.
+    Creates sources based on DAL_PHOENIX_URL, PHOENIX_SQL_DATABASE_URL, and
+    ARIZE_API_KEY.
 
     Returns:
         List of sources created from environment variables.
     """
     sources = []
 
-    # Check for Phoenix
+    # Check for Phoenix-Postgres (preferred when both REST + Postgres are set)
+    pg_url = os.getenv("PHOENIX_SQL_DATABASE_URL")
+    if pg_url:
+        pg_schema = os.getenv("PHOENIX_SQL_DATABASE_SCHEMA", "phoenix")
+        pg_project = os.getenv("DAL_PHOENIX_PROJECT", "dev-agent-lens")
+        sources.append(
+            SourceConfig(
+                name="phoenix-postgres-default",
+                source_type=SourceType.PHOENIX_POSTGRES,
+                connection_url=pg_url,
+                schema=pg_schema,
+                project=pg_project,
+                local_only=False,  # Shared Postgres is shareable
+            )
+        )
+
+    # Check for Phoenix REST
     phoenix_url = os.getenv("DAL_PHOENIX_URL")
     if phoenix_url:
         phoenix_project = os.getenv("DAL_PHOENIX_PROJECT", "default")

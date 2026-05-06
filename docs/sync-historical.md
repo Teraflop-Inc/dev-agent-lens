@@ -7,9 +7,17 @@ Pull trace data from Phoenix or Arize into local storage for offline analysis.
 Before syncing, configure a named source:
 
 ```bash
-# For Phoenix (local)
+# For Phoenix (local, REST)
 dal config add-source my-phoenix --type phoenix \
     --url http://localhost:6006 --project default
+
+# For Phoenix on external Postgres (recommended when Phoenix is configured
+# with PHOENIX_SQL_DATABASE_URL — bypasses the REST API and reads straight
+# from the DB. --connection-url and --schema fall back to env vars
+# PHOENIX_SQL_DATABASE_URL / PHOENIX_SQL_DATABASE_SCHEMA, so credentials
+# don't need to live on the command line.)
+dal config add-source my-phoenix-pg --type phoenix-postgres \
+    --project dev-agent-lens --shared
 
 # For Arize (cloud) - requires env vars
 export ARIZE_API_KEY=your-api-key
