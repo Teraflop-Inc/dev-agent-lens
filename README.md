@@ -1,269 +1,253 @@
-# Dev-Agent-Lens with LiteLLM and Arize Integration
+# Dev-Agent-Lens
 
-A proxy setup for Open Source, Open Telemetry Compliant, or proxyable Developer Agents to add observability, monitoring, and tracing capabilities. Each layer can be easily hosted or depolyed anywhere, allowing teams to view all of their traces in a single pane of glass, no matter the deployment needs.
+A transparent proxy and analysis toolkit for AI coding agents. Capture traces from Claude Code (or any LLM), store them efficiently, and query your agent's behavior.
 
-The first developer agent is Claude Code, Dev-Agent-Lens comes complete with seamless OAuth Passthrough for Pro and Max plans.
+## Installation
 
-Leverage observability to track cost, identify common errors, and increase your teams shipping velocity.
+```bash
+git clone <repo-url>
+cd dev-agent-lens
+uv sync
+```
 
-## Overview
+## Quickstart: Analyze Your Claude Sessions
 
-This repository provides a transparent proxy layer for Claude Code that:
+Export your Claude Code sessions to readable markdown for analysis. No proxy setup required—works with existing `~/.claude` sessions.
 
-- Intercepts Claude Code API calls and routes them through LiteLLM
-- Adds AI observability and monitoring via Arize AI ([Arize AI is a Top AI Evaluation Platforms](https://arize.com/llm-evaluation-platforms-top-frameworks))
-- Maintains full compatibility with the standard Claude Code CLI
-- Provides centralized model configuration and management
+**Using Claude Code?** Just run `/analyze-session` to find and analyze sessions automatically.
+
+### 1. Find Your Session
+
+**If you already know which session:** Sessions live in `~/.claude/projects/`. Locate the file and skip to step 2.
+
+```bash
+# List recent sessions
+ls -lt ~/.claude/projects/-Users-*/*.jsonl | grep -v agent- | head -10
+
+# Search by keyword
+grep -l "authentication" ~/.claude/projects/*/*.jsonl | grep -v agent-
+```
+
+**If you need to discover it:** Export to Parquet and query with DuckDB to find sessions by patterns, metrics, or outliers.
+
+```bash
+dal export-events --output ~/claude-sessions.parquet
+```
+
+```python
+import duckdb
+
+conn = duckdb.connect()
+result = conn.execute("""
+    SELECT session_id, COUNT(*) as subagent_calls
+    FROM '~/claude-sessions.parquet'
+    WHERE event_type = 'subagent'
+    GROUP BY session_id
+    ORDER BY subagent_calls DESC
+    LIMIT 5
+""").fetchall()
+
+for session_id, count in result:
+    print(f"{session_id}: {count} subagents")
+```
+
+Find sessions related to a Linear or Jira ticket:
+
+```python
+result = conn.execute("""
+    SELECT DISTINCT session_id
+    FROM '~/claude-sessions.parquet'
+    WHERE text ILIKE '%ENG-123%' OR text ILIKE '%PROJ-456%'
+""").fetchall()
+```
+
+Write other queries to fit your needs—find sessions by tool usage, error patterns, compaction events, or time range.
+
+### 2. Export to Markdown
+
+```bash
+dal claude-session-logs-to-markdown <session-file> -o ./exports/
+```
+
+The export preserves the full conversation structure including subagents (as linked files) and compactions (inline with context summaries). See [docs/unified_markdown_format.md](docs/unified_markdown_format.md) for the format specification—it can help guide your agent in analyzing sessions that exceed context windows.
+
+### 3. Analyze
+
+Read the markdown into your Claude Code session, or attach to any AI chat:
+
+```
+Analyze this session export. Summarize what was accomplished,
+identify any errors, and suggest improvements.
+```
+
+*More tooling to accelerate markdown analysis is coming soon.*
+
+See [docs/quickstart_session_export.md](docs/quickstart_session_export.md) for CLI options and advanced usage.
+
+---
+
+## Team Collaboration
+
+Share Claude session data with your team for aggregate analysis. This integrates with the existing [Oxen](https://oxen.ai) data version control already used by the DAL toolkit.
+
+### Export with Your Name
+
+Use a unique source name so team members' data doesn't conflict:
+
+```bash
+dal export-events --source claude-local-alex    # Use your name/handle
+```
+
+This creates `~/.dal/data/parquet/claude-local-alex_events.parquet`.
+
+### Push to Your Team's Repo
+
+```bash
+dal push -s claude-local-alex --parquet-only -m "Weekly sync"
+```
+
+The `--parquet-only` flag skips large intermediate files, keeping pushes fast.
+
+### Pull Team Data
+
+```bash
+dal pull
+```
+
+Now you have everyone's session data locally.
+
+### Query Across the Team
+
+```python
+import duckdb
+
+conn = duckdb.connect()
+
+# Compare tool usage across teammates
+conn.execute("""
+    SELECT
+        regexp_extract(source, 'claude-local-(\w+)', 1) as teammate,
+        tool_name,
+        COUNT(*) as uses
+    FROM '~/.dal/data/parquet/claude-local-*_events.parquet'
+    WHERE event_type = 'tool_use'
+    GROUP BY 1, 2
+    ORDER BY teammate, uses DESC
+""").fetchdf()
+
+# Find how teammates approached a specific ticket
+conn.execute("""
+    SELECT source, session_id, MIN(timestamp) as started
+    FROM '~/.dal/data/parquet/claude-local-*_events.parquet'
+    WHERE text ILIKE '%ENG-456%'
+    GROUP BY 1, 2
+""").fetchdf()
+```
+
+> **Note**: Raw session files in `~/.claude/projects/` stay local. Only processed Parquet exports are shared.
+
+---
+
+## What's Here
+
+**1. DAL Toolkit** - A Python package (`dev_agent_lens`) and CLI (`dal`) for exporting, syncing, and querying Claude Code trace data.
+
+**2. LiteLLM Proxy** - Routes Claude Code through a local proxy to capture all API calls with OpenTelemetry, sending traces to Phoenix (local) or Arize (cloud).
+
+---
+
+## Advanced: Full Tracing Pipeline
+
+For comprehensive observability, set up the LiteLLM proxy to capture all API calls with full token counts, timing, and model metadata.
+
+### Proxy Setup
+
+```bash
+# 1. Configure
+cp .env.example .env
+# Edit .env: add ANTHROPIC_API_KEY (and ARIZE keys if using cloud)
+
+# 2. Start (pick one)
+docker compose --profile phoenix up -d   # Local Phoenix UI at :6006
+docker compose --profile arize up -d     # Cloud Arize
+
+# 3. Use Claude Code through the proxy
+./claude-lens
+```
+
+See [docs/proxy-setup.md](docs/proxy-setup.md) for OAuth, project switching, and configuration details.
+
+### Syncing Data
+
+Pull traces from Phoenix or Arize into local Parquet files for fast querying:
+
+```bash
+# Configure a source
+dal config add-source my-phoenix --type phoenix \
+    --url http://localhost:6006 --project default
+
+# Sync data (incremental by default, or use --start-date for historical)
+dal sync --source my-phoenix
+
+# Export to Parquet
+dal export-parquet --source my-phoenix
+```
+
+Data is stored in `~/.dal/data/parquet/`. Run `dal sync --help` for all options.
+
+### Querying Data
+
+```bash
+# List available data sources
+dal sources
+
+# Query a source
+dal query my-project --limit 10
+
+# Search for patterns
+dal query my-project --pattern "TODO|FIXME"
+```
+
+Or use the Python API:
+
+```python
+from dev_agent_lens.query import query_source
+
+result = query_source(source="my-project", pattern=r"ENG-\d+")
+print(f"Found {result.total_spans} spans in {result.total_sessions} sessions")
+```
+
+See [docs/querying.md](docs/querying.md) for the full API.
+
+---
 
 ## Architecture
 
-```mermaid
-graph TD
-    A[Claude CLI / SDK] -->|OAuth / API-key<br/>passthrough| B[LiteLLM Proxy<br/>localhost:4000]
-    B --> C[OpenTelemetry exporter]
-    B --> D["Postgres<br/>(optional)"]
-    C --> E[Arize AX OR<br/>Arize Phoenix]
-    D --> F["LiteLLM UI / stats<br/>(optional)"]
+```
+Claude Code ──► ~/.claude/projects/     (native sessions)
+     │                │
+     │                └──► dal claude-session-logs-to-markdown ──► Markdown
+     │
+     └──► LiteLLM Proxy ──► Phoenix/Arize
+                                  │
+                              dal sync
+                                  ▼
+                          ~/.dal/data/
+                         (Parquet files)
+                                  │
+                    dal query / Python API
+                                  ▼
+                       Analysis & Reports
 ```
 
-## Prerequisites
-
-- Docker and Docker Compose
-- Claude Code CLI installed (`curl -fsSL https://claude.ai/install.sh | sh`)
-- Anthropic API key (get from <https://console.anthropic.com/settings/keys>)
-
-## Quick Start
-
-Get started in under 2 minutes by choosing your observability backend!
-
-### 1. Setup Environment
-
-```bash
-# Copy the example environment file
-cp .env.example .env
-
-# Edit .env and add ONLY your Anthropic API key (OAuth will pass through automatically)
-# ANTHROPIC_API_KEY=sk-ant-api03-your-key-here
-
-# For Arize AX, also add:
-# ARIZE_API_KEY=your-arize-api-key
-# ARIZE_SPACE_KEY=your-arize-space-key
-```
-
-### 2. Choose Your Observability Backend
-
-**Option A: Arize AX (Cloud)**
-
-```bash
-# Start with Arize AX cloud observability
-docker compose --profile arize up -d
-```
-
-**Option B: Phoenix (Local)**
-
-```bash
-# Start with local Phoenix observability
-docker compose --profile phoenix up -d
-
-# Access Phoenix UI at http://localhost:6006
-```
-
-### 3. Use Claude Code
-
-```bash
-# Use the wrapper script with default settings (localhost:4000)
-./claude-lens
-
-# Or install globally for convenience
-sudo cp claude-lens /usr/local/bin
-claude-lens
-
-# Use different proxy configurations:
-./claude-lens --proxy-url http://localhost:4001  # For advanced profile
-CLAUDE_LENS_PROXY_URL=http://remote-server:4000 ./claude-lens  # Via environment
-./claude-lens --help  # View all configuration options
-```
-
-**That's it!** Claude Code now routes through LiteLLM for consistent API handling.
-
-### 4. Project/Environment Switching (Optional)
-
-Route traces to different projects for test isolation. Set `CLAUDE_LENS_PROJECT` before starting the proxy:
-
-```bash
-# Set the project and start (or restart) the proxy
-export CLAUDE_LENS_PROJECT=dev-agent-lens-test
-docker compose --profile phoenix up -d
-
-# Traces now go to the new project
-./claude-lens
-```
-
-> **Warning:** If you change `CLAUDE_LENS_PROJECT`, you **MUST** run `docker compose down` then `docker compose up -d` for the change to take effect. The project name is set when the container starts and cannot be changed at runtime.
-
-```bash
-# To switch projects:
-export CLAUDE_LENS_PROJECT=my-other-project
-docker compose --profile phoenix down && docker compose --profile phoenix up -d
-./claude-lens
-```
-
-**Backend mapping:**
-
-- Phoenix: Uses `openinference.project.name` resource attribute
-- Arize: Uses `OTEL_SERVICE_NAME`
-
-## View Observability in Arize
-
-- Open [Arize AI Dashboard](https://app.arize.com)
-- Navigate to your project
-- Filter traces: `status_code = 'OK' and attributes.llm.token_count.total > 0`
-
-## Claude Code SDK Examples
-
-This repository includes comprehensive examples for integrating the Claude Code SDK with Dev-Agent-Lens observability in both **TypeScript** and **Python**. These examples demonstrate advanced usage patterns, specialized agents, and full observability integration.
-
-Note: Due to Claude Code SDK authentication options, OAuth passthrough for the SDK is not supported.
-
-### Available Examples
-
-**TypeScript Examples** (`examples/typescript/`):
-
-- **Basic Usage**: Simple SDK setup with proxy observability
-- **Code Review Agent**: Automated code analysis with structured feedback
-- **Custom Tools**: Advanced tool integration and execution tracing
-- **Documentation Generator**: Automatic API documentation generation
-
-**Python Examples** (`examples/python/`):
-
-- **Basic Usage**: Core SDK functionality with streaming responses
-- **Observable Agent**: Advanced agent framework with:
-  - Security Analysis Agent (vulnerability detection)
-  - Incident Response Agent (automated incident handling)
-  - Session management and history tracking
-
-### Quick Start with Examples
-
-Our examples contain code samples to leverage the Claude Code SDKs for python and typescript, while maintaining the proxy and observability features from Dev-Agent-Lens.
-
-```bash
-# 1. Ensure the proxy is running (choose your observability backend)
-docker compose --profile arize up -d    # Arize AX (cloud)
-# OR: docker compose --profile phoenix up -d  # Phoenix (local)
-
-# 2. Try TypeScript examples
-cd examples/typescript
-npm install
-npm run basic                    # Basic usage
-npm run review basic-usage.ts    # Code review
-
-# 3. Try Python examples
-cd examples/python
-uv pip install -e .
-uv run python basic_usage.py     # Basic usage
-uv run python observable_agent.py # Advanced agents
-```
-
-All examples automatically route through the LiteLLM proxy for full observability without requiring command-line exports.
-
-📖 **[View Complete Examples Guide →](examples/README.md)**
-
-## Configuration
-
-### Model Routing
-
-The proxy uses wildcard routing in `litellm_config.yaml` to allow Claude Code to select any model:
-
-- **Automatic Pass-through**: Any model Claude Code selects is automatically routed to Anthropic
-- **Wildcard Support**: Supports patterns like `claude-*`, `anthropic/*`, and `claude-opus-*`
-- **No Model Override**: The proxy doesn't force a specific model - Claude Code decides
-- **Optional Aliases**: `sonnet` and `haiku` shortcuts are available but not required
-
-### Services
-
-- **LiteLLM Proxy**: Port 4000
-- **Health Check**: <http://localhost:4000/health>
-- **OpenTelemetry**: Configured for Arize endpoint (when ARIZE keys are configured)
-
-## Key Files
-
-- `claude-lens` - Wrapper script that starts Claude Code with proxy configuration
-- `docker-compose.yml` - Service definition and environment setup
-- `litellm_config.yaml` - Model routing and callback configuration
-- `.env.example` - Example environment variables file
-- `.env` - Your local environment configuration (not tracked in git)
-
-## Environment Variables
-
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `CLAUDE_LENS_PROXY_URL` | LiteLLM proxy URL | `http://localhost:4000` |
-| `CLAUDE_LENS_PROJECT` | Project name for trace routing | `dev-agent-lens` |
-| `ANTHROPIC_API_KEY` | Anthropic API key (fallback for non-OAuth) | - |
-| `ARIZE_API_KEY` | Arize API key (for Arize backend) | - |
-| `ARIZE_SPACE_KEY` | Arize space key (for Arize backend) | - |
-
-## Docker Compose Configuration
-
-The `docker-compose.yml` file sets up the LiteLLM proxy:
-
-### LiteLLM Proxy Service
-
-- **Image**: Custom OAuth-enabled image (`aowen14/litellm-oauth-fix:latest`)
-- **Port mapping**: 4000 (host) → 4000 (container)
-- **Configuration**: Mounts `litellm_config.yaml` for model routing
-- **Environment**: Passes through API keys and Arize configuration
-- **Health checks**: Automatic health monitoring every 30 seconds
-- **Restart policy**: Automatically restarts unless manually stopped
-
-## Development
-
-To modify the proxy configuration:
-
-1. Edit `litellm_config.yaml` to change model mappings or callbacks
-2. Update `.env` with your API credentials
-3. Restart the proxy: `docker-compose restart`
-
-## Managing the Proxy
-
-### Starting the proxy
-
-```bash
-docker-compose up -d
-```
-
-### Stopping the proxy
-
-```bash
-docker-compose down
-```
-
-### Viewing logs
-
-```bash
-docker-compose logs -f
-```
-
-### Restarting after configuration changes
-
-```bash
-docker-compose restart
-```
-
-## Troubleshooting
-
-- **Check if services are running**: `docker-compose ps`
-- **Verify proxy health**: `curl http://localhost:4000/health`
-- **View real-time logs**: `docker-compose logs -f litellm-proxy`
-- **Verify environment variables**: Ensure required variables are set in `.env`
-- **Claude Lens errors**: The wrapper script will check if the proxy is running before starting Claude Code
-- **OAuth issues**: Check logs for OAuth token detection and passthrough messages
-- **API key fallback**: Ensure `ANTHROPIC_API_KEY` is set if not using OAuth
-
-## Benefits
-
-- **Complete Observability**: Full visibility into Claude Code usage
-- **Zero Configuration**: Works transparently with existing Claude Code workflows
-- **Enterprise Ready**: Built-in monitoring and cost tracking
-- **Model Management**: Centralized configuration for all Claude models
-- **Extensible**: Based on LiteLLM's robust proxy framework
+> **Note:** This codebase is under active development. Some features may be broken or incomplete, particularly AI-powered commands like `summarize`, `cluster`, `suggest`, and `quality`. The session export functionality documented above is stable.
+
+## Documentation
+
+- [Session Export Quickstart](docs/quickstart_session_export.md) - Full guide with CLI options and automation
+- [Session Storage](docs/claude_code_session_storage.md) - How Claude Code stores session data
+- [Markdown Format](docs/unified_markdown_format.md) - Unified markdown export specification
+- [Proxy Setup](docs/proxy-setup.md) - LiteLLM, Phoenix, Arize configuration
+- [Syncing Data](docs/sync.md) - Sync from observability backends
+- [Querying Data](docs/querying.md) - CLI and Python query API
+- [SDK Examples](examples/README.md) - TypeScript and Python SDK integration

@@ -1,0 +1,31 @@
+# LiteLLM Configuration for Test Phoenix Container
+# Uses host.docker.internal to reach Phoenix running in any docker project
+
+model_list:
+  - model_name: "anthropic/*"
+    litellm_params:
+      model: "anthropic/*"
+      api_key: os.environ/ANTHROPIC_API_KEY
+
+  - model_name: "claude-*"
+    litellm_params:
+      model: "anthropic/claude-*"
+      api_key: os.environ/ANTHROPIC_API_KEY
+
+litellm_settings:
+  callbacks: ["arize_phoenix"]
+  drop_params: false
+  set_verbose: true
+  pass_through_params: true
+  disable_auth: true
+
+router_settings:
+  routing_strategy: "simple-shuffle"
+  enable_pre_call_checks: false
+  disable_cooldowns: true
+  allowed_fails: 1000
+
+# Use host.docker.internal to reach Phoenix on the host
+environment_variables:
+  PHOENIX_COLLECTOR_ENDPOINT: "http://host.docker.internal:4317"
+  PHOENIX_COLLECTOR_HTTP_ENDPOINT: "http://host.docker.internal:6006/v1/traces"

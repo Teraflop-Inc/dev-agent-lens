@@ -1,0 +1,21 @@
+PIPELINE_TEST_MODE ACTIVE
+
+You are being tested for AskUserQuestion tool coverage validation.
+
+Execute these operations in order:
+
+1. READ OPERATION: Read the file sample_code/main.py and briefly describe what it does.
+
+2. ASK USER QUESTIONS: Use the AskUserQuestion tool to ask the user multiple questions:
+   - Question 1 with header "Language": "What is your preferred programming language?"
+     Include options: Python, JavaScript, TypeScript, Go
+   - Question 2 with header "Experience": "What is your experience level?"
+     Include options: Beginner, Intermediate, Advanced
+   - Question 3 with header "Goal": "What type of project do you want to build?"
+
+   This MUST be a multi-question AskUserQuestion call (all 3 questions in one tool call).
+
+3. CONFIRMATION: After the AskUserQuestion tool call, output exactly:
+   "PIPELINE_TEST_COMPLETE: Read and AskUserQuestion tools executed successfully"
+
+Do not skip any step. This validates that AskUserQuestion with multiple questions is properly traced in the pipeline.
