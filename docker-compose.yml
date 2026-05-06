@@ -59,9 +59,14 @@ services:
       - OTEL_SERVICE_NAME=${PHOENIX_PROJECT:-${CLAUDE_LENS_PROJECT:-dev-agent-lens}}
 
       # Phoenix OTLP endpoint
-      - OTEL_EXPORTER_OTLP_ENDPOINT=http://phoenix:4317
-      - OTEL_EXPORTER_OTLP_PROTOCOL=grpc
-      - PHOENIX_COLLECTOR_ENDPOINT=http://phoenix:4317
+      # Use Phoenix's HTTP OTLP endpoint (port 6006/v1/traces),
+      # not the gRPC endpoint (port 4317). LiteLLM's arize_phoenix callback
+      # uses requests/HTTP under the hood — pointing at the gRPC port causes
+      # silent span drops with "Custom Logger Error" tracebacks. Phoenix
+      # accepts OTLP/HTTP at /v1/traces on its UI port.
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://phoenix:6006/v1/traces
+      - OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
+      - PHOENIX_COLLECTOR_ENDPOINT=http://phoenix:6006
 
       # Give the resource a name so you can filter by service
       # openinference.project.name determines the project in Phoenix UI
@@ -84,6 +89,11 @@ services:
   # Phoenix observability server (use with --profile phoenix)
   phoenix:
     image: arizephoenix/phoenix:latest
+    # arizephoenix/phoenix:latest's linux/arm64 build crashes on Apple Silicon
+    # with SIGILL (exit 132) before producing any log output. The linux/amd64
+    # build runs fine under Rosetta emulation. Pin platform until the upstream
+    # arm64 image is fixed.
+    platform: linux/amd64
     ports:
       - "6006:6006" # Phoenix UI
       - "4317:4317" # OTLP gRPC endpoint
@@ -91,6 +101,13 @@ services:
       - PHOENIX_PORT=6006
       - PHOENIX_HOST=0.0.0.0
       - PHOENIX_WORKING_DIR=/mnt/data
+      # when PHOENIX_SQL_DATABASE_URL is set in .env Phoenix uses
+      # external Supabase Postgres as its backend instead of in-process SQLite.
+      # Phoenix auto-creates its schema (named via PHOENIX_SQL_DATABASE_SCHEMA,
+      # defaulting to "phoenix") on first connect. Leave PHOENIX_SQL_DATABASE_URL
+      # unset to fall back to SQLite under PHOENIX_WORKING_DIR (legacy behavior).
+      - PHOENIX_SQL_DATABASE_URL=${PHOENIX_SQL_DATABASE_URL:-}
+      - PHOENIX_SQL_DATABASE_SCHEMA=${PHOENIX_SQL_DATABASE_SCHEMA:-phoenix}
     volumes:
       - phoenix_data:/mnt/data
     restart: unless-stopped
