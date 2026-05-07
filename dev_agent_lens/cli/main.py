@@ -27,6 +27,7 @@ logger = logging.getLogger(__name__)
 
 from dev_agent_lens.clients.arize import ArizeClient
 from dev_agent_lens.clients.phoenix import PhoenixClient
+from dev_agent_lens.clients.phoenix_postgres import PhoenixPostgresClient
 from dev_agent_lens.clients.phoenix_sqlite import PhoenixSQLiteClient
 from dev_agent_lens.core.schema import (
     normalize_arize,
@@ -49,6 +50,12 @@ BACKENDS = {
         "client_class": PhoenixClient,
         "normalizer": normalize_phoenix,
         "env_check": "DAL_PHOENIX_URL",
+    },
+    "phoenix-postgres": {
+        "name": "Phoenix on Postgres",
+        "client_class": PhoenixPostgresClient,
+        "normalizer": normalize_phoenix,
+        "env_check": "PHOENIX_SQL_DATABASE_URL",
     },
     "arize-cloud": {
         "name": "Arize Cloud",
@@ -708,8 +715,10 @@ def sync(
         # Create source-specific store
         source_store = OxenStore.for_source(source.name)
 
-        # Set up environment and determine client/normalizer
-        sqlite_client = None
+        # Set up environment and determine client/normalizer.
+        # `direct_client` short-circuits the REST client when we're reading
+        # straight from a Phoenix-backing DB (SQLite via Docker, or Postgres).
+        direct_client = None
 
         if source.source_type == SourceType.PHOENIX:
             if source.url:
@@ -719,12 +728,12 @@ def sync(
 
             if use_sqlite and resolved_sqlite_container:
                 db_path = f"docker://{resolved_sqlite_container}:/root/.phoenix/phoenix.db"
-                sqlite_client = PhoenixSQLiteClient(
+                direct_client = PhoenixSQLiteClient(
                     db_path=db_path,
                     project=source.project or os.getenv("DAL_PHOENIX_PROJECT", "dev-agent-lens"),
                 )
                 try:
-                    if not sqlite_client.test_connection():
+                    if not direct_client.test_connection():
                         click.echo(click.style(
                             f"Error: Could not connect to Phoenix SQLite database",
                             fg="red",
@@ -735,6 +744,29 @@ def sync(
                     return 0, 0, 1
 
             client_class = PhoenixClient
+            normalizer_fn = normalize_phoenix
+            is_phoenix = True
+        elif source.source_type == SourceType.PHOENIX_POSTGRES:
+            direct_client = PhoenixPostgresClient(
+                connection_url=source.connection_url,
+                project=source.project or os.getenv("DAL_PHOENIX_PROJECT", "dev-agent-lens"),
+                schema=source.schema or os.getenv("PHOENIX_SQL_DATABASE_SCHEMA", "phoenix"),
+                timeout=int(timeout),
+            )
+            try:
+                if not direct_client.test_connection():
+                    click.echo(click.style(
+                        f"Error: Could not reach Phoenix Postgres or project "
+                        f"'{source.project}' not found in schema "
+                        f"'{source.schema or 'phoenix'}'",
+                        fg="red",
+                    ))
+                    return 0, 0, 1
+            except Exception as e:
+                click.echo(click.style(f"Error: Postgres connection test failed: {e}", fg="red"))
+                return 0, 0, 1
+
+            client_class = PhoenixClient  # unused — direct_client overrides
             normalizer_fn = normalize_phoenix
             is_phoenix = True
         else:  # ARIZE
@@ -750,12 +782,12 @@ def sync(
         if use_checkpointing:
             return _process_with_checkpointing(
                 source, source_start, source_end,
-                source_store, client_class, normalizer_fn, is_phoenix, sqlite_client
+                source_store, client_class, normalizer_fn, is_phoenix, direct_client
             )
         else:
             return _process_lightweight(
                 source, source_start, source_end,
-                source_store, client_class, normalizer_fn, is_phoenix, sqlite_client
+                source_store, client_class, normalizer_fn, is_phoenix, direct_client
             )
 
     def _process_lightweight(
@@ -766,14 +798,14 @@ def sync(
         client_class: type,
         normalizer_fn,
         is_phoenix: bool,
-        sqlite_client=None,
+        direct_client=None,
     ) -> tuple[int, int, int]:
         """Lightweight sync without checkpointing (for small syncs < 7 days)."""
         click.echo(f"[{source.name}] Starting sync (lightweight mode)...")
 
         # Create client
-        if sqlite_client:
-            client = sqlite_client
+        if direct_client:
+            client = direct_client
         elif is_phoenix:
             client = client_class(timeout=float(timeout))
         else:
@@ -853,7 +885,7 @@ def sync(
         client_class: type,
         normalizer_fn,
         is_phoenix: bool,
-        sqlite_client=None,
+        direct_client=None,
     ) -> tuple[int, int, int]:
         """Robust sync with checkpointing (for large syncs >= 7 days)."""
 
@@ -874,8 +906,8 @@ def sync(
             click.echo(f"[{source.name}] Starting sync (robust mode with checkpointing)...")
 
         # Create client
-        if sqlite_client:
-            client = sqlite_client
+        if direct_client:
+            client = direct_client
         elif is_phoenix:
             client = client_class(timeout=float(timeout))
         else:
@@ -1245,9 +1277,9 @@ def config_show() -> None:
 @click.option(
     "--type",
     "source_type",
-    type=click.Choice(["phoenix", "arize"]),
+    type=click.Choice(["phoenix", "phoenix-postgres", "arize"]),
     required=True,
-    help="Type of backend (phoenix or arize)",
+    help="Type of backend (phoenix, phoenix-postgres, or arize)",
 )
 @click.option(
     "--url",
@@ -1274,6 +1306,16 @@ def config_show() -> None:
     "--sqlite-container",
     help="Docker container name for direct SQLite access (Phoenix only)",
 )
+@click.option(
+    "--connection-url",
+    help="Postgres connection string (phoenix-postgres only). "
+    "Falls back to PHOENIX_SQL_DATABASE_URL env var.",
+)
+@click.option(
+    "--schema",
+    help="Postgres schema for Phoenix tables (phoenix-postgres only, default 'phoenix'). "
+    "Falls back to PHOENIX_SQL_DATABASE_SCHEMA env var.",
+)
 def config_add_source(
     name: str,
     source_type: str,
@@ -1283,6 +1325,8 @@ def config_add_source(
     model_id: str | None,
     local_only: bool,
     sqlite_container: str | None,
+    connection_url: str | None,
+    schema: str | None,
 ) -> None:
     """Add a new named source.
 
@@ -1293,8 +1337,18 @@ def config_add_source(
         dal config add-source arize-team --type arize --space-key ABC --model-id my-model --shared
 
         dal config add-source phoenix-docker --type phoenix --url localhost:6006 --sqlite-container dev-agent-lens-phoenix-1
+
+        dal config add-source phoenix-supabase --type phoenix-postgres \\
+            --connection-url "postgres://user:pass@host:5432/postgres" \\
+            --schema phoenix --project dev-agent-lens --shared
     """
     from dev_agent_lens.core.sources import SourceConfig, SourceManager, SourceType
+
+    # phoenix-postgres can fall back to env vars for connection_url/schema
+    # so users don't have to paste secrets on the command line
+    if source_type == "phoenix-postgres":
+        connection_url = connection_url or os.getenv("PHOENIX_SQL_DATABASE_URL")
+        schema = schema or os.getenv("PHOENIX_SQL_DATABASE_SCHEMA", "phoenix")
 
     # Create source config
     source = SourceConfig(
@@ -1304,6 +1358,8 @@ def config_add_source(
         url=url,
         project=project,
         sqlite_container=sqlite_container,
+        connection_url=connection_url,
+        schema=schema,
         space_key=space_key,
         model_id=model_id,
     )
