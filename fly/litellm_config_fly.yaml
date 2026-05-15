@@ -1,0 +1,73 @@
+# LiteLLM config for the Fly deployment (sf-litellm). Forked from
+# litellm_config_phoenix.yaml — the only meaningful differences are:
+#
+#   - master-key auth ENABLED (the local dev compose disables it for
+#     convenience; on Fly we require a Bearer token so the proxy isn't an
+#     open Anthropic relay)
+#   - Phoenix endpoints point at sf-phoenix.internal (set via env in
+#     litellm.fly.toml, so they don't appear here)
+
+model_list:
+  - model_name: "claude-opus-4-7"
+    litellm_params:
+      model: "claude-opus-4-7"
+      api_key: os.environ/ANTHROPIC_API_KEY
+      custom_llm_provider: "anthropic"
+
+  - model_name: "claude-sonnet-4-6"
+    litellm_params:
+      model: "claude-sonnet-4-6"
+      api_key: os.environ/ANTHROPIC_API_KEY
+      custom_llm_provider: "anthropic"
+
+  - model_name: "claude-haiku-4-5"
+    litellm_params:
+      model: "claude-haiku-4-5"
+      api_key: os.environ/ANTHROPIC_API_KEY
+      custom_llm_provider: "anthropic"
+
+  - model_name: "anthropic/*"
+    litellm_params:
+      model: "anthropic/*"
+      api_key: os.environ/ANTHROPIC_API_KEY
+
+  - model_name: "claude-opus-*"
+    litellm_params:
+      model: "claude-opus-*"
+      api_key: os.environ/ANTHROPIC_API_KEY
+      custom_llm_provider: "anthropic"
+
+  - model_name: "claude-sonnet-*"
+    litellm_params:
+      model: "claude-sonnet-*"
+      api_key: os.environ/ANTHROPIC_API_KEY
+      custom_llm_provider: "anthropic"
+
+  - model_name: "claude-haiku-*"
+    litellm_params:
+      model: "claude-haiku-*"
+      api_key: os.environ/ANTHROPIC_API_KEY
+      custom_llm_provider: "anthropic"
+
+  - model_name: "claude-*"
+    litellm_params:
+      model: "claude-*"
+      api_key: os.environ/ANTHROPIC_API_KEY
+      custom_llm_provider: "anthropic"
+
+litellm_settings:
+  callbacks: ["arize_phoenix"]
+  drop_params: false
+  set_verbose: false
+  pass_through_params: true
+
+router_settings:
+  routing_strategy: "simple-shuffle"
+  enable_pre_call_checks: false
+  disable_cooldowns: true
+  allowed_fails: 1000
+
+general_settings:
+  # Bearer-token auth via LITELLM_MASTER_KEY env var (set as a flyctl secret).
+  # All requests must send `Authorization: Bearer <master-key>`.
+  master_key: os.environ/LITELLM_MASTER_KEY

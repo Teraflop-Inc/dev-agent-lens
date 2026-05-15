@@ -1,0 +1,59 @@
+# sf-phoenix — Arize Phoenix on Fly, backing the dev-agent-lens observability
+# stack used by Solutions-Fabric workspace runs (ENG2-1194).
+#
+# Deploy:
+#   cd dev-agent-lens
+#   flyctl apps create sf-phoenix --org teraflop
+#   flyctl volumes create phoenix_data --app sf-phoenix --region iad --size 1
+#   flyctl secrets set --app sf-phoenix \
+#     PHOENIX_SQL_DATABASE_URL="postgresql://...@aws-1-us-east-1.pooler.supabase.com:5432/postgres"
+#   flyctl deploy --app sf-phoenix --config fly/phoenix.fly.toml
+#
+# UI (port 6006) is reachable publicly only via Cloudflare Access; OTLP gRPC
+# (port 4317) is reachable only via the Fly internal network (sf-litellm hits
+# sf-phoenix.internal:4317).
+
+app = "sf-phoenix"
+primary_region = "iad"
+
+[build]
+  image = "arizephoenix/phoenix:latest"
+
+[env]
+  PHOENIX_PORT = "6006"
+  PHOENIX_HOST = "0.0.0.0"
+  PHOENIX_WORKING_DIR = "/mnt/data"
+  PHOENIX_SQL_DATABASE_SCHEMA = "phoenix"
+
+[[mounts]]
+  source = "phoenix_data"
+  destination = "/mnt/data"
+
+# Public UI on :6006 → exposed as https://sf-phoenix.fly.dev (front this with
+# Cloudflare Access for Google SSO).
+[http_service]
+  internal_port = 6006
+  force_https = true
+  auto_stop_machines = "off"
+  auto_start_machines = true
+  min_machines_running = 1
+  processes = ["app"]
+
+  [http_service.concurrency]
+    type = "connections"
+    soft_limit = 50
+    hard_limit = 200
+
+# Internal-only OTLP gRPC for LiteLLM. No [[services.ports]] block, so no
+# public listener — only reachable from sf-litellm via the .internal mesh.
+[[services]]
+  internal_port = 4317
+  protocol = "tcp"
+  auto_stop_machines = "off"
+  auto_start_machines = true
+  min_machines_running = 1
+
+[[vm]]
+  cpu_kind = "shared"
+  cpus = 1
+  memory = "1gb"
