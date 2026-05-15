@@ -29,32 +29,49 @@ flyctl secrets set --app sf-phoenix \
   PHOENIX_SQL_DATABASE_URL="postgresql://...@aws-1-us-east-1.pooler.supabase.com:5432/postgres"
 flyctl deploy --app sf-phoenix --config fly/phoenix.fly.toml
 
-# 2. sf-litellm
+# 2. sf-litellm — no secrets needed for pure OAuth pass-through
 flyctl apps create sf-litellm --org teraflop
-flyctl secrets set --app sf-litellm \
-  ANTHROPIC_API_KEY="sk-ant-..." \
-  LITELLM_MASTER_KEY="$(openssl rand -hex 32)"
 flyctl deploy --app sf-litellm --config fly/litellm.fly.toml
+```
+
+## Auth model: OAuth pass-through
+
+Clients ship their own Claude OAuth access token in `Authorization: Bearer`.
+The proxy forwards it as-is to Anthropic, so usage attributes to the
+token-holder's account — not a shared proxy identity. Phoenix sees the
+request as a `litellm_request` span and logs input / output / token counts.
+
+**Important:** use `/v1/messages` (Anthropic-native path), not
+`/v1/chat/completions` (OpenAI-normalized path). The latter would force
+LiteLLM to fall back to its config-level `ANTHROPIC_API_KEY` instead of
+forwarding the request's bearer.
+
+```bash
+# Set ANTHROPIC_BASE_URL so the Anthropic SDK / claude-agent-sdk routes
+# through the proxy:
+export ANTHROPIC_BASE_URL=https://sf-litellm.fly.dev
+export ANTHROPIC_AUTH_TOKEN=sk-ant-oat01-...   # your OAuth access token
 ```
 
 ## Smoke
 
 ```bash
-# Phoenix /v1/health (internal only — exec inside one of the Fly machines)
-flyctl ssh console --app sf-phoenix -C "curl -sf http://localhost:6006/healthz"
+# Phoenix UI reachability
+curl -sI https://sf-phoenix.fly.dev/
 
-# LiteLLM with master key
-LITELLM_MASTER_KEY=$(flyctl secrets list --app sf-litellm --json | jq -r '.[]|select(.Name=="LITELLM_MASTER_KEY")|.Digest')
-# (^ Digest is just the hash — actual value isn't exposed; copy from your password manager when set)
-
-curl https://sf-litellm.fly.dev/v1/chat/completions \
-  -H "Authorization: Bearer $LITELLM_MASTER_KEY" \
+# OAuth pass-through: an end-to-end call that should show up in Phoenix
+curl https://sf-litellm.fly.dev/v1/messages \
+  -H "Authorization: Bearer $ANTHROPIC_AUTH_TOKEN" \
+  -H "anthropic-version: 2023-06-01" \
+  -H "anthropic-beta: oauth-2025-04-20" \
   -H "Content-Type: application/json" \
-  -d '{"model":"claude-haiku-4-5","messages":[{"role":"user","content":"ping"}]}'
+  -d '{"model":"claude-haiku-4-5-20251001","messages":[{"role":"user","content":"reply: ping"}],"max_tokens":10}'
 ```
 
-A successful response should also produce a span visible at
-`https://sf-phoenix.fly.dev/projects/sf-workspaces` (behind Cloudflare Access).
+A successful response (`{"content":[{"type":"text","text":"pong"}],...}`) should
+also produce a `litellm_request` span visible at
+`https://sf-phoenix.fly.dev/` (behind Cloudflare Access) with `input.value`
+and `output.value` matching your prompt + reply.
 
 ## Cloudflare Access (Phoenix UI)
 
@@ -66,13 +83,17 @@ Access using:
 
 ## Secret rotation
 
-```bash
-# Rotate LiteLLM master key
-flyctl secrets set --app sf-litellm LITELLM_MASTER_KEY="$(openssl rand -hex 32)"
-flyctl deploy --app sf-litellm --config fly/litellm.fly.toml  # restart picks up the new secret
+Only `sf-phoenix`'s `PHOENIX_SQL_DATABASE_URL` is a long-lived secret on the
+Fly side. Rotate when the Supabase pooler password is rotated:
 
-# Update every client that hits sf-litellm (workspace shim env, eval harness, etc.)
+```bash
+flyctl secrets set --app sf-phoenix \
+  PHOENIX_SQL_DATABASE_URL="postgresql://...new-credentials...@aws-1-us-east-1.pooler.supabase.com:5432/postgres"
+# Auto-redeploys; Phoenix picks up the new DSN on restart.
 ```
+
+`sf-litellm` holds no secrets — all auth flows through per-request OAuth
+tokens supplied by the client.
 
 ## Notes / gotchas
 

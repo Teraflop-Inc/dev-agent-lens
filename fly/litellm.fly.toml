@@ -1,18 +1,17 @@
 # sf-litellm — patched LiteLLM proxy (aowen14/litellm-oauth-fix) on Fly,
 # fronting Anthropic for Solutions-Fabric workspace runs (ENG2-1194).
 #
+# Auth model: OAuth pass-through. Clients send their own Claude OAuth token
+# in `Authorization: Bearer ...`; LiteLLM forwards it to Anthropic so usage
+# is attributed per-user. No master key at the proxy layer (that would
+# collapse everyone to a single Anthropic identity). Public-internet abuse
+# is mitigated out-of-band via Cloudflare Access on the sf-litellm.fly.dev
+# hostname; autonomous CI uses CF Access service tokens.
+#
 # Deploy:
 #   cd dev-agent-lens
 #   flyctl apps create sf-litellm --org teraflop
-#   flyctl secrets set --app sf-litellm \
-#     ANTHROPIC_API_KEY="sk-ant-..." \
-#     LITELLM_MASTER_KEY="$(openssl rand -hex 32)"
 #   flyctl deploy --app sf-litellm --config fly/litellm.fly.toml
-#
-# Clients (workspace shim, eval harness) authenticate with the master key as
-# a Bearer token. No virtual-key admin surface is exposed — that would leak
-# org-wide access if any client got compromised. The master key is set once
-# and rotated via flyctl secrets, not via the LiteLLM UI.
 #
 # OTLP exports to sf-phoenix.internal:4317 over the Fly private mesh.
 
@@ -23,6 +22,12 @@ primary_region = "iad"
   image = "aowen14/litellm-oauth-fix:latest"
 
 [env]
+  # OAuth pass-through requires LiteLLM to NOT validate the incoming bearer
+  # against its own master-key auth — just forward it to Anthropic. Without
+  # this, any non-master-key bearer (i.e. every user OAuth token) gets a 401
+  # before the request reaches the upstream call.
+  LITELLM_DISABLE_AUTH = "true"
+
   # Phoenix OTLP target — internal-only, no public listener on sf-phoenix:4317.
   OTEL_EXPORTER_OTLP_ENDPOINT = "http://sf-phoenix.internal:4317"
   OTEL_EXPORTER_OTLP_PROTOCOL = "grpc"

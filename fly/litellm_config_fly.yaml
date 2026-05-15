@@ -1,11 +1,19 @@
 # LiteLLM config for the Fly deployment (sf-litellm). Forked from
-# litellm_config_phoenix.yaml — the only meaningful differences are:
+# litellm_config_phoenix.yaml.
 #
-#   - master-key auth ENABLED (the local dev compose disables it for
-#     convenience; on Fly we require a Bearer token so the proxy isn't an
-#     open Anthropic relay)
-#   - Phoenix endpoints point at sf-phoenix.internal (set via env in
-#     litellm.fly.toml, so they don't appear here)
+# Auth model: OAuth pass-through (the whole point of aowen14/litellm-oauth-fix).
+#   - Each client sends `Authorization: Bearer <claude-oauth-token>`
+#   - LiteLLM forwards the bearer to api.anthropic.com as-is
+#   - Anthropic attributes usage to the user's account
+#   - Phoenix sees the span; we tag it with session_id for correlation
+#
+# No master-key bearer at the proxy layer — that would defeat OAuth
+# pass-through (every client would share one identity to Anthropic).
+# Public-relay risk is handled out-of-band (Cloudflare Access in front of
+# the public hostname, service tokens for autonomous CI).
+#
+# Phoenix endpoints point at sf-phoenix.internal (set via env in
+# litellm.fly.toml, so they don't appear here).
 
 model_list:
   - model_name: "claude-opus-4-7"
@@ -67,7 +75,5 @@ router_settings:
   disable_cooldowns: true
   allowed_fails: 1000
 
-general_settings:
-  # Bearer-token auth via LITELLM_MASTER_KEY env var (set as a flyctl secret).
-  # All requests must send `Authorization: Bearer <master-key>`.
-  master_key: os.environ/LITELLM_MASTER_KEY
+# No general_settings.master_key — OAuth pass-through model means the
+# incoming Authorization header IS the auth, not a shared proxy key.
