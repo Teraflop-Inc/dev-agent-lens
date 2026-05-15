@@ -73,13 +73,29 @@ also produce a `litellm_request` span visible at
 `https://sf-phoenix.fly.dev/` (behind Cloudflare Access) with `input.value`
 and `output.value` matching your prompt + reply.
 
-## Cloudflare Access (Phoenix UI)
+## Access control (Phoenix UI)
 
-`sf-phoenix.fly.dev` is publicly reachable by default. Front it with Cloudflare
-Access using:
-- Application type: Self-hosted
-- Application domain: `sf-phoenix.fly.dev` (or a CNAME like `phoenix.solutionsfabric.com`)
-- Policy: emails ending in `@teraflop.io` (Google SSO IdP)
+**Current model: Fly internal-only.** sf-phoenix has no public IPs and no
+`[http_service]` — the UI listens inside the VM but isn't routable from the
+open internet. Reach it via:
+
+```bash
+flyctl proxy 6006:6006 --app sf-phoenix
+# then open http://localhost:6006 in a browser
+```
+
+Anyone with `flyctl auth login` + Teraflop org membership can do this.
+
+**Why not Cloudflare Access?** CF Access requires DNS to be on Cloudflare.
+The team uses GoDaddy. CF Access is the right answer if/when DNS migrates;
+the deploy is structured so re-adding a public `[http_service]` + custom
+hostname is a small diff.
+
+**Gotcha: PHOENIX_HOST=:: (dual-stack), not 0.0.0.0.** Fly's `.internal`
+DNS resolves to IPv6; `PHOENIX_HOST=0.0.0.0` binds IPv4-only so all
+inter-app traffic refuses on the IPv6 path (4317 dual-stacks automatically,
+but Uvicorn doesn't). Verified by `flyctl proxy` returning Connection
+reset until the bind was switched (ENG2-1194).
 
 ## Secret rotation
 
