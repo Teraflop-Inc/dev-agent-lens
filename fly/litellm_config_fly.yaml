@@ -1,0 +1,79 @@
+# LiteLLM config for the Fly deployment (sf-litellm). Forked from
+# litellm_config_phoenix.yaml.
+#
+# Auth model: OAuth pass-through (the whole point of aowen14/litellm-oauth-fix).
+#   - Each client sends `Authorization: Bearer <claude-oauth-token>`
+#   - LiteLLM forwards the bearer to api.anthropic.com as-is
+#   - Anthropic attributes usage to the user's account
+#   - Phoenix sees the span; we tag it with session_id for correlation
+#
+# No master-key bearer at the proxy layer — that would defeat OAuth
+# pass-through (every client would share one identity to Anthropic).
+# Public-relay risk is handled out-of-band (Cloudflare Access in front of
+# the public hostname, service tokens for autonomous CI).
+#
+# Phoenix endpoints point at sf-phoenix.internal (set via env in
+# litellm.fly.toml, so they don't appear here).
+
+model_list:
+  - model_name: "claude-opus-4-7"
+    litellm_params:
+      model: "claude-opus-4-7"
+      api_key: os.environ/ANTHROPIC_API_KEY
+      custom_llm_provider: "anthropic"
+
+  - model_name: "claude-sonnet-4-6"
+    litellm_params:
+      model: "claude-sonnet-4-6"
+      api_key: os.environ/ANTHROPIC_API_KEY
+      custom_llm_provider: "anthropic"
+
+  - model_name: "claude-haiku-4-5"
+    litellm_params:
+      model: "claude-haiku-4-5"
+      api_key: os.environ/ANTHROPIC_API_KEY
+      custom_llm_provider: "anthropic"
+
+  - model_name: "anthropic/*"
+    litellm_params:
+      model: "anthropic/*"
+      api_key: os.environ/ANTHROPIC_API_KEY
+
+  - model_name: "claude-opus-*"
+    litellm_params:
+      model: "claude-opus-*"
+      api_key: os.environ/ANTHROPIC_API_KEY
+      custom_llm_provider: "anthropic"
+
+  - model_name: "claude-sonnet-*"
+    litellm_params:
+      model: "claude-sonnet-*"
+      api_key: os.environ/ANTHROPIC_API_KEY
+      custom_llm_provider: "anthropic"
+
+  - model_name: "claude-haiku-*"
+    litellm_params:
+      model: "claude-haiku-*"
+      api_key: os.environ/ANTHROPIC_API_KEY
+      custom_llm_provider: "anthropic"
+
+  - model_name: "claude-*"
+    litellm_params:
+      model: "claude-*"
+      api_key: os.environ/ANTHROPIC_API_KEY
+      custom_llm_provider: "anthropic"
+
+litellm_settings:
+  callbacks: ["arize_phoenix"]
+  drop_params: false
+  set_verbose: false
+  pass_through_params: true
+
+router_settings:
+  routing_strategy: "simple-shuffle"
+  enable_pre_call_checks: false
+  disable_cooldowns: true
+  allowed_fails: 1000
+
+# No general_settings.master_key — OAuth pass-through model means the
+# incoming Authorization header IS the auth, not a shared proxy key.
