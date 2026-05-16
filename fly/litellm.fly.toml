@@ -1,0 +1,72 @@
+# sf-litellm — patched LiteLLM proxy (aowen14/litellm-oauth-fix) on Fly,
+# fronting Anthropic for Solutions-Fabric workspace runs (ENG2-1194).
+#
+# Auth model: OAuth pass-through. Clients send their own Claude OAuth token
+# in `Authorization: Bearer ...`; LiteLLM forwards it to Anthropic so usage
+# is attributed per-user. No master key at the proxy layer (that would
+# collapse everyone to a single Anthropic identity). Public-internet abuse
+# is mitigated out-of-band via Cloudflare Access on the sf-litellm.fly.dev
+# hostname; autonomous CI uses CF Access service tokens.
+#
+# Deploy:
+#   cd dev-agent-lens
+#   flyctl apps create sf-litellm --org teraflop
+#   flyctl deploy --app sf-litellm --config fly/litellm.fly.toml
+#
+# OTLP exports to sf-phoenix.internal:4317 over the Fly private mesh.
+
+app = "sf-litellm"
+primary_region = "iad"
+
+[build]
+  image = "aowen14/litellm-oauth-fix:latest"
+
+[env]
+  # OAuth pass-through requires LiteLLM to NOT validate the incoming bearer
+  # against its own master-key auth — just forward it to Anthropic. Without
+  # this, any non-master-key bearer (i.e. every user OAuth token) gets a 401
+  # before the request reaches the upstream call.
+  LITELLM_DISABLE_AUTH = "true"
+
+  # Phoenix OTLP target — internal-only, no public listener on sf-phoenix:4317.
+  OTEL_EXPORTER_OTLP_ENDPOINT = "http://sf-phoenix.internal:4317"
+  OTEL_EXPORTER_OTLP_PROTOCOL = "grpc"
+  PHOENIX_COLLECTOR_ENDPOINT  = "http://sf-phoenix.internal:4317"
+
+  # Project name in Phoenix UI — surface so spans from this proxy are filterable.
+  OTEL_SERVICE_NAME = "sf-workspaces"
+  OTEL_RESOURCE_ATTRIBUTES = "service.name=sf-workspaces,openinference.project.name=sf-workspaces"
+
+  # Don't drop callback failures silently; LiteLLM's default-quiet on OTel
+  # errors hid a misrouted endpoint for half a day in dev-agent-lens.
+  LITELLM_LOG = "INFO"
+
+# Ship the config into the image at deploy time. Fly's [[files]] copies the
+# local file into the running container — no custom Dockerfile needed, no
+# volume to keep in sync. The image's entrypoint reads /app/config.yaml
+# (overridden via [processes.app] below if needed).
+[[files]]
+  guest_path = "/app/config.yaml"
+  local_path = "fly/litellm_config_fly.yaml"
+
+[processes]
+  # Mirrors the docker-compose command for litellm-proxy-phoenix.
+  app = "--config /app/config.yaml --port 4000 --num_workers 1"
+
+[http_service]
+  internal_port = 4000
+  force_https = true
+  auto_stop_machines = "suspend"  # idle savings; LiteLLM is stateless
+  auto_start_machines = true
+  min_machines_running = 0
+  processes = ["app"]
+
+  [http_service.concurrency]
+    type = "connections"
+    soft_limit = 25
+    hard_limit = 100
+
+[[vm]]
+  cpu_kind = "shared"
+  cpus = 1
+  memory = "1gb"

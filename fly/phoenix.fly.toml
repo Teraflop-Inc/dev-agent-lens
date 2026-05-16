@@ -1,0 +1,65 @@
+# sf-phoenix — Arize Phoenix on Fly, backing the dev-agent-lens observability
+# stack used by Solutions-Fabric workspace runs (ENG2-1194).
+#
+# Deploy:
+#   cd dev-agent-lens
+#   flyctl apps create sf-phoenix --org teraflop
+#   flyctl volumes create phoenix_data --app sf-phoenix --region iad --size 1
+#   flyctl secrets set --app sf-phoenix \
+#     PHOENIX_SQL_DATABASE_URL="postgresql://...@aws-1-us-east-1.pooler.supabase.com:5432/postgres"
+#   flyctl deploy --app sf-phoenix --config fly/phoenix.fly.toml
+#
+# Network: this app is INTERNAL-ONLY — no public IPs, no [http_service].
+# Both 6006 (UI) and 4317 (OTLP gRPC) listen inside the container but are
+# only reachable via Fly's private mesh:
+#   - sf-litellm hits sf-phoenix.internal:4317 to ship spans
+#   - Engineers hit the UI via `flyctl proxy 6006:6006 --app sf-phoenix`
+#     and then http://localhost:6006 in the browser
+# Going internal-only because we don't have Cloudflare DNS yet to put CF
+# Access in front of a publicly-exposed UI.
+
+app = "sf-phoenix"
+primary_region = "iad"
+
+[build]
+  image = "arizephoenix/phoenix:latest"
+
+[env]
+  PHOENIX_PORT = "6006"
+  # IMPORTANT: bind dual-stack (::), not IPv4-only (0.0.0.0). Fly's .internal
+  # DNS resolves to IPv6 (fdaa:...); a 0.0.0.0-only Uvicorn refuses IPv6
+  # connections, so flyctl proxy + sf-litellm both get "Connection refused"
+  # while the gRPC listener on 4317 (which auto-dual-stacks) works fine.
+  # On Linux, binding :: also accepts IPv4 via v4-mapped addrs.
+  PHOENIX_HOST = "::"
+  PHOENIX_WORKING_DIR = "/mnt/data"
+  PHOENIX_SQL_DATABASE_SCHEMA = "phoenix"
+
+[[mounts]]
+  source = "phoenix_data"
+  destination = "/mnt/data"
+
+# Internal-only OTLP gRPC for LiteLLM. No [[services.ports]] block, so no
+# public listener — only reachable from sf-litellm via the .internal mesh.
+[[services]]
+  internal_port = 4317
+  protocol = "tcp"
+  auto_stop_machines = "off"
+  auto_start_machines = true
+  min_machines_running = 1
+
+# Phoenix UI on 6006, declared as an internal-only service (no [[services.ports]]).
+# The declaration is what makes `flyctl proxy 6006:6006 --app sf-phoenix`
+# route to this port — without it the container listens but Fly's machine
+# runner doesn't advertise the port for wireguard routing.
+[[services]]
+  internal_port = 6006
+  protocol = "tcp"
+  auto_stop_machines = "off"
+  auto_start_machines = true
+  min_machines_running = 1
+
+[[vm]]
+  cpu_kind = "shared"
+  cpus = 1
+  memory = "1gb"
