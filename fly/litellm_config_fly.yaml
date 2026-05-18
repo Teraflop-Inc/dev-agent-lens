@@ -1,16 +1,17 @@
 # LiteLLM config for the Fly deployment (sf-litellm). Forked from
 # litellm_config_phoenix.yaml.
 #
-# Auth model: OAuth pass-through (the whole point of aowen14/litellm-oauth-fix).
-#   - Each client sends `Authorization: Bearer <claude-oauth-token>`
-#   - LiteLLM forwards the bearer to api.anthropic.com as-is
-#   - Anthropic attributes usage to the user's account
-#   - Phoenix sees the span; we tag it with session_id for correlation
+# Auth model: master_key + OAuth pass-through coexistence.
+#   - Claude Code OAuth bearers (sk-ant-oat...) early-return proxy_admin in
+#     the fork's user_api_key_auth before master_key check; forwarded to
+#     api.anthropic.com as-is so per-user billing is preserved.
+#   - Any other request must send `Authorization: Bearer <master_key>` or
+#     get 401, blocking probes against the public hostname.
+#   - Phoenix sees the span; we tag it with session_id for correlation.
 #
-# No master-key bearer at the proxy layer — that would defeat OAuth
-# pass-through (every client would share one identity to Anthropic).
-# Public-relay risk is handled out-of-band (Cloudflare Access in front of
-# the public hostname, service tokens for autonomous CI).
+# `forward_client_headers_to_llm_api: true` makes LiteLLM forward x-* and
+# Authorization headers to the upstream LLM (needed for OAuth pass-through
+# and for `x-litellm-metadata` session_id propagation per ENG2-1194 M3).
 #
 # Phoenix endpoints point at sf-phoenix.internal (set via env in
 # litellm.fly.toml, so they don't appear here).
@@ -75,5 +76,12 @@ router_settings:
   disable_cooldowns: true
   allowed_fails: 1000
 
-# No general_settings.master_key — OAuth pass-through model means the
-# incoming Authorization header IS the auth, not a shared proxy key.
+general_settings:
+  # Forward Authorization + x-* headers to the upstream LLM. Required for
+  # OAuth pass-through (sk-ant-oat... reaches api.anthropic.com) and for
+  # x-litellm-metadata session_id propagation (ENG2-1194 M3 shim).
+  forward_client_headers_to_llm_api: true
+  # Probe gate. Fork's user_api_key_auth.py:382 early-returns proxy_admin
+  # for sk-ant-oat... bearers BEFORE this check, so OAuth pass-through
+  # continues to work; anything else must match this key or get 401.
+  master_key: os.environ/LITELLM_MASTER_KEY
