@@ -3,11 +3,16 @@
 Three Fly apps backing the Solutions-Fabric workspace-runner observability
 stack (ENG2-1194) + team access (ENG2-1234). All in `teraflop` org, region `iad`.
 
-| App | What | Public URL | Internal URL | Tailnet URL |
-|---|---|---|---|---|
-| `sf-phoenix` | Arize Phoenix UI + OTLP collector | `https://sf-phoenix.fly.dev` (CF Access) | `sf-phoenix.internal:4317` (OTLP gRPC) | `http://sf-tailscale-router:6006/` |
-| `sf-litellm` | Patched LiteLLM proxy (`aowen14/litellm-oauth-fix`) | `https://sf-litellm.fly.dev` (Bearer-auth) | `sf-litellm.internal:4000` (Fly mesh) | `http://sf-tailscale-router:4000/` |
-| `sf-tailscale-router` | Subnet router + TCP forwarders for the team's Tailnet | — | — | (the router itself) |
+**Inbound is tailnet-only as of ENG2-1234.** All three apps have zero
+public IPs allocated. Outbound (LiteLLM → Anthropic, Phoenix → Supabase
+Postgres) is unaffected — it uses Fly's egress NAT and doesn't require
+any ingress.
+
+| App | What | Internal URL | Tailnet URL |
+|---|---|---|---|
+| `sf-phoenix` | Arize Phoenix UI + OTLP collector | `sf-phoenix.internal:4317` (OTLP gRPC), `:6006` (UI) | `http://sf-tailscale-router:6006/` |
+| `sf-litellm` | Patched LiteLLM proxy (`aowen14/litellm-oauth-fix`) | `sf-litellm.internal:4000` | `http://sf-tailscale-router:4000/` |
+| `sf-tailscale-router` | Subnet router + TCP forwarders for the team's Tailnet | — | (the router itself) |
 
 See `fly/router/README.md` for tailnet access details.
 
@@ -51,19 +56,20 @@ forwarding the request's bearer.
 
 ```bash
 # Set ANTHROPIC_BASE_URL so the Anthropic SDK / claude-agent-sdk routes
-# through the proxy:
-export ANTHROPIC_BASE_URL=https://sf-litellm.fly.dev
-export ANTHROPIC_AUTH_TOKEN=sk-ant-oat01-...   # your OAuth access token
+# through the proxy. Pick the path based on where you're calling from:
+export ANTHROPIC_BASE_URL=http://sf-tailscale-router:4000     # tailnet (laptops)
+export ANTHROPIC_BASE_URL=http://sf-litellm.internal:4000     # another Fly app in teraflop org
+export ANTHROPIC_AUTH_TOKEN=sk-ant-oat01-...                 # your OAuth access token
 ```
 
 ## Smoke
 
 ```bash
-# Phoenix UI reachability
-curl -sI https://sf-phoenix.fly.dev/
+# Phoenix UI reachability (from a tailnet peer)
+curl -sI http://sf-tailscale-router:6006/
 
 # OAuth pass-through: an end-to-end call that should show up in Phoenix
-curl https://sf-litellm.fly.dev/v1/messages \
+curl http://sf-tailscale-router:4000/v1/messages \
   -H "Authorization: Bearer $ANTHROPIC_AUTH_TOKEN" \
   -H "anthropic-version: 2023-06-01" \
   -H "anthropic-beta: oauth-2025-04-20" \
@@ -72,27 +78,32 @@ curl https://sf-litellm.fly.dev/v1/messages \
 ```
 
 A successful response (`{"content":[{"type":"text","text":"pong"}],...}`) should
-also produce a `litellm_request` span visible at
-`https://sf-phoenix.fly.dev/` (behind Cloudflare Access) with `input.value`
-and `output.value` matching your prompt + reply.
+also produce a `litellm_request` span visible at the Phoenix UI
+(`http://sf-tailscale-router:6006/`) with `input.value` and `output.value`
+matching your prompt + reply.
 
-## Access control (Phoenix UI)
+## Access control
 
-**Current model: Fly internal-only.** sf-phoenix has no public IPs and no
-`[http_service]` — the UI listens inside the VM but isn't routable from the
-open internet. Reach it via:
+**Current model: tailnet-only (ENG2-1234).** Neither `sf-phoenix` nor
+`sf-litellm` has public IPs allocated, and neither declares an
+`[http_service]` block — they only listen on Fly's 6PN mesh. Reach them via:
 
-```bash
-flyctl proxy 6006:6006 --app sf-phoenix
-# then open http://localhost:6006 in a browser
-```
+1. **Tailnet** (preferred — see `router/README.md`):
+   ```bash
+   curl http://sf-tailscale-router:6006/   # Phoenix UI
+   curl http://sf-tailscale-router:4000/   # LiteLLM
+   ```
 
-Anyone with `flyctl auth login` + Teraflop org membership can do this.
+2. **`flyctl proxy`** (anyone with `flyctl auth login` + Teraflop org membership):
+   ```bash
+   flyctl proxy 6006:6006 --app sf-phoenix
+   # then open http://localhost:6006 in a browser
+   ```
 
-**Why not Cloudflare Access?** CF Access requires DNS to be on Cloudflare.
-The team uses GoDaddy. CF Access is the right answer if/when DNS migrates;
-the deploy is structured so re-adding a public `[http_service]` + custom
-hostname is a small diff.
+3. **From another Fly app in the org**, hit `.internal` directly:
+   ```
+   curl http://sf-litellm.internal:4000/v1/messages ...
+   ```
 
 **Gotcha: PHOENIX_HOST=:: (dual-stack), not 0.0.0.0.** Fly's `.internal`
 DNS resolves to IPv6; `PHOENIX_HOST=0.0.0.0` binds IPv4-only so all
