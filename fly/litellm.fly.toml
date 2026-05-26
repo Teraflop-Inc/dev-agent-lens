@@ -47,7 +47,11 @@ primary_region = "iad"
 
 [processes]
   # Mirrors the docker-compose command for litellm-proxy-phoenix.
-  app = "--config /app/config.yaml --port 4000 --num_workers 1"
+  # --host :: makes uvicorn bind dual-stack instead of IPv4-only; without
+  # this, direct hits to sf-litellm.internal:4000 from another Fly app or
+  # via the Tailscale subnet router (ENG2-1234) get ECONNREFUSED, because
+  # Fly's private mesh is IPv6-only. Same fix as PHOENIX_HOST=:: in phoenix.fly.toml.
+  app = "--config /app/config.yaml --host :: --port 4000 --num_workers 1"
 
 [http_service]
   internal_port = 4000

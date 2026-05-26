@@ -1,12 +1,15 @@
 # Fly deploy: dev-agent-lens
 
-Two Fly apps backing the Solutions-Fabric workspace-runner observability stack
-(ENG2-1194). Both run in the `teraflop` org, primary region `iad`.
+Three Fly apps backing the Solutions-Fabric workspace-runner observability
+stack (ENG2-1194) + team access (ENG2-1234). All in `teraflop` org, region `iad`.
 
-| App | What | Public URL | Internal URL |
-|---|---|---|---|
-| `sf-phoenix` | Arize Phoenix UI + OTLP collector | `https://sf-phoenix.fly.dev` (CF Access) | `sf-phoenix.internal:4317` (OTLP gRPC) |
-| `sf-litellm` | Patched LiteLLM proxy (`aowen14/litellm-oauth-fix`) | `https://sf-litellm.fly.dev` (Bearer-auth) | — |
+| App | What | Public URL | Internal URL | Tailnet URL |
+|---|---|---|---|---|
+| `sf-phoenix` | Arize Phoenix UI + OTLP collector | `https://sf-phoenix.fly.dev` (CF Access) | `sf-phoenix.internal:4317` (OTLP gRPC) | `http://sf-tailscale-router:6006/` |
+| `sf-litellm` | Patched LiteLLM proxy (`aowen14/litellm-oauth-fix`) | `https://sf-litellm.fly.dev` (Bearer-auth) | `sf-litellm.internal:4000` (Fly mesh) | `http://sf-tailscale-router:4000/` |
+| `sf-tailscale-router` | Subnet router + TCP forwarders for the team's Tailnet | — | — | (the router itself) |
+
+See `fly/router/README.md` for tailnet access details.
 
 Both apps write to the **same Supabase Postgres** that already backs
 `SandboxAgentCapture` (ENG2-1194 M1) — Phoenix uses schema `phoenix`, the
