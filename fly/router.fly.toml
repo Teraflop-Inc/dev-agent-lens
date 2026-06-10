@@ -38,6 +38,12 @@ primary_region = "iad"
   source = "tailscale_state"
   destination = "/var/lib/tailscale"
 
+# Restart the machine whenever PID 1 exits — start.sh exits when tailscaled
+# dies (ENG2-1269: an OOM-killed tailscaled previously left the machine
+# "started" but the tailnet node dark, with no auto-recovery).
+[[restart]]
+  policy = "always"
+
 # Single always-on machine. Subnet router has to be reachable for traffic
 # from the tailnet to flow into the Fly mesh, so no idle-suspend.
 [[vm]]
