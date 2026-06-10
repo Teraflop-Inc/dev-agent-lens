@@ -49,6 +49,7 @@ echo "[router] starting tailscaled (userspace networking)..."
     --socket="$TS_SOCK" \
     --socks5-server=localhost:1055 \
     >/var/log/tailscaled.log 2>&1 &
+TAILSCALED_PID=$!
 
 # Wait for tailscaled to open its control socket. We can't use
 # `tailscale status` as the readiness check because it exits non-zero
@@ -119,6 +120,15 @@ echo "         https://login.tailscale.com/admin/machines"
 echo "[router] exposed:"
 /usr/bin/tailscale --socket="$TS_SOCK" serve status || true
 
-# Tail the daemon log to keep PID 1 alive and surface anything tailscaled
-# logs (useful when debugging serve / WireGuard / DERP issues).
-exec tail -F /var/log/tailscaled.log
+# Surface the daemon log, but tie PID 1's lifetime to tailscaled itself —
+# NOT to the tail. ENG2-1269: tailscaled was OOM-killed while PID 1 kept
+# tailing its log, so Fly showed a healthy `started` machine for hours
+# while the tailnet node was dark. Exiting here (non-zero, paired with
+# `restart.policy = "always"` in router.fly.toml) makes Fly restart the
+# machine, which re-runs this script and brings tailscaled back.
+tail -F /var/log/tailscaled.log &
+
+ec=0
+wait "$TAILSCALED_PID" || ec=$?
+echo "[router] tailscaled exited (code $ec) — exiting so Fly restarts the machine (ENG2-1269)" >&2
+exit 1
