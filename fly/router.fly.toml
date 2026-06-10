@@ -1,0 +1,46 @@
+# sf-tailscale-router — subnet router into the Teraflop Fly 6PN mesh (ENG2-1234).
+#
+# Joins the Teraflop tailnet via TS_AUTHKEY and advertises Fly's private
+# IPv6 range so any team member on the tailnet can reach `<app>.internal`
+# for any Fly app in the org — sf-phoenix:6006, sf-litellm:4000, etc. —
+# without rebuilding those apps to embed tailscaled themselves.
+#
+# Deploy (first time):
+#   cd dev-agent-lens
+#   flyctl apps create sf-tailscale-router --org teraflop
+#   flyctl secrets set TS_AUTHKEY=tskey-... --app sf-tailscale-router
+#   flyctl deploy --app sf-tailscale-router --config fly/router.fly.toml
+#
+# After first deploy, approve the advertised route in the Tailscale admin
+# console (Machines → sf-tailscale-router → Edit route settings) and enable
+# split-DNS in Network → DNS so `*.internal` resolves via Fly's nameserver
+# fdaa::3 over the tailnet route. See fly/router/README.md.
+
+app = "sf-tailscale-router"
+primary_region = "iad"
+
+[build]
+  dockerfile = "router/Dockerfile"
+
+[env]
+  # The Teraflop Fly org's IPv6 /48 inside the global Fly fdaa::/16 mesh.
+  # Verified by reading the 6PN address of an existing org machine
+  # (sf-phoenix: fdaa:58:460c:...). If we add machines in a different org
+  # this will need updating.
+  TS_ROUTES = "fdaa:58:460c::/48"
+  TS_HOSTNAME = "sf-tailscale-router"
+
+# Persist tailscaled's node identity across redeploys. Without this each
+# new container generates a fresh node key, accumulating ghost nodes in
+# the admin console (sf-tailscale-router-1, -2, ...) and forcing a route
+# re-approval after every deploy.
+[[mounts]]
+  source = "tailscale_state"
+  destination = "/var/lib/tailscale"
+
+# Single always-on machine. Subnet router has to be reachable for traffic
+# from the tailnet to flow into the Fly mesh, so no idle-suspend.
+[[vm]]
+  cpu_kind = "shared"
+  cpus = 1
+  memory = "512mb"

@@ -1,7 +1,14 @@
 # sf-litellm — patched LiteLLM proxy (aowen14/litellm-oauth-fix) on Fly,
 # fronting Anthropic for Solutions-Fabric workspace runs (ENG2-1194).
 #
-# Auth model: master_key + OAuth pass-through (coexistence).
+# Inbound is **tailnet-only** (ENG2-1234). No `[http_service]` block, no
+# allocated public IPs — the proxy is only reachable via:
+#   - `sf-litellm.internal:4000` from another Fly app in the teraflop org
+#   - `http://sf-tailscale-router:4000/` from a team member on the tailnet
+# Outbound (to Anthropic etc.) is unaffected; that uses the egress NAT.
+#
+# Auth model retained as defense-in-depth even though network exposure
+# is gated:
 #   - Probe / non-OAuth requests must send `Authorization: Bearer <master_key>`
 #     (LITELLM_MASTER_KEY in Fly secrets) or get 401.
 #   - Claude Code OAuth requests send `Authorization: Bearer sk-ant-oat...`;
@@ -47,20 +54,22 @@ primary_region = "iad"
 
 [processes]
   # Mirrors the docker-compose command for litellm-proxy-phoenix.
-  app = "--config /app/config.yaml --port 4000 --num_workers 1"
+  # --host :: makes uvicorn bind dual-stack instead of IPv4-only; without
+  # this, direct hits to sf-litellm.internal:4000 from another Fly app or
+  # via the Tailscale subnet router (ENG2-1234) get ECONNREFUSED, because
+  # Fly's private mesh is IPv6-only. Same fix as PHOENIX_HOST=:: in phoenix.fly.toml.
+  app = "--config /app/config.yaml --host :: --port 4000 --num_workers 1"
 
-[http_service]
+# Internal-only service declaration. No `[[services.ports]]`, so the port
+# only listens on the Fly 6PN mesh — public ingress is impossible without
+# allocated IPs (which we explicitly released as part of ENG2-1234).
+[[services]]
   internal_port = 4000
-  force_https = true
-  auto_stop_machines = "suspend"  # idle savings; LiteLLM is stateless
+  protocol = "tcp"
+  auto_stop_machines = "off"
   auto_start_machines = true
-  min_machines_running = 0
+  min_machines_running = 1
   processes = ["app"]
-
-  [http_service.concurrency]
-    type = "connections"
-    soft_limit = 25
-    hard_limit = 100
 
 [[vm]]
   cpu_kind = "shared"
