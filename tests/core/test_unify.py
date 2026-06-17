@@ -13,20 +13,76 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timedelta
-from pathlib import Path
 
 import pandas as pd
-import pytest
 
 from dev_agent_lens.core.unify import (
     MatchReport,
+    _extract_user_attribution,
     get_session_spans,
     list_sessions,
     read_sessions_file,
-    save_match_report,
     unify_sessions,
     write_sessions_file,
 )
+
+LITELLM_USER_STRING = (
+    "user_abc123def_account_11111111-1111-1111-1111-111111111111"
+    "_session_22222222-2222-2222-2222-222222222222"
+)
+
+
+class TestUserAttributionPropagation:
+    """Tests for propagating user_id/account_id across a trace."""
+
+    def test_llm_span_gets_user_attribution(self):
+        """Given an LLM span with proxy metadata, extracts user_id/account_id."""
+        df = pd.DataFrame(
+            [
+                {
+                    "span_id": "llm1",
+                    "trace_id": "t1",
+                    "metadata": {"user_api_key_end_user_id": LITELLM_USER_STRING},
+                }
+            ]
+        )
+        result = _extract_user_attribution(df)
+        assert result.iloc[0]["user_id"] == "abc123def"
+        assert result.iloc[0]["account_id"] == (
+            "11111111-1111-1111-1111-111111111111"
+        )
+
+    def test_tool_span_inherits_user_from_sibling_llm_span(self):
+        """Given a tool span sharing a trace with an LLM span, it inherits user_id."""
+        df = pd.DataFrame(
+            [
+                {
+                    "span_id": "llm1",
+                    "trace_id": "t1",
+                    "metadata": {"user_api_key_end_user_id": LITELLM_USER_STRING},
+                },
+                {"span_id": "tool1", "trace_id": "t1", "metadata": None},
+            ]
+        )
+        result = _extract_user_attribution(df)
+        tool_row = result[result["span_id"] == "tool1"].iloc[0]
+        assert tool_row["user_id"] == "abc123def"
+        assert tool_row["account_id"] == "11111111-1111-1111-1111-111111111111"
+
+    def test_unattributable_spans_remain_none(self):
+        """Given spans with no proxy metadata anywhere, attribution is None."""
+        df = pd.DataFrame(
+            [{"span_id": "tool1", "trace_id": "t1", "metadata": None}]
+        )
+        result = _extract_user_attribution(df)
+        assert result.iloc[0]["user_id"] is None
+        assert result.iloc[0]["account_id"] is None
+
+    def test_empty_dataframe(self):
+        """Given an empty DataFrame, returns it with attribution columns added."""
+        result = _extract_user_attribution(pd.DataFrame())
+        assert "user_id" in result.columns
+        assert "account_id" in result.columns
 
 
 class TestUnifyNewSessions:

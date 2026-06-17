@@ -84,6 +84,8 @@ def _flatten_span(
     return {
         # Keys
         "session_id": session_id,
+        "user_id": span.get("user_id"),
+        "account_id": span.get("account_id"),
         "source": source,
         "span_id": span.get("span_id"),
         "trace_id": span.get("trace_id"),
@@ -219,6 +221,8 @@ class ParquetExporter:
         "status_code",
         "llm_model_name",
         "source",
+        "user_id",
+        "account_id",
     ]
 
     def __init__(
