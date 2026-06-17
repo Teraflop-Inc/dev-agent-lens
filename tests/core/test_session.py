@@ -365,3 +365,43 @@ class TestExtractUserAttributionFromSpan:
             }
         )
         assert extract_user_id_from_span(span) == "abc123def"
+
+
+# Current LiteLLM end-user identity: a JSON OBJECT, not the underscore string.
+LITELLM_USER_JSON = (
+    '{"device_id":"70d31d6ecd411c21","account_uuid":'
+    '"63ddef2f-7fea-429f-91ba-026ea296f6a4",'
+    '"session_id":"e66a526e-3684-49ff-9284-749b56d9664a"}'
+)
+
+
+class TestJsonObjectIdentity:
+    """The live LiteLLM proxy emits a JSON object {device_id, account_uuid,
+    session_id}, NOT the underscore string. Regression for ENG2-1312/1319."""
+
+    def test_session_id_from_json_object(self):
+        """session_id is read from the key, not regex-matched off the string."""
+        assert extract_session_id(LITELLM_USER_JSON) == "e66a526e-3684-49ff-9284-749b56d9664a"
+
+    def test_session_id_is_not_literal_id(self):
+        """Regression: SESSION_PATTERN over a JSON string used to yield 'id'."""
+        assert extract_session_id(LITELLM_USER_JSON) != "id"
+
+    def test_user_id_is_device_id(self):
+        assert extract_user_id(LITELLM_USER_JSON) == "70d31d6ecd411c21"
+
+    def test_account_id_from_account_uuid_key(self):
+        assert extract_account_id(LITELLM_USER_JSON) == "63ddef2f-7fea-429f-91ba-026ea296f6a4"
+
+    def test_real_span_shape_wrapper(self):
+        """The real span carries the JSON string under user_api_key_end_user_id."""
+        span = {"metadata": {"user_api_key_end_user_id": LITELLM_USER_JSON}}
+        assert extract_session_id_from_span(span) == "e66a526e-3684-49ff-9284-749b56d9664a"
+        assert extract_user_id_from_span(span) == "70d31d6ecd411c21"
+        assert extract_account_id_from_span(span) == "63ddef2f-7fea-429f-91ba-026ea296f6a4"
+
+    def test_account_uuid_only(self):
+        """JSON object with only account_uuid yields account, no user/session."""
+        obj = '{"account_uuid":"63ddef2f-7fea-429f-91ba-026ea296f6a4"}'
+        assert extract_account_id(obj) == "63ddef2f-7fea-429f-91ba-026ea296f6a4"
+        assert extract_user_id(obj) is None

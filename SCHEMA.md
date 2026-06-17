@@ -95,21 +95,28 @@ filtered per-user — e.g. `WHERE user_id = '<hash>'` in DuckDB.
 
 ### Canonical identity field
 
-The identity comes from the LiteLLM proxy's end-user string, emitted on LLM
-request spans in the metadata. It has the shape:
+The identity comes from the LiteLLM proxy's end-user value, emitted on LLM
+request spans in the metadata. The current proxy emits a **JSON object**:
 
+```json
+{"device_id": "<hex>", "account_uuid": "<uuid>", "session_id": "<uuid>"}
 ```
-user_<hash>_account_<uuid>_session_<uuid>
-```
 
-It is found under one of these metadata keys (checked in order):
-`requester_metadata.user_id`, `user_api_key_end_user_id`, or `user_id`.
+A **legacy underscore string** (`user_<hash>_account_<uuid>_session_<uuid>`) is
+still accepted as a fallback. It is found under one of these metadata keys
+(checked in order): `requester_metadata.user_id`, `user_api_key_end_user_id`, or
+`user_id`.
 
-| Field | Source segment | Stability |
-|-------|----------------|-----------|
-| `user_id` | `user_<hash>` | Canonical per-user/per-auth identifier |
-| `account_id` | `account_<uuid>` | Per-account, stable across a user's machines |
-| `session_id` | `session_<uuid>` | Per Claude Code session (see `core/session.py`) |
+| Field | JSON key (current) | Legacy segment | Stability |
+|-------|--------------------|----------------|-----------|
+| `user_id` | `device_id` | `user_<hash>` | Canonical per-user/per-auth identifier |
+| `account_id` | `account_uuid` | `account_<uuid>` | Per-account, stable across a user's machines |
+| `session_id` | `session_id` | `session_<uuid>` | Per Claude Code session (see `core/session.py`) |
+
+> ⚠️ The JSON object MUST be parsed by key, not regex-scanned: applying the
+> `session_<...>` regex to the JSON string matches the `session_id` **key** and
+> yields the literal `"id"` — the historical `session_id="id"` collapse
+> (ENG2-1312/1319).
 
 Parsing lives in `dev_agent_lens/core/session.py` (`extract_user_id` /
 `extract_account_id` and their `*_from_span` variants). Because proxy metadata
