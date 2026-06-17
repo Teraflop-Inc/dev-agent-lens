@@ -17,15 +17,67 @@ from typing import Any
 
 import pandas as pd
 
-# Pattern to match session ID in various formats
+# Legacy underscore-format identity string: user_<hash>_account_<uuid>_session_<uuid>.
+# Kept only as a fallback — the current LiteLLM proxy emits a JSON object instead
+# (see _parse_identity).
 SESSION_PATTERN = re.compile(r"session_([a-zA-Z0-9_-]+)")
-
-# Patterns for user/account identity inside the LiteLLM end-user string:
-#   user_<hash>_account_<uuid>_session_<uuid>
-# These are the canonical attribution fields (see SCHEMA.md). The user hash is
-# alphanumeric; the account is a 36-char UUID.
 USER_PATTERN = re.compile(r"user_([a-zA-Z0-9]+)_account")
 ACCOUNT_PATTERN = re.compile(r"account_([a-f0-9-]{36})")
+
+# Keys of the current JSON-object identity emitted by the LiteLLM proxy.
+_IDENTITY_KEYS = ("device_id", "account_uuid", "session_id")
+
+
+def _maybe_json_obj(value: Any) -> dict | None:
+    """Return ``value`` as a dict if it is one (or a JSON-object string), else None."""
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str) and value.lstrip().startswith("{"):
+        try:
+            parsed = json.loads(value)
+        except (json.JSONDecodeError, TypeError):
+            return None
+        return parsed if isinstance(parsed, dict) else None
+    return None
+
+
+def _parse_identity(value: Any) -> dict[str, str | None]:
+    """Parse a LiteLLM end-user identity into ``{device_id, account_id, session_id}``.
+
+    Two real formats arrive on ``user_api_key_end_user_id`` / ``requester_metadata.user_id``:
+
+    * **JSON object** (current LiteLLM proxy) —
+      ``{"device_id": ..., "account_uuid": ..., "session_id": ...}``. Read the keys
+      DIRECTLY. Running ``SESSION_PATTERN`` over this string would match the
+      ``session_id`` *key* and return the literal ``"id"`` — that is the
+      ENG2-1312/1319 bug — so a JSON object must never be regex-scanned.
+    * **Legacy underscore string** — ``user_<hash>_account_<uuid>_session_<uuid>``.
+      Fall back to the regexes.
+
+    Missing components come back as ``None`` (honest non-attribution, no fallback).
+    """
+    out: dict[str, str | None] = {"device_id": None, "account_id": None, "session_id": None}
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return out
+
+    obj = _maybe_json_obj(value)
+    if obj is not None:
+        device_id = obj.get("device_id")
+        account_id = obj.get("account_uuid") or obj.get("account_id")
+        session_id = obj.get("session_id")
+        out["device_id"] = str(device_id) if device_id else None
+        out["account_id"] = str(account_id) if account_id else None
+        out["session_id"] = str(session_id) if session_id else None
+        return out
+
+    text = str(value)
+    user_match = USER_PATTERN.search(text)
+    account_match = ACCOUNT_PATTERN.search(text)
+    session_match = SESSION_PATTERN.search(text)
+    out["device_id"] = user_match.group(1) if user_match else None
+    out["account_id"] = account_match.group(1) if account_match else None
+    out["session_id"] = session_match.group(1) if session_match else None
+    return out
 
 
 def extract_session_id(metadata: Any) -> str | None:
@@ -68,19 +120,26 @@ def extract_session_id(metadata: Any) -> str | None:
 
 
 def _extract_from_string(value: str) -> str | None:
-    """Extract session ID from a string value."""
+    """Extract session ID from a string value (JSON-object or legacy string).
+
+    Routes through _parse_identity so a JSON-object end-user id reads its
+    ``session_id`` key instead of the regex matching the key name as ``"id"``.
+    """
     if not value:
         return None
 
-    match = SESSION_PATTERN.search(value)
-    if match:
-        return match.group(1)
-
-    return None
+    return _parse_identity(value)["session_id"]
 
 
 def _extract_from_dict(metadata: dict) -> str | None:
     """Extract session ID from a dict metadata structure."""
+    # The dict may itself BE the JSON identity object {device_id, account_uuid,
+    # session_id} — read its session_id key directly (not the regex).
+    if any(k in metadata for k in _IDENTITY_KEYS):
+        session_id = _parse_identity(metadata)["session_id"]
+        if session_id:
+            return session_id
+
     # Try Phoenix format: metadata.user_id with session_ pattern
     user_id = metadata.get("user_id")
     if user_id:
@@ -253,21 +312,29 @@ def _identity_string_from_dict(metadata: dict) -> str | None:
 
 
 def _identity_string(metadata: Any) -> str | None:
-    """Extract the raw LiteLLM end-user string from arbitrary metadata."""
+    """Extract the raw LiteLLM end-user identity (JSON or legacy string) from metadata."""
     if metadata is None or (isinstance(metadata, float) and pd.isna(metadata)):
         return None
 
     if isinstance(metadata, dict):
+        # The dict may BE the identity object, or WRAP it under a known key.
+        if any(k in metadata for k in _IDENTITY_KEYS):
+            return json.dumps(metadata)
         return _identity_string_from_dict(metadata)
 
     if isinstance(metadata, str):
         try:
             parsed = json.loads(metadata)
-            if isinstance(parsed, dict):
-                return _identity_string_from_dict(parsed)
         except (json.JSONDecodeError, TypeError):
-            pass
-        # The raw string may itself be the identity string.
+            parsed = None
+        if isinstance(parsed, dict):
+            # The string may BE the identity object, or WRAP it under a known key.
+            if any(k in parsed for k in _IDENTITY_KEYS):
+                return metadata
+            wrapped = _identity_string_from_dict(parsed)
+            if wrapped:
+                return wrapped
+        # The raw string may itself be the legacy underscore identity.
         if USER_PATTERN.search(metadata) or ACCOUNT_PATTERN.search(metadata):
             return metadata
 
@@ -275,29 +342,27 @@ def _identity_string(metadata: Any) -> str | None:
 
 
 def extract_user_id(metadata: Any) -> str | None:
-    """Extract the user hash from span metadata.
+    """Extract the canonical per-user identifier from span metadata.
 
-    The user hash is the ``<hash>`` in ``user_<hash>_account_<uuid>_session_<uuid>``
-    and is the canonical, stable per-user identifier emitted by the LiteLLM proxy.
+    For the current JSON-object identity this is the ``device_id`` (the stable
+    per-machine/per-auth hash); for the legacy underscore string it is the
+    ``user_<hash>`` segment. Stored as ``user_id`` in the unified schema.
 
     Args:
         metadata: A metadata string, dict, or JSON string.
 
     Returns:
-        The user hash, or None if no user identity is present.
+        The user/device id, or None if no user identity is present.
     """
     identity = _identity_string(metadata)
-    if not identity:
-        return None
-    match = USER_PATTERN.search(identity)
-    return match.group(1) if match else None
+    return _parse_identity(identity)["device_id"] if identity else None
 
 
 def extract_account_id(metadata: Any) -> str | None:
     """Extract the account UUID from span metadata.
 
-    The account UUID is the ``<uuid>`` in ``account_<uuid>`` and is stable across
-    a single user's machines.
+    The ``account_uuid`` key of the JSON identity (or the ``account_<uuid>``
+    segment of the legacy string); stable across a single user's machines.
 
     Args:
         metadata: A metadata string, dict, or JSON string.
@@ -306,10 +371,7 @@ def extract_account_id(metadata: Any) -> str | None:
         The account UUID, or None if no account identity is present.
     """
     identity = _identity_string(metadata)
-    if not identity:
-        return None
-    match = ACCOUNT_PATTERN.search(identity)
-    return match.group(1) if match else None
+    return _parse_identity(identity)["account_id"] if identity else None
 
 
 def _iter_identity_metadata(span: dict | pd.Series) -> Any:
