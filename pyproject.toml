@@ -3,7 +3,7 @@ name = "dev_agent_lens"
 version = "0.1.0"
 description = "Unified trace analysis toolkit for Claude Code observability"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 license = {text = "MIT"}
 authors = [
     {name = "Teraflop Inc"}
