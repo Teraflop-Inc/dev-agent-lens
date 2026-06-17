@@ -70,13 +70,17 @@ class TestUserAttributionPropagation:
         assert tool_row["account_id"] == "11111111-1111-1111-1111-111111111111"
 
     def test_unattributable_spans_remain_none(self):
-        """Given spans with no proxy metadata anywhere, attribution is None."""
+        """Given spans with no proxy metadata anywhere, attribution is empty.
+
+        An all-None column may surface as None or NaN depending on the pandas
+        version (an all-None Series coerces to float NaN); both mean "no value".
+        """
         df = pd.DataFrame(
             [{"span_id": "tool1", "trace_id": "t1", "metadata": None}]
         )
         result = _extract_user_attribution(df)
-        assert result.iloc[0]["user_id"] is None
-        assert result.iloc[0]["account_id"] is None
+        assert pd.isna(result.iloc[0]["user_id"])
+        assert pd.isna(result.iloc[0]["account_id"])
 
     def test_empty_dataframe(self):
         """Given an empty DataFrame, returns it with attribution columns added."""
