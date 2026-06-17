@@ -16,6 +16,11 @@ from typing import Any, TypedDict
 
 import pandas as pd
 
+from dev_agent_lens.core.session import (
+    extract_account_id_from_span,
+    extract_user_id_from_span,
+)
+
 
 class UnifiedSpan(TypedDict, total=False):
     """
@@ -73,6 +78,10 @@ class UnifiedSpan(TypedDict, total=False):
     llm_token_count_completion: int | None
     llm_token_count_total: int | None
 
+    # Attribution (canonical user identity; see SCHEMA.md)
+    user_id: str | None  # user hash from LiteLLM end-user string
+    account_id: str | None  # account UUID from LiteLLM end-user string
+
     # Metadata
     backend: str
     raw_attributes: str | None  # JSON string of all original attributes
@@ -96,6 +105,8 @@ UNIFIED_COLUMNS = [
     "llm_token_count_prompt",
     "llm_token_count_completion",
     "llm_token_count_total",
+    "user_id",
+    "account_id",
     "backend",
     "raw_attributes",
 ]
@@ -274,6 +285,8 @@ def normalize_phoenix(df: pd.DataFrame) -> pd.DataFrame:
 
     rows = []
     for _, row in df.iterrows():
+        raw_dict = row.to_dict()  # Preserve all original columns for metadata extraction
+        identity_span = {"raw_attributes": raw_dict}
         unified = {
             "span_id": _safe_str(_get_column(row, "context.span_id")),
             "trace_id": _safe_str(_get_column(row, "context.trace_id")),
@@ -299,8 +312,10 @@ def normalize_phoenix(df: pd.DataFrame) -> pd.DataFrame:
             "llm_token_count_total": _safe_int(
                 _get_column(row, "attributes.llm.token_count.total")
             ),
+            "user_id": extract_user_id_from_span(identity_span),
+            "account_id": extract_account_id_from_span(identity_span),
             "backend": "phoenix",
-            "raw_attributes": row.to_dict(),  # Preserve all original columns for metadata extraction
+            "raw_attributes": raw_dict,
         }
         rows.append(unified)
 
@@ -340,6 +355,8 @@ def normalize_arize(df: pd.DataFrame) -> pd.DataFrame:
 
     rows = []
     for _, row in df.iterrows():
+        raw_dict = row.to_dict()  # Preserve all original columns for metadata extraction
+        identity_span = {"raw_attributes": raw_dict}
         unified = {
             "span_id": _safe_str(_get_column(row, "context.span_id")),
             "trace_id": _safe_str(_get_column(row, "context.trace_id")),
@@ -363,8 +380,10 @@ def normalize_arize(df: pd.DataFrame) -> pd.DataFrame:
             "llm_token_count_total": _safe_int(
                 _get_column(row, "attributes.llm.token_count.total")
             ),
+            "user_id": extract_user_id_from_span(identity_span),
+            "account_id": extract_account_id_from_span(identity_span),
             "backend": "arize",
-            "raw_attributes": row.to_dict(),  # Preserve all original columns for metadata extraction
+            "raw_attributes": raw_dict,
         }
         rows.append(unified)
 
