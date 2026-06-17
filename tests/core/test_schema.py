@@ -14,12 +14,16 @@ from __future__ import annotations
 from datetime import datetime
 
 import pandas as pd
-import pytest
 
 from dev_agent_lens.core.schema import (
     UNIFIED_COLUMNS,
     normalize_arize,
     normalize_phoenix,
+)
+
+LITELLM_USER_STRING = (
+    "user_abc123def_account_11111111-1111-1111-1111-111111111111"
+    "_session_22222222-2222-2222-2222-222222222222"
 )
 
 
@@ -56,6 +60,38 @@ class TestNormalizePhoenix:
         assert result.iloc[0]["name"] == "test_span"
         assert result.iloc[0]["span_kind"] == "LLM"
         assert result.iloc[0]["backend"] == "phoenix"
+
+    def test_user_attribution_columns_present(self):
+        """Unified schema exposes user_id and account_id columns."""
+        assert "user_id" in UNIFIED_COLUMNS
+        assert "account_id" in UNIFIED_COLUMNS
+
+    def test_user_attribution_extracted_from_nested_metadata(self):
+        """Given Phoenix span with nested proxy metadata, populates attribution."""
+        df = pd.DataFrame(
+            {
+                "context.span_id": ["span1"],
+                "attributes": [
+                    {"metadata": {"user_api_key_end_user_id": LITELLM_USER_STRING}}
+                ],
+            }
+        )
+
+        result = normalize_phoenix(df)
+
+        assert result.iloc[0]["user_id"] == "abc123def"
+        assert result.iloc[0]["account_id"] == (
+            "11111111-1111-1111-1111-111111111111"
+        )
+
+    def test_user_attribution_none_without_metadata(self):
+        """Given a span without proxy metadata, attribution fields are None."""
+        df = pd.DataFrame({"context.span_id": ["span1"], "name": ["tool_call"]})
+
+        result = normalize_phoenix(df)
+
+        assert result.iloc[0]["user_id"] is None
+        assert result.iloc[0]["account_id"] is None
 
     def test_timestamp_conversion_datetime(self):
         """Given datetime timestamps, converts to ISO-8601."""

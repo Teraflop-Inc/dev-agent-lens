@@ -20,6 +20,13 @@ import pandas as pd
 # Pattern to match session ID in various formats
 SESSION_PATTERN = re.compile(r"session_([a-zA-Z0-9_-]+)")
 
+# Patterns for user/account identity inside the LiteLLM end-user string:
+#   user_<hash>_account_<uuid>_session_<uuid>
+# These are the canonical attribution fields (see SCHEMA.md). The user hash is
+# alphanumeric; the account is a 36-char UUID.
+USER_PATTERN = re.compile(r"user_([a-zA-Z0-9]+)_account")
+ACCOUNT_PATTERN = re.compile(r"account_([a-f0-9-]{36})")
+
 
 def extract_session_id(metadata: Any) -> str | None:
     """
@@ -221,4 +228,146 @@ def extract_session_id_from_span(span: dict | pd.Series) -> str | None:
         if session_id:
             return session_id
 
+    return None
+
+
+def _identity_string_from_dict(metadata: dict) -> str | None:
+    """Return the raw LiteLLM end-user string from a metadata dict, if present.
+
+    The string has the form ``user_<hash>_account_<uuid>_session_<uuid>`` and
+    lives under one of the known LiteLLM proxy keys.
+    """
+    end_user_id = metadata.get("user_api_key_end_user_id")
+    if end_user_id:
+        return str(end_user_id)
+
+    req_meta = metadata.get("requester_metadata")
+    if isinstance(req_meta, dict) and req_meta.get("user_id"):
+        return str(req_meta["user_id"])
+
+    user_id = metadata.get("user_id")
+    if user_id:
+        return str(user_id)
+
+    return None
+
+
+def _identity_string(metadata: Any) -> str | None:
+    """Extract the raw LiteLLM end-user string from arbitrary metadata."""
+    if metadata is None or (isinstance(metadata, float) and pd.isna(metadata)):
+        return None
+
+    if isinstance(metadata, dict):
+        return _identity_string_from_dict(metadata)
+
+    if isinstance(metadata, str):
+        try:
+            parsed = json.loads(metadata)
+            if isinstance(parsed, dict):
+                return _identity_string_from_dict(parsed)
+        except (json.JSONDecodeError, TypeError):
+            pass
+        # The raw string may itself be the identity string.
+        if USER_PATTERN.search(metadata) or ACCOUNT_PATTERN.search(metadata):
+            return metadata
+
+    return None
+
+
+def extract_user_id(metadata: Any) -> str | None:
+    """Extract the user hash from span metadata.
+
+    The user hash is the ``<hash>`` in ``user_<hash>_account_<uuid>_session_<uuid>``
+    and is the canonical, stable per-user identifier emitted by the LiteLLM proxy.
+
+    Args:
+        metadata: A metadata string, dict, or JSON string.
+
+    Returns:
+        The user hash, or None if no user identity is present.
+    """
+    identity = _identity_string(metadata)
+    if not identity:
+        return None
+    match = USER_PATTERN.search(identity)
+    return match.group(1) if match else None
+
+
+def extract_account_id(metadata: Any) -> str | None:
+    """Extract the account UUID from span metadata.
+
+    The account UUID is the ``<uuid>`` in ``account_<uuid>`` and is stable across
+    a single user's machines.
+
+    Args:
+        metadata: A metadata string, dict, or JSON string.
+
+    Returns:
+        The account UUID, or None if no account identity is present.
+    """
+    identity = _identity_string(metadata)
+    if not identity:
+        return None
+    match = ACCOUNT_PATTERN.search(identity)
+    return match.group(1) if match else None
+
+
+def _iter_identity_metadata(span: dict | pd.Series) -> Any:
+    """Yield candidate metadata objects from a span across known layouts.
+
+    Mirrors the metadata locations used by ``extract_session_id_from_span`` but
+    does not fall back to trace_id/input_value — user/account attribution must
+    come from real proxy metadata or not at all.
+    """
+    if isinstance(span, pd.Series):
+        span = span.to_dict()
+
+    # Flat metadata fields (used by unify inputs and simple Phoenix rows).
+    for field in ("metadata", "attributes.metadata"):
+        value = span.get(field)
+        if isinstance(value, dict):
+            yield value
+
+    raw = span.get("raw_attributes")
+    if isinstance(raw, dict):
+        # Dotted-key format (lambda2-dal): {"attributes.metadata": "<json>"}
+        dotted = raw.get("attributes.metadata")
+        if dotted is not None:
+            yield dotted
+        # Nested dict format (local-alex): {"attributes": {"metadata": {...}}}
+        attributes = raw.get("attributes")
+        if isinstance(attributes, dict):
+            nested = attributes.get("metadata")
+            if nested is not None:
+                yield nested
+            # Legacy llm.*.metadata format.
+            llm = attributes.get("llm")
+            if isinstance(llm, dict):
+                for model_data in llm.values():
+                    if isinstance(model_data, dict) and model_data.get("metadata") is not None:
+                        yield model_data["metadata"]
+        # Top-level metadata key inside raw_attributes.
+        if raw.get("metadata") is not None:
+            yield raw["metadata"]
+
+
+def extract_user_id_from_span(span: dict | pd.Series) -> str | None:
+    """Extract the user hash from a span across all known metadata layouts.
+
+    Unlike session extraction, this never falls back to trace_id: a span without
+    proxy user metadata is genuinely unattributable.
+    """
+    for metadata in _iter_identity_metadata(span):
+        user_id = extract_user_id(metadata)
+        if user_id:
+            return user_id
+    return None
+
+
+def extract_account_id_from_span(span: dict | pd.Series) -> str | None:
+    """Extract the account UUID from a span across all known metadata layouts."""
+    for metadata in _iter_identity_metadata(span):
+        account_id = extract_account_id(metadata)
+        if account_id:
+            return account_id
     return None

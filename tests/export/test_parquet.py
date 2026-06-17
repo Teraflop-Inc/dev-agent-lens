@@ -108,6 +108,24 @@ class TestFlattenSpan:
         assert result["llm_model_name"] is None
         assert result["raw_attributes_json"] is None
 
+    def test_persists_user_attribution(self):
+        span = {
+            "span_id": "sp123",
+            "user_id": "abc123def",
+            "account_id": "11111111-1111-1111-1111-111111111111",
+        }
+        result = _flatten_span(span, "session123", "phoenix-alex")
+
+        assert result["user_id"] == "abc123def"
+        assert result["account_id"] == "11111111-1111-1111-1111-111111111111"
+
+    def test_user_attribution_defaults_to_none(self):
+        span = {"span_id": "sp123"}
+        result = _flatten_span(span, "session123", "source")
+
+        assert result["user_id"] is None
+        assert result["account_id"] is None
+
     def test_parses_timestamps(self):
         span = {
             "span_id": "sp123",
