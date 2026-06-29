@@ -12,11 +12,20 @@ from __future__ import annotations
 import json
 
 import pandas as pd
-import pytest
 
 from dev_agent_lens.core.session import (
+    extract_account_id,
+    extract_account_id_from_span,
     extract_session_id,
     extract_session_id_from_span,
+    extract_user_id,
+    extract_user_id_from_span,
+)
+
+# Canonical LiteLLM end-user string: user_<hash>_account_<uuid>_session_<uuid>
+LITELLM_USER_STRING = (
+    "user_abc123def_account_11111111-1111-1111-1111-111111111111"
+    "_session_22222222-2222-2222-2222-222222222222"
 )
 
 
@@ -243,3 +252,156 @@ class TestExtractSessionIdFromSpan:
         }
         result = extract_session_id_from_span(span)
         assert result == "input123"
+
+
+class TestExtractUserId:
+    """Tests for user hash extraction from the LiteLLM end-user string."""
+
+    def test_extract_user_id_from_full_string(self):
+        """Given the canonical user string, extracts the user hash."""
+        assert extract_user_id(LITELLM_USER_STRING) == "abc123def"
+
+    def test_extract_user_id_from_dict_end_user_id(self):
+        """Given dict with user_api_key_end_user_id, extracts user hash."""
+        metadata = {"user_api_key_end_user_id": LITELLM_USER_STRING}
+        assert extract_user_id(metadata) == "abc123def"
+
+    def test_extract_user_id_from_requester_metadata(self):
+        """Given requester_metadata.user_id, extracts user hash."""
+        metadata = {"requester_metadata": {"user_id": LITELLM_USER_STRING}}
+        assert extract_user_id(metadata) == "abc123def"
+
+    def test_extract_user_id_none_when_no_user_prefix(self):
+        """Given a session-only string, returns None (no user_ prefix)."""
+        assert extract_user_id("session_22222222-2222-2222-2222-222222222222") is None
+
+    def test_extract_user_id_none_metadata(self):
+        """Given None metadata, returns None."""
+        assert extract_user_id(None) is None
+
+
+class TestExtractAccountId:
+    """Tests for account UUID extraction from the LiteLLM end-user string."""
+
+    def test_extract_account_id_from_full_string(self):
+        """Given the canonical user string, extracts the account UUID."""
+        assert extract_account_id(LITELLM_USER_STRING) == (
+            "11111111-1111-1111-1111-111111111111"
+        )
+
+    def test_extract_account_id_from_dict_end_user_id(self):
+        """Given dict with user_api_key_end_user_id, extracts account UUID."""
+        metadata = {"user_api_key_end_user_id": LITELLM_USER_STRING}
+        assert extract_account_id(metadata) == (
+            "11111111-1111-1111-1111-111111111111"
+        )
+
+    def test_extract_account_id_none_when_absent(self):
+        """Given a string without an account segment, returns None."""
+        assert extract_account_id("user_abc_session_xyz") is None
+
+
+class TestExtractUserAttributionFromSpan:
+    """Tests for span-level user/account extraction across metadata layouts."""
+
+    def test_user_id_from_flat_metadata(self):
+        """Given span.metadata with end_user_id, extracts user hash."""
+        span = {
+            "span_id": "s1",
+            "metadata": {"user_api_key_end_user_id": LITELLM_USER_STRING},
+        }
+        assert extract_user_id_from_span(span) == "abc123def"
+
+    def test_user_id_from_nested_phoenix_attributes(self):
+        """Given real Phoenix nested attributes.metadata, extracts user hash."""
+        span = {
+            "span_id": "s1",
+            "raw_attributes": {
+                "attributes": {
+                    "metadata": {"user_api_key_end_user_id": LITELLM_USER_STRING}
+                }
+            },
+        }
+        assert extract_user_id_from_span(span) == "abc123def"
+
+    def test_user_id_from_dotted_lambda2_attributes(self):
+        """Given lambda2 dotted attributes.metadata (JSON string), extracts hash."""
+        span = {
+            "span_id": "s1",
+            "raw_attributes": {
+                "attributes.metadata": json.dumps(
+                    {"requester_metadata": {"user_id": LITELLM_USER_STRING}}
+                )
+            },
+        }
+        assert extract_user_id_from_span(span) == "abc123def"
+
+    def test_account_id_from_nested_phoenix_attributes(self):
+        """Given nested attributes.metadata, extracts account UUID."""
+        span = {
+            "span_id": "s1",
+            "raw_attributes": {
+                "attributes": {
+                    "metadata": {"user_api_key_end_user_id": LITELLM_USER_STRING}
+                }
+            },
+        }
+        assert extract_account_id_from_span(span) == (
+            "11111111-1111-1111-1111-111111111111"
+        )
+
+    def test_user_id_does_not_fall_back_to_trace_id(self):
+        """Given no user metadata, user extraction returns None (unlike session)."""
+        span = {"span_id": "s1", "trace_id": "trace-abc-123"}
+        assert extract_user_id_from_span(span) is None
+        assert extract_account_id_from_span(span) is None
+
+    def test_pandas_series_input(self):
+        """Given a pandas Series span, extracts user hash."""
+        span = pd.Series(
+            {
+                "span_id": "s1",
+                "metadata": {"user_api_key_end_user_id": LITELLM_USER_STRING},
+            }
+        )
+        assert extract_user_id_from_span(span) == "abc123def"
+
+
+# Current LiteLLM end-user identity: a JSON OBJECT, not the underscore string.
+LITELLM_USER_JSON = (
+    '{"device_id":"70d31d6ecd411c21","account_uuid":'
+    '"63ddef2f-7fea-429f-91ba-026ea296f6a4",'
+    '"session_id":"e66a526e-3684-49ff-9284-749b56d9664a"}'
+)
+
+
+class TestJsonObjectIdentity:
+    """The live LiteLLM proxy emits a JSON object {device_id, account_uuid,
+    session_id}, NOT the underscore string. Regression for ENG2-1312/1319."""
+
+    def test_session_id_from_json_object(self):
+        """session_id is read from the key, not regex-matched off the string."""
+        assert extract_session_id(LITELLM_USER_JSON) == "e66a526e-3684-49ff-9284-749b56d9664a"
+
+    def test_session_id_is_not_literal_id(self):
+        """Regression: SESSION_PATTERN over a JSON string used to yield 'id'."""
+        assert extract_session_id(LITELLM_USER_JSON) != "id"
+
+    def test_user_id_is_device_id(self):
+        assert extract_user_id(LITELLM_USER_JSON) == "70d31d6ecd411c21"
+
+    def test_account_id_from_account_uuid_key(self):
+        assert extract_account_id(LITELLM_USER_JSON) == "63ddef2f-7fea-429f-91ba-026ea296f6a4"
+
+    def test_real_span_shape_wrapper(self):
+        """The real span carries the JSON string under user_api_key_end_user_id."""
+        span = {"metadata": {"user_api_key_end_user_id": LITELLM_USER_JSON}}
+        assert extract_session_id_from_span(span) == "e66a526e-3684-49ff-9284-749b56d9664a"
+        assert extract_user_id_from_span(span) == "70d31d6ecd411c21"
+        assert extract_account_id_from_span(span) == "63ddef2f-7fea-429f-91ba-026ea296f6a4"
+
+    def test_account_uuid_only(self):
+        """JSON object with only account_uuid yields account, no user/session."""
+        obj = '{"account_uuid":"63ddef2f-7fea-429f-91ba-026ea296f6a4"}'
+        assert extract_account_id(obj) == "63ddef2f-7fea-429f-91ba-026ea296f6a4"
+        assert extract_user_id(obj) is None
