@@ -23,7 +23,11 @@ from typing import Any
 
 import pandas as pd
 
-from dev_agent_lens.core.session import extract_session_id_from_span
+from dev_agent_lens.core.session import (
+    extract_account_id_from_span,
+    extract_session_id_from_span,
+    extract_user_id_from_span,
+)
 
 
 def get_default_state_path() -> Path:
@@ -126,6 +130,69 @@ def _extract_session_ids(df: pd.DataFrame) -> pd.DataFrame:
 
     df["session_id"] = df.apply(get_final_session_id, axis=1)
     df = df.drop(columns=["_raw_session_id"])
+
+    return df
+
+
+def _extract_user_attribution(df: pd.DataFrame) -> pd.DataFrame:
+    """Add user_id and account_id columns by extracting from span metadata.
+
+    Like session metadata, user attribution is only present on LLM request spans
+    (litellm_request, raw_gen_ai_request), not on tool spans. This function
+    extracts the user hash / account UUID from spans that carry proxy metadata
+    and propagates them to all sibling spans sharing the same trace_id, so tool
+    spans inherit the attribution of the conversation they belong to.
+
+    Spans whose trace has no proxy metadata anywhere remain unattributed (None)
+    rather than falling back to trace_id — see ENG2-1312.
+    """
+    if df.empty:
+        df = df.copy()
+        df["user_id"] = pd.Series(dtype=str)
+        df["account_id"] = pd.Series(dtype=str)
+        return df
+
+    df = df.copy()
+
+    # First pass: extract attribution from each span.
+    df["_raw_user_id"] = df.apply(
+        lambda row: extract_user_id_from_span(row.to_dict()), axis=1
+    )
+    df["_raw_account_id"] = df.apply(
+        lambda row: extract_account_id_from_span(row.to_dict()), axis=1
+    )
+
+    # Build trace_id -> attribution map from spans that carry metadata.
+    trace_to_user: dict[Any, str] = {}
+    trace_to_account: dict[Any, str] = {}
+    if "trace_id" in df.columns:
+        for _, row in df.iterrows():
+            trace_id = row.get("trace_id")
+            if trace_id is None:
+                continue
+            user_id = row.get("_raw_user_id")
+            account_id = row.get("_raw_account_id")
+            if user_id and trace_id not in trace_to_user:
+                trace_to_user[trace_id] = user_id
+            if account_id and trace_id not in trace_to_account:
+                trace_to_account[trace_id] = account_id
+
+    # Second pass: propagate to all spans in the same trace.
+    def final_user_id(row):
+        trace_id = row.get("trace_id")
+        if trace_id in trace_to_user:
+            return trace_to_user[trace_id]
+        return row.get("_raw_user_id")
+
+    def final_account_id(row):
+        trace_id = row.get("trace_id")
+        if trace_id in trace_to_account:
+            return trace_to_account[trace_id]
+        return row.get("_raw_account_id")
+
+    df["user_id"] = df.apply(final_user_id, axis=1)
+    df["account_id"] = df.apply(final_account_id, axis=1)
+    df = df.drop(columns=["_raw_user_id", "_raw_account_id"])
 
     return df
 
@@ -288,13 +355,15 @@ def unify_sessions(
     else:
         new_df = new_spans.copy() if not new_spans.empty else pd.DataFrame()
 
-    # Extract session IDs for new spans
+    # Extract session IDs and user attribution for new spans
     new_df = _extract_session_ids(new_df)
+    new_df = _extract_user_attribution(new_df)
 
     # Load existing data
     if existing_file and existing_file.exists():
         existing_df = read_sessions_file(existing_file)
         existing_df = _extract_session_ids(existing_df)
+        existing_df = _extract_user_attribution(existing_df)
     else:
         existing_df = pd.DataFrame()
 

@@ -22,6 +22,8 @@ This document describes the unified schema used by `dev_agent_lens` to normalize
 | `llm_token_count_prompt` | `int \| None` | Number of prompt tokens |
 | `llm_token_count_completion` | `int \| None` | Number of completion tokens |
 | `llm_token_count_total` | `int \| None` | Total token count |
+| `user_id` | `str \| None` | Canonical per-user identity (see User Attribution) |
+| `account_id` | `str \| None` | Per-account identity, stable across a user's machines |
 | `backend` | `str` | Source backend ('phoenix' or 'arize') |
 | `raw_attributes` | `str \| None` | Original attributes as JSON string |
 
@@ -48,6 +50,7 @@ This document describes the unified schema used by `dev_agent_lens` to normalize
 | `attributes.llm.token_count.prompt` | `llm_token_count_prompt` |
 | `attributes.llm.token_count.completion` | `llm_token_count_completion` |
 | `attributes.llm.token_count.total` | `llm_token_count_total` |
+| `attributes.metadata` (LiteLLM end-user string) | `user_id`, `account_id` |
 | (derived) | `backend` = "phoenix" |
 
 ### Arize → Unified
@@ -70,6 +73,7 @@ This document describes the unified schema used by `dev_agent_lens` to normalize
 | `attributes.llm.token_count.prompt` | `llm_token_count_prompt` |
 | `attributes.llm.token_count.completion` | `llm_token_count_completion` |
 | `attributes.llm.token_count.total` | `llm_token_count_total` |
+| `attributes.metadata` (LiteLLM end-user string) | `user_id`, `account_id` |
 | (derived) | `backend` = "arize" |
 
 ## Timestamp Normalization
@@ -82,6 +86,55 @@ All timestamps are normalized to ISO-8601 format:
 - **Null/NaN**: Converted to `None`
 
 Example: `2025-01-15T10:30:00`
+
+## User Attribution
+
+DAL attributes each span to a user so that traces from a shared LiteLLM proxy
+(e.g. `lambda2`, where multiple team members hit the same endpoint) can be
+filtered per-user — e.g. `WHERE user_id = '<hash>'` in DuckDB.
+
+### Canonical identity field
+
+The identity comes from the LiteLLM proxy's end-user value, emitted on LLM
+request spans in the metadata. The current proxy emits a **JSON object**:
+
+```json
+{"device_id": "<hex>", "account_uuid": "<uuid>", "session_id": "<uuid>"}
+```
+
+A **legacy underscore string** (`user_<hash>_account_<uuid>_session_<uuid>`) is
+still accepted as a fallback. It is found under one of these metadata keys
+(checked in order): `requester_metadata.user_id`, `user_api_key_end_user_id`, or
+`user_id`.
+
+| Field | JSON key (current) | Legacy segment | Stability |
+|-------|--------------------|----------------|-----------|
+| `user_id` | `device_id` | `user_<hash>` | Canonical per-user/per-auth identifier |
+| `account_id` | `account_uuid` | `account_<uuid>` | Per-account, stable across a user's machines |
+| `session_id` | `session_id` | `session_<uuid>` | Per Claude Code session (see `core/session.py`) |
+
+> ⚠️ The JSON object MUST be parsed by key, not regex-scanned: applying the
+> `session_<...>` regex to the JSON string matches the `session_id` **key** and
+> yields the literal `"id"` — the historical `session_id="id"` collapse
+> (ENG2-1312/1319).
+
+Parsing lives in `dev_agent_lens/core/session.py` (`extract_user_id` /
+`extract_account_id` and their `*_from_span` variants). Because proxy metadata
+is only attached to LLM request spans (not tool spans), `core/unify.py`
+propagates `user_id`/`account_id` to all spans sharing a `trace_id`. Spans whose
+trace carries no proxy metadata remain `None` — they are **not** back-filled from
+`trace_id`, so an unattributable span is honestly null rather than mislabeled.
+
+### Backfill / historical cutoff
+
+Existing parquets produced before this attribution was added — notably the
+`phoenix-lambda2-dal` and `phoenix-local-alex` sources — were written by an
+external/historical harvester that did not preserve user identity (and collapsed
+many sessions under a literal `session_id = "id"`). That writer is not part of
+this repo, so those rows **cannot be retroactively attributed**: spans synced
+before this change have `user_id = NULL`. Fixing the upstream `"id"` writer is
+tracked separately. Attribution is reliable only for spans synced after this
+change.
 
 ## Usage
 
