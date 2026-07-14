@@ -2661,6 +2661,147 @@ def session_context(session_id: str, output: str) -> None:
         click.echo(click.style(f"Error: {e}", fg="red"))
 
 
+@main.command("reconstruct-session")
+@click.argument("session_id")
+@click.option("--source", default=None, help="Parquet source (default: search all sources)")
+@click.option(
+    "--output", "-o", type=click.Path(), default=None,
+    help="Write markdown here (default: stdout)",
+)
+def reconstruct_session_cmd(session_id: str, source: str | None, output: str | None) -> None:
+    """Reconstruct a session's conversation to markdown, in start_time order.
+
+    Examples:
+
+        dal reconstruct-session abc123 --source phoenix-local-alex -o session.md
+
+        dal reconstruct-session abc123
+    """
+    from pathlib import Path
+
+    from dev_agent_lens.fabric.queries import reconstruct_session
+
+    try:
+        export = reconstruct_session(session_id, source=source)
+        if export is None:
+            click.echo(click.style(f"Session '{session_id}' not found.", fg="yellow"))
+            return
+        content = export.main_content
+        if output:
+            Path(output).write_text(content, encoding="utf-8")
+            click.echo(click.style(f"Wrote {len(content):,} chars → {output}", fg="green"))
+        else:
+            click.echo(content)
+    except Exception as e:
+        click.echo(click.style(f"Error: {e}", fg="red"))
+
+
+@main.command("list-sessions")
+@click.option("--source", default=None, help="Parquet source (default: all sources)")
+@click.option("--pattern", default=None, help="Substring/regex to match in span content")
+@click.option(
+    "--tools", default=None,
+    help="Comma-separated tool names; keep sessions referencing ALL of them",
+)
+@click.option("--since", default=None, help="ISO date/datetime lower bound (start_time)")
+@click.option("--until", default=None, help="ISO date/datetime upper bound")
+@click.option("--min-spans", type=int, default=0, help="Drop sessions with fewer than N spans")
+@click.option("--output", type=click.Choice(["text", "json"]), default="text")
+def list_sessions_cmd(
+    source: str | None,
+    pattern: str | None,
+    tools: str | None,
+    since: str | None,
+    until: str | None,
+    min_spans: int,
+    output: str,
+) -> None:
+    """List sessions matching pattern + tool + date filters (newest first).
+
+    Examples:
+
+        dal list-sessions --source phoenix-local-alex --pattern transcript --min-spans 50
+
+        dal list-sessions --tools 'mcp__claude_ai_Linear' --since 2026-05-01 --output json
+    """
+    import json as json_lib
+
+    from dev_agent_lens.fabric.queries import list_sessions
+
+    tool_list = [t.strip() for t in tools.split(",") if t.strip()] if tools else None
+    try:
+        sessions = list_sessions(
+            source=source, pattern=pattern, tools=tool_list,
+            since=since, until=until, min_spans=min_spans,
+        )
+        rows = [
+            {
+                "session_id": s.get("session_id"),
+                "span_count": s.get("span_count", len(s.get("spans", []))),
+                "start_time": s.get("start_time"),
+            }
+            for s in sessions
+        ]
+        if output == "json":
+            click.echo(json_lib.dumps(rows, indent=2, default=str))
+        else:
+            click.echo(click.style(f"{len(rows)} session(s)", fg="green"))
+            for r in rows[:50]:
+                click.echo(f"  {r['session_id']}  {r['span_count']} spans  {r['start_time'] or ''}")
+            if len(rows) > 50:
+                click.echo(f"  ... and {len(rows) - 50} more")
+    except Exception as e:
+        click.echo(click.style(f"Error: {e}", fg="red"))
+
+
+@main.command("export-conversations")
+@click.option("--source", default=None, help="Parquet source (default: all sources)")
+@click.option("--filter", "filter_", default=None, help="Substring/regex to match in span content")
+@click.option("--pattern", default=None, help="Alias for --filter")
+@click.option(
+    "--tools", default=None,
+    help="Comma-separated tool names; keep sessions referencing ALL",
+)
+@click.option("--since", default=None, help="ISO date/datetime lower bound")
+@click.option("--min-spans", type=int, default=0, help="Drop sessions with fewer than N spans")
+@click.option("--limit", type=int, default=None, help="Max sessions to export")
+@click.option(
+    "--output", "-o", type=click.Path(), default=".",
+    help="Output directory (one .md per session)",
+)
+def export_conversations_cmd(
+    source: str | None,
+    filter_: str | None,
+    pattern: str | None,
+    tools: str | None,
+    since: str | None,
+    min_spans: int,
+    limit: int | None,
+    output: str,
+) -> None:
+    """Bulk-export matching sessions to one markdown file per session (written atomically).
+
+    Examples:
+
+        dal export-conversations --source phoenix-lambda2-dal --filter transcript --limit 20
+    """
+    from dev_agent_lens.fabric.queries import export_conversations
+
+    tool_list = [t.strip() for t in tools.split(",") if t.strip()] if tools else None
+    try:
+        written = export_conversations(
+            source=source, filter=filter_ or pattern, tools=tool_list,
+            since=since, limit=limit, output_dir=output, min_spans=min_spans,
+        )
+        click.echo(click.style(f"Wrote {len(written)} session(s) → {output}", fg="green"))
+        for p in written[:20]:
+            click.echo(f"  {p}")
+        if len(written) > 20:
+            click.echo(f"  ... and {len(written) - 20} more")
+    except Exception as e:
+        click.echo(click.style(f"Error: {e}", fg="red"))
+
+
 @main.command("cost")
 @click.argument("entity_type", type=click.Choice(["meeting", "ticket", "project"]))
 @click.argument("entity_id")

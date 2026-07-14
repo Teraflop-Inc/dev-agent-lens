@@ -171,3 +171,75 @@ Storage is also ~97% smaller (52 GB JSONL → 1.8 GB Parquet with ZSTD).
 | `export_json()` | Export results to JSON |
 | `export_csv()` | Export results to CSV |
 | `export_markdown()` | Export results to Markdown table |
+
+## Conversation reconstruction & mining (fabric)
+
+The `fabric` layer turns raw spans into readable, per-session conversations — one command
+to "give me the conversations matching this signal," so eval mining (IR, M12, …) stops
+re-hand-rolling DuckDB + per-session stitching. It wraps the query → chain → markdown
+pipeline (`dev_agent_lens.fabric`).
+
+### CLI
+
+```bash
+# Reconstruct one session's conversation to markdown (start_time order)
+dal reconstruct-session <session_id> --source phoenix-local-alex -o session.md
+dal reconstruct-session <session_id>                 # print to stdout
+
+# List sessions by content pattern, tool usage, date, and size (newest first)
+dal list-sessions --source phoenix-local-alex \
+  --pattern transcript \
+  --tools 'mcp__claude_ai_Linear,mcp__claude_ai_Notion' \
+  --min-spans 50 --since 2026-05-01 \
+  --output json
+
+# Bulk-export N matching sessions to one .md per session (written atomically)
+dal export-conversations --source phoenix-lambda2-dal \
+  --filter transcript --limit 20 -o ./mining-batch/
+```
+
+Omit `--source` to fan out across every source under `~/.dal/data`.
+
+### Python API
+
+```python
+from dev_agent_lens.fabric import (
+    list_sessions,         # filters → session dicts (newest first)
+    reconstruct_session,   # session_id → markdown export, in time order
+    export_conversations,  # bulk write one .md per session, atomically
+)
+
+# Fan out a batch of gold examples for a miner
+for path in export_conversations(source="phoenix-local-alex",
+                                 pattern="transcript", limit=20,
+                                 output_dir="./batch/"):
+    print(path)
+
+# Or one at a time
+export = reconstruct_session("abc123", source="phoenix-local-alex")
+Path("session.md").write_text(export.main_content)
+```
+
+`export_conversations` writes each file temp-then-rename, so a crash never leaves a
+partial session on disk — safe to point a miner at the output dir while it runs.
+
+### Business-entity lookups
+
+`dal meeting-sessions <id>`, `dal ticket-sessions ENG2-123`, and
+`dal session-context <session_id>` surface which sessions reference a meeting / ticket,
+and what entities (meetings, tickets), tokens, and duration a session touched.
+
+### Notes
+
+- **Reconstruction** links a session's spans into a `ConversationChain` (grouping by
+  Claude session-UUID, or temporal proximity). A session with no recognizable UUID and no
+  neighbours is rendered as a standalone single-session chain rather than dropped.
+- **Filtering**: `--pattern`/`--filter` and `--since`/`--until` push down into the parquet
+  query; `--tools` and `--min-spans` are applied on top.
+
+| Function | Description |
+|----------|-------------|
+| `list_sessions()` | Sessions matching pattern/tool/date/size filters, newest first |
+| `reconstruct_session()` | One session → markdown export in start_time order |
+| `export_conversations()` | Bulk per-session `.md` export, written atomically |
+| `get_session_context()` | Meetings/tickets/tokens/duration referenced by a session |
