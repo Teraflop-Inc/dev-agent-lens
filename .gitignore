@@ -14,3 +14,6 @@ oxen
 
 # Test infrastructure
 tests/e2e/testbed/runs/
+
+# Real person↔account_uuid↔email mapping — PII, never commit (public repo). Shared out-of-band.
+dev_agent_lens/core/identity.yaml
