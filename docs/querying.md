@@ -1,245 +1,198 @@
 # Querying Data
 
-Query your synced trace data using the `dal` CLI or Python API.
+Two ways to query the team's Claude Code trace data:
 
-## CLI Usage
+1. **Live, against Supabase directly** (this section) — no sync, query the shared
+   backend in place with DuckDB. This is the fastest way to answer "who did what."
+2. **Local Parquet** via `dal sync` + `dal query-spans` (further down) — for repeated
+   heavy queries over a source you've pulled down.
 
-### List Available Sources
+Start with (1). It needs nothing but the connection string. For copy-paste recipes that
+answer real questions (who's active, one person's sessions, learning-vs-building, blockers),
+see the [query cookbook](query-cookbook.md).
 
-```bash
-dal sources
-```
+---
 
-Shows all data sources in `~/.dal/data/` with row counts.
+## 1. Query Supabase directly with DuckDB (no sync)
 
-### Basic Queries
+The backend is a Supabase Postgres. You do **not** need `psql`, and you do **not** need to
+`dal sync` first. DuckDB's `postgres` extension attaches to it and queries in place.
 
-```bash
-# Query a source (auto-detects Parquet or JSONL)
-dal query my-project
+### Setup (once)
 
-# Limit results
-dal query my-project --limit 100
-
-# Get specific session
-dal query my-project --session abc123
-```
-
-### Filtering
+Put the connection string in your environment. It's the `PHOENIX_SQL_DATABASE_URL` value
+from `dev-agent-lens/.env` (ask a teammate, or read it from Fly):
 
 ```bash
-# By status
-dal query my-project --status ERROR
-dal query my-project --status OK
-
-# By model
-dal query my-project --model claude-sonnet
-
-# By time range
-dal query my-project --start 2024-01-01 --end 2024-01-31
-
-# Regex pattern search
-dal query my-project --pattern "TODO|FIXME"
-dal query my-project --pattern "ENG-\d+" --case-insensitive
+export PHOENIX_SQL_DATABASE_URL='postgresql://…@…pooler.supabase.com:5432/postgres'
+duckdb   # or: brew install duckdb
 ```
 
-### Export Formats
+```sql
+INSTALL postgres; LOAD postgres;
+ATTACH getenv('PHOENIX_SQL_DATABASE_URL') AS pg (TYPE postgres, READ_ONLY);
+```
+
+### The one rule that matters: push work down with `postgres_query()`
+
+A plain `SELECT … FROM pg.phoenix.spans` streams every row to your machine and then
+filters — over 1.2M spans it crawls or times out. Wrap aggregates in `postgres_query()`
+so Postgres does the work and only the summary crosses the wire:
+
+```sql
+-- who is active, last 14 days
+SELECT * FROM postgres_query('pg', $$
+  SELECT ((attributes->'metadata'->>'user_api_key_end_user_id')::jsonb)->>'account_uuid' AS account_uuid,
+         count(*) AS spans, max(start_time)::date AS last_seen
+  FROM phoenix.spans
+  WHERE start_time > now() - INTERVAL '14 days'
+  GROUP BY 1 ORDER BY 2 DESC
+$$);
+```
+
+That returns instantly. The same query written as a plain DuckDB scan over the attached
+table will time out. Rule of thumb: **anything that scans or groups goes inside
+`postgres_query()`.**
+
+### Turning an account_uuid into a person
+
+Traces carry an opaque `account_uuid`, not a name — the only email in the corpus is the
+placeholder `oauth@claude-code.ai`. The `account_uuid → person` map lives in
+`dev_agent_lens/core/identity.yaml` and resolves in Python:
+
+```python
+from dev_agent_lens.core.identity import label_account, resolve_account
+
+label_account("00000000-0000-0000-0000-000000000001")   # -> 'person-a@example.com'
+resolve_account("00000000-0000-0000-0000-000000000002").email   # -> 'person-b@example.com'
+```
+
+Unknown accounts resolve to `None` (never a guess). One person can own several accounts —
+an interactive login plus a `CLAUDE_CODE_OAUTH_TOKEN` account used inside sandbox VMs — so
+the map is many-to-one. To pull one person's spans, resolve their email to the set of
+account_uuids first, then filter on those inside `postgres_query()`.
+
+### ⚠️ `session_id` is NOT a working session
+
+`session_id` is a Claude Code *conversation thread*. It survives `--continue`/`--resume`
+indefinitely — one real thread in this corpus spans 28 days and 498M tokens. **Do not
+`GROUP BY session_id` to get "working sessions"** — you'll get one month-long blob per
+person. Segment on idle gaps instead:
+
+```python
+import duckdb, os
+from dev_agent_lens.core.sessionize import summarize   # gap-based sessions
+from dev_agent_lens.core.prompts import extract_human_turns  # drop agent-emitted noise
+
+dsn = os.environ["PHOENIX_SQL_DATABASE_URL"]
+con = duckdb.connect()
+con.execute("INSTALL postgres; LOAD postgres;")
+con.execute(f"ATTACH '{dsn}' AS pg (TYPE postgres, READ_ONLY)")
+
+spans = con.execute("""
+  SELECT * FROM postgres_query('pg', $q$
+    SELECT start_time,
+           coalesce(llm_token_count_prompt,0)+coalesce(llm_token_count_completion,0) AS tokens
+    FROM phoenix.spans
+    WHERE start_time > now() - INTERVAL '30 days'
+      AND ((attributes->'metadata'->>'user_api_key_end_user_id')::jsonb)->>'account_uuid'
+          = '<account-uuid>'   -- resolve a person's uuid(s) via core.identity
+  $q$)
+""").df()
+
+for s in summarize(spans):          # ~46 real sessions, not 1 thread
+    print(s.start.date(), f"{s.minutes:.0f}min", s.spans, "spans")
+```
+
+`extract_human_turns()` matters just as much: ~46% of what parses as a user message is the
+agent talking to itself (`Perform a web search for the query: …`, statusline prompts, tool
+results). Any "what did they ask Claude?" analysis that skips it is roughly half wrong.
+
+### Known limits (you will hit these)
+
+- **Connection cap.** The DSN is the session-mode pooler (`:5432`), limited to **45
+  concurrent clients**. Under load you'll see `FATAL: (EMAXCONNSESSION) max clients
+  reached`. The transaction pooler (`:6543`) does *not* help — DuckDB needs the session
+  pooler's `REPEATABLE READ`. Close DuckDB when idle.
+- **No index on `attributes`.** Aggregates over the JSON identity fields beyond ~30 days
+  hit Supabase's `statement_timeout`. Narrow the window, or narrow the account first.
+
+---
+
+## 2. Local Parquet: `dal sync` + `dal query-spans`
+
+For repeated heavy queries, pull a source down to Hive-partitioned Parquet and query it
+locally with DuckDB.
 
 ```bash
-# JSON output
-dal query my-project --format json > results.json
+# one-time: register the shared backend as a source
+dal config add-source team --type phoenix-postgres --project dev-agent-lens --shared
 
-# CSV output
-dal query my-project --format csv > results.csv
+dal sync --source team              # the expensive pull (checkpointed; resumable)
+dal export-parquet --source team    # unified JSONL -> partitioned parquet
 
-# Markdown table
-dal query my-project --format markdown
+dal query-spans --source team --stats
+dal query-spans --source team --status-code ERROR --limit 20
+dal query-spans --source team --model claude --name Tool
 ```
 
-## Python API
-
-### Basic Query
-
-```python
-from dev_agent_lens.query import query_source
-
-result = query_source(source="my-project")
-print(f"Found {result.total_spans} spans in {result.total_sessions} sessions")
-
-# Access data
-for session in result.sessions:
-    print(f"Session: {session['session_id']}")
-    for span in session.get('spans', []):
-        print(f"  - {span.get('name')}: {span.get('status_code')}")
-```
-
-### Filtering
-
-```python
-from dev_agent_lens.query import query_source
-
-# Filter by multiple criteria
-result = query_source(
-    source="my-project",
-    session_id="abc123",           # Specific session
-    status_code="ERROR",           # Filter by status
-    model_name="claude",           # Partial match, case-insensitive
-    pattern=r"TICKET-\d+",         # Regex search
-    case_insensitive=True,
-    start_time="2024-01-01",
-    end_time="2024-01-31",
-    limit=500,
-)
-```
-
-### Direct Parquet Queries
-
-For maximum performance on large datasets:
-
-```python
-from dev_agent_lens.query import query_parquet, find_parquet_files, get_parquet_stats
-
-# Discover available sources
-sources = find_parquet_files()
-# → {'my-project': {'spans': Path(...), 'sessions': Path(...)}, ...}
-
-# Get file stats without loading
-stats = get_parquet_stats("~/.dal/data/parquet/my-project_spans.parquet")
-# → {'row_count': 1925899, 'session_count': 21487, 'file_size_bytes': 1879535936}
-
-# Direct Parquet query
-result = query_parquet(
-    spans_path="~/.dal/data/parquet/my-project_spans.parquet",
-    status_code="ERROR",
-    limit=500,
-)
-```
-
-### Export Functions
-
-```python
-from dev_agent_lens.query import query_source, export_json, export_csv, export_markdown
-
-result = query_source(source="my-project", limit=100)
-
-# Export to different formats
-json_str = export_json(result)
-csv_str = export_csv(result)
-markdown_str = export_markdown(result)
-```
-
-## QueryResult Object
-
-All queries return a `QueryResult` object:
-
-```python
-result.total_spans      # Total span count
-result.total_sessions   # Total session count
-result.sessions         # List of session dicts with nested spans
-result.spans            # Flat list of all spans
-result.metadata         # Query metadata (source, filters, timing)
-```
-
-## Performance
-
-The Parquet backend provides significant improvements over JSONL:
-
-| Dataset Size | Rows | Query Time |
-|--------------|------|------------|
-| ~2 MB | 2,500 | 0.03-0.12s |
-| ~30 MB | 22,000 | 0.15-0.22s |
-| ~1.8 GB | 1.9M | 2.5-4.5s |
-
-Storage is also ~97% smaller (52 GB JSONL → 1.8 GB Parquet with ZSTD).
-
-### Tips
-
-1. **Use Parquet** - Always export to Parquet for repeated queries
-2. **Filter early** - Apply filters in the query rather than post-processing
-3. **Limit results** - Use `limit` to cap result size for exploratory queries
-4. **Use `find_parquet_files()`** - Discover sources without hardcoding paths
-
-## API Reference
-
-| Function | Description |
-|----------|-------------|
-| `query_source()` | Auto-select backend, query by source name |
-| `query_parquet()` | Direct Parquet query with DuckDB |
-| `search_parquet()` | Regex search on Parquet data |
-| `find_parquet_files()` | Discover available Parquet sources |
-| `get_parquet_stats()` | Get file statistics without loading |
-| `export_json()` | Export results to JSON |
-| `export_csv()` | Export results to CSV |
-| `export_markdown()` | Export results to Markdown table |
-
-## Conversation reconstruction & mining (fabric)
-
-The `fabric` layer turns raw spans into readable, per-session conversations — one command
-to "give me the conversations matching this signal," so eval mining (IR, M12, …) stops
-re-hand-rolling DuckDB + per-session stitching. It wraps the query → chain → markdown
-pipeline (`dev_agent_lens.fabric`).
-
-### CLI
-
-```bash
-# Reconstruct one session's conversation to markdown (start_time order)
-dal reconstruct-session <session_id> --source phoenix-local-alex -o session.md
-dal reconstruct-session <session_id>                 # print to stdout
-
-# List sessions by content pattern, tool usage, date, and size (newest first)
-dal list-sessions --source phoenix-local-alex \
-  --pattern transcript \
-  --tools 'mcp__claude_ai_Linear,mcp__claude_ai_Notion' \
-  --min-spans 50 --since 2026-05-01 \
-  --output json
-
-# Bulk-export N matching sessions to one .md per session (written atomically)
-dal export-conversations --source phoenix-lambda2-dal \
-  --filter transcript --limit 20 -o ./mining-batch/
-```
-
-Omit `--source` to fan out across every source under `~/.dal/data`.
+`dal query-spans` filters: `--source` (required), `--session-id`, `--status-code`,
+`--model`, `--name`, `--limit`, `--stats`, `--format table|json`. For Claude-session events
+(role-tagged: user/assistant/tool/subagent), use `dal query-events` over
+`dal export-events` output.
 
 ### Python API
 
 ```python
-from dev_agent_lens.fabric import (
-    list_sessions,         # filters → session dicts (newest first)
-    reconstruct_session,   # session_id → markdown export, in time order
-    export_conversations,  # bulk write one .md per session, atomically
-)
+from dev_agent_lens.query import query_source, find_parquet_files, get_parquet_stats
 
-# Fan out a batch of gold examples for a miner
-for path in export_conversations(source="phoenix-local-alex",
-                                 pattern="transcript", limit=20,
-                                 output_dir="./batch/"):
-    print(path)
-
-# Or one at a time
-export = reconstruct_session("abc123", source="phoenix-local-alex")
-Path("session.md").write_text(export.main_content)
+find_parquet_files()          # -> {'team': {'spans': Path(...), 'sessions': Path(...)}, ...}
+result = query_source(source="team", status_code="ERROR", limit=500)
+result.total_spans, result.total_sessions
 ```
 
-`export_conversations` writes each file temp-then-rename, so a crash never leaves a
-partial session on disk — safe to point a miner at the output dir while it runs.
+Parquet lands under `~/.dal/data/parquet/spans/source=<name>/week=<YYYY-WNN>/part-*.parquet`
+(Hive-partitioned; use `find_parquet_files()` rather than hardcoding paths).
 
-### Business-entity lookups
+---
 
-`dal meeting-sessions <id>`, `dal ticket-sessions ENG2-123`, and
-`dal session-context <session_id>` surface which sessions reference a meeting / ticket,
-and what entities (meetings, tickets), tokens, and duration a session touched.
+## 3. Conversation reconstruction & mining (fabric)
 
-### Notes
+The `fabric` layer turns raw spans into readable, per-session conversations — one command
+for "give me the conversations matching this signal," so eval mining stops re-hand-rolling
+DuckDB + per-session stitching.
 
-- **Reconstruction** links a session's spans into a `ConversationChain` (grouping by
-  Claude session-UUID, or temporal proximity). A session with no recognizable UUID and no
-  neighbours is rendered as a standalone single-session chain rather than dropped.
-- **Filtering**: `--pattern`/`--filter` and `--since`/`--until` push down into the parquet
-  query; `--tools` and `--min-spans` are applied on top.
+```bash
+# Reconstruct one session's conversation to markdown (start_time order)
+dal reconstruct-session <session_id> --source team -o session.md
+
+# List sessions by content pattern, tool usage, date, size (newest first)
+dal list-sessions --source team \
+  --pattern transcript --tools 'mcp__claude_ai_Linear' \
+  --min-spans 50 --since 2026-05-01 --output json
+
+# Bulk-export matching sessions to one .md per session (written atomically)
+dal export-conversations --source team --filter transcript --limit 20 -o ./mining-batch/
+```
+
+```python
+from dev_agent_lens.fabric import list_sessions, reconstruct_session, export_conversations
+```
+
+Business-entity lookups: `dal meeting-sessions <id>`, `dal ticket-sessions ENG2-123`,
+`dal session-context <session_id>`.
+
+> ⚠️ **Reconstruction groups by `session_id`**, so a resumed thread renders as one giant
+> conversation (see the §1 warning). For "working sessions," segment with
+> `dev_agent_lens.core.sessionize` first, then reconstruct per block.
 
 | Function | Description |
 |----------|-------------|
+| `query_source()` | Query a synced source's parquet by filters |
+| `find_parquet_files()` | Discover synced sources without hardcoding paths |
 | `list_sessions()` | Sessions matching pattern/tool/date/size filters, newest first |
-| `reconstruct_session()` | One session → markdown export in start_time order |
+| `reconstruct_session()` | One session_id → markdown, in start_time order |
 | `export_conversations()` | Bulk per-session `.md` export, written atomically |
-| `get_session_context()` | Meetings/tickets/tokens/duration referenced by a session |
+| `label_account()` / `resolve_account()` | account_uuid → person (`core.identity`) |
+| `summarize()` | Gap-segmented working sessions (`core.sessionize`) |
+| `extract_human_turns()` | Drop agent-emitted noise from candidate prompts (`core.prompts`) |
