@@ -224,27 +224,29 @@ Transaction pooler breaks Phoenix's prepared-statement use.
 
 ### Querying Data
 
+The fastest path is to query the shared Supabase backend directly with DuckDB — no
+sync, no export:
+
+```sql
+INSTALL postgres; LOAD postgres;
+ATTACH getenv('PHOENIX_SQL_DATABASE_URL') AS pg (TYPE postgres, READ_ONLY);
+-- push aggregates down with postgres_query(); a plain scan of 1.2M spans times out
+SELECT * FROM postgres_query('pg', $$
+  SELECT ((attributes->'metadata'->>'user_api_key_end_user_id')::jsonb)->>'account_uuid' AS who,
+         count(*) AS spans FROM phoenix.spans
+  WHERE start_time > now() - INTERVAL '14 days' GROUP BY 1 ORDER BY 2 DESC
+$$);
+```
+
+Or, for repeated heavy queries, sync a source to local Parquet first:
+
 ```bash
-# List available data sources
-dal sources
-
-# Query a source
-dal query my-project --limit 10
-
-# Search for patterns
-dal query my-project --pattern "TODO|FIXME"
+dal sync --source team && dal export-parquet --source team
+dal query-spans --source team --stats
 ```
 
-Or use the Python API:
-
-```python
-from dev_agent_lens.query import query_source
-
-result = query_source(source="my-project", pattern=r"ENG-\d+")
-print(f"Found {result.total_spans} spans in {result.total_sessions} sessions")
-```
-
-See [docs/querying.md](docs/querying.md) for the full API.
+See [docs/querying.md](docs/querying.md) — the direct-DuckDB recipe, identity resolution
+(`account_uuid → person`), and why `session_id` is not a working session.
 
 ---
 
@@ -262,19 +264,20 @@ Claude Code ──► ~/.claude/projects/     (native sessions)
                           ~/.dal/data/
                          (Parquet files)
                                   │
-                    dal query / Python API
+              DuckDB / dal query-spans
                                   ▼
                        Analysis & Reports
 ```
 
-> **Note:** This codebase is under active development. Some features may be broken or incomplete, particularly AI-powered commands like `summarize`, `cluster`, `suggest`, and `quality`. The session export functionality documented above is stable.
+> **Note:** This codebase is under active development. Some AI-powered commands
+> (`summarize`, `cluster`, `suggest`) may be incomplete. Session export, sync, and the
+> query paths documented above are stable.
 
 ## Documentation
 
 - [Session Export Quickstart](docs/quickstart_session_export.md) - Full guide with CLI options and automation
-- [Session Storage](docs/claude_code_session_storage.md) - How Claude Code stores session data
 - [Markdown Format](docs/unified_markdown_format.md) - Unified markdown export specification
 - [Proxy Setup](docs/proxy-setup.md) - LiteLLM, Phoenix, Arize configuration
-- [Syncing Data](docs/sync.md) - Sync from observability backends
-- [Querying Data](docs/querying.md) - CLI and Python query API
+- [Syncing Data](docs/sync-historical.md) - Sync from observability backends
+- [Querying Data](docs/querying.md) - Direct DuckDB, local Parquet, identity, sessionization
 - [SDK Examples](examples/README.md) - TypeScript and Python SDK integration
