@@ -178,9 +178,6 @@ uv run dal analyze-tokens --session <session-id>
 uv run dal chain-export --session <session-id> --format markdown
 uv run dal chain-export --session <session-id> --format jsonl
 
-# Quality analysis
-uv run dal quality --session <session-id>
-
 # Check for chains (multi-session conversations)
 uv run dal chain-list
 ```
