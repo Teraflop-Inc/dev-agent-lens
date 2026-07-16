@@ -97,6 +97,7 @@ def _load(path: Path) -> IdentityMap:
 
     people: list[Person] = []
     by_account: dict[str, Person] = {}
+    contested: set[str] = set()
 
     for entry in raw.get("people") or []:
         accounts = entry.get("accounts") or []
@@ -129,12 +130,17 @@ def _load(path: Path) -> IdentityMap:
         )
         people.append(person)
         for uuid in uuids:
-            if uuid in by_account:
+            if uuid in contested or uuid in by_account:
+                # Drop BOTH claims (match the log): keeping the first would let
+                # whoever happens to be listed earlier in identity.yaml win —
+                # including an unverified guess over a verified self-report.
+                prior = by_account.pop(uuid, None)
+                contested.add(uuid)
                 logger.error(
                     "[identity] account %s claimed by both %s and %s — "
                     "refusing to resolve it to either",
                     uuid[:8],
-                    by_account[uuid].email,
+                    prior.email if prior else "an earlier claimant",
                     person.email,
                 )
                 continue

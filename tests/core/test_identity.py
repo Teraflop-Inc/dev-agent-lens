@@ -142,12 +142,13 @@ class TestGuardrails:
         assert "UNVERIFIED" in msgs
         assert "os_user=someuser" in msgs
 
-    def test_an_account_claimed_by_two_people_resolves_to_neither_silently(
+    def test_an_account_claimed_by_two_people_resolves_to_neither(
         self, tmp_path, caplog
     ):
         # Two people claiming one uuid is a data error. Guessing between them is
-        # exactly the misattribution we refuse to make: first claim wins, and
-        # the collision is logged loudly rather than silently overwritten.
+        # exactly the misattribution we refuse to make: BOTH claims are dropped
+        # (first-claim-wins would let an unverified guess listed earlier beat a
+        # verified self-report), and the collision is logged loudly.
         m = _load(
             _write(
                 tmp_path,
@@ -167,7 +168,8 @@ class TestGuardrails:
                 """,
             )
         )
-        assert m.resolve(U1).email == "first@example.com"
+        assert m.resolve(U1) is None
+        assert m.label(U1) == f"(unclaimed:{U1[:8]})"
         assert any("claimed by both" in r.message for r in caplog.records)
 
     def test_unclaimed_accounts_make_the_map_incomplete(self, tmp_path):
