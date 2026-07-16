@@ -346,7 +346,7 @@ After validating a session successfully:
 1. **Review the Export**: Check the generated markdown in `~/.dal/exports/`
 2. **Analyze Metrics**: Use `uv run dal analyze-tokens --session <id>` for token analysis
 3. **Chain Analysis**: Use `uv run dal chain-export --session <id>` for multi-session chains
-4. **Quality Checks**: Run `uv run dal quality --session <id>` for quality analysis
+4. **Deeper Queries**: See [docs/querying.md](../../docs/querying.md) for SQL access to spans and events
 
 ## Related Documentation
 

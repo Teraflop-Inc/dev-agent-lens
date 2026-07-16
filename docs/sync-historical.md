@@ -238,7 +238,7 @@ dal sync-historical --source my-phoenix
 dal export-parquet --source my-phoenix
 
 # 4. Query locally
-dal query my-phoenix --limit 10
+dal query-spans --source my-phoenix --limit 10
 
 # 5. Keep updated (run periodically)
 dal sync-historical --source my-phoenix
