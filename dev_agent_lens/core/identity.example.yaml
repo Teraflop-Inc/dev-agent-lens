@@ -1,0 +1,36 @@
+# Template for dev_agent_lens/core/identity.yaml (which is GITIGNORED — it holds
+# real person↔account_uuid↔email data, PII we never commit to this public repo).
+# Copy this to identity.yaml and fill in real values locally; the loader
+# (core/identity.py) degrades to an empty map if the real file is absent.
+#
+# The map is MANY-TO-ONE: one human can own several account_uuids (e.g. an
+# interactive login plus a CLAUDE_CODE_OAUTH_TOKEN account used in sandbox VMs).
+#
+# `verified` must only be true for a uuid a person self-reported from their own
+# ~/.claude.json. Rows inferred another way (e.g. an OS-user path seen in trace
+# content) stay verified:false with an `evidence:` note until self-reported — an
+# unverified guess is worse than a null, because this data attributes named
+# engineers' work.
+
+people:
+  - email: person-a@example.com
+    name: Person A
+    accounts:
+      - uuid: 00000000-0000-0000-0000-000000000001
+        verified: true
+        source: ~/.claude.json oauthAccount (YYYY-MM-DD)
+
+  - email: person-b@example.com
+    name: Person B
+    accounts:
+      - uuid: 00000000-0000-0000-0000-000000000002
+        verified: true
+        source: self-report (YYYY-MM-DD)
+      - uuid: 00000000-0000-0000-0000-000000000003
+        verified: false
+        evidence: os_user=personb (N spans, Nd)
+        note: Second account, same human — inferred, not yet self-reported.
+
+# Accounts seen in the data that map to no person (e.g. sandbox VMs, which carry
+# no account_uuid). Keep them here so `is_complete` reflects reality.
+unclaimed: []
