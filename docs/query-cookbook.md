@@ -94,7 +94,7 @@ rows = con.execute("""
 """).df()
 
 import re
-candidates = [m.group(1) for t in rows.tail.dropna()
+candidates = [m.group(1) for t in rows["tail"].dropna()
               if (m := re.search(r"'text': '([^']{5,400})", t))]
 for turn in extract_human_turns(candidates):
     print("•", turn)
