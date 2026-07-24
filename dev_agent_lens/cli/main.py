@@ -2714,12 +2714,19 @@ def reconstruct_session_cmd(session_id: str, source: str | None, output: str | N
     "--project", default=None,
     help="Phoenix project name (optional; session id is matched globally).",
 )
+@click.option(
+    "--days", type=int, default=7, show_default=True,
+    help="Only scan spans from the last N days (bounds the query so it stays "
+         "under the prod statement timeout). Use 0 to scan all history (slow; "
+         "may time out on large stores).",
+)
 def reconstruct_live_cmd(
     session_id: str,
     output: str | None,
     connection_url: str | None,
     schema: str | None,
     project: str | None,
+    days: int,
 ) -> None:
     """Reconstruct a session to markdown DIRECTLY from live Supabase-Phoenix.
 
@@ -2729,15 +2736,21 @@ def reconstruct_live_cmd(
 
     The Claude session id is matched against
     `attributes.metadata.user_api_key_end_user_id`; only main-thread (non-Haiku)
-    turns are rendered.
+    turns are rendered. The session-id predicate is unindexable (full scan), so
+    by default only the last `--days` of spans are scanned to stay under the
+    prod statement timeout; widen with `--days` (or `--days 0`) for old sessions.
 
     Examples:
 
         dal reconstruct-live 242b4ca3-ecb8-4b67-a9bd-d640a98c4bab -o session.md
 
+        # Reconstruct an older session by widening the scan window
+        dal reconstruct-live <session_id> --days 30
+
         PHOENIX_SQL_DATABASE_URL=postgres://... dal reconstruct-live <session_id>
     """
     import json
+    from datetime import datetime, timedelta, timezone
     from pathlib import Path
 
     from dev_agent_lens.analysis.live_reconstruct import build_session_records
@@ -2767,8 +2780,12 @@ def reconstruct_live_cmd(
         schema=schema,
     )
 
+    # Bound the (unindexable) full scan by a start_time floor so the query
+    # stays under the prod statement timeout. --days 0 disables the bound.
+    since = datetime.now(timezone.utc) - timedelta(days=days) if days else None
+
     try:
-        df = client.get_session_spans(session_id)
+        df = client.get_session_spans(session_id, since=since)
     except ValueError as e:
         # Known-bad super-session (ENG2-1312) or invalid id.
         click.echo(click.style(f"Error: {e}", fg="red"))
@@ -2781,9 +2798,16 @@ def reconstruct_live_cmd(
         client.close()
 
     if df.empty:
+        window_hint = (
+            f" within the last {days} day(s) — the session may be older than "
+            "the scan window; widen it with --days (or --days 0 to scan all "
+            "history)."
+            if since is not None
+            else " in live Postgres."
+        )
         click.echo(
             click.style(
-                f"No spans found for session '{session_id}' in live Postgres.",
+                f"No spans found for session '{session_id}'{window_hint}",
                 fg="yellow",
             )
         )
