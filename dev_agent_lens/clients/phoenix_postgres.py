@@ -29,6 +29,13 @@ import pandas as pd
 logger = logging.getLogger(__name__)
 
 
+# Session ids known to be corrupt/merged super-sessions that must never be
+# reconstructed (ENG2-1312): early spans dropped attribution and collapsed many
+# users' turns under a single placeholder id. Reconstructing one would dump
+# thousands of unrelated spans, so we reject them up front.
+INVALID_SESSION_IDS = frozenset({"id", "", "null", "none", "unknown"})
+
+
 class PhoenixPostgresError(Exception):
     """Base exception for Phoenix Postgres client errors."""
 
@@ -172,6 +179,78 @@ class PhoenixPostgresClient:
         # Match SQLite client output: serialize JSONB to strings so callers
         # that parse with json.loads keep working. Future cleanup: have all
         # backends return dicts and update callers.
+        for col in ("attributes", "events"):
+            if col in df.columns:
+                df[col] = df[col].apply(
+                    lambda v: json.dumps(v) if isinstance(v, (dict, list)) else v
+                )
+
+        return df
+
+    def get_session_spans(self, session_id: str) -> pd.DataFrame:
+        """Fetch every span for a single Claude Code session, live from Postgres.
+
+        The Claude session id is embedded in the JSON *string*
+        ``attributes.metadata.user_api_key_end_user_id`` (which itself holds an
+        ``account_uuid`` + ``session_id``), not at ``attributes.session.id``.
+
+        We extract just that one short JSON-path value and match the session id
+        as a substring of it. This works across both known shapes of the field
+        (a JSON object-string ``{"session_id": "..."}`` and the legacy
+        ``user_..._session_<uuid>`` string) and, crucially, avoids serialising
+        the whole ``attributes`` blob per row — a naive ``attributes::text
+        ILIKE '%sid%'`` scan times out on prod's ~1.3M spans. Extracting the
+        single ``#>>`` path and LIKE-ing the short result stays fast.
+
+        Args:
+            session_id: The 36-char Claude session UUID to reconstruct.
+
+        Returns:
+            DataFrame with the same columns as ``get_spans_dataframe``, ordered
+            by ``start_time``. Empty if the session has no spans.
+
+        Raises:
+            ValueError: If ``session_id`` is one of the known-bad placeholder
+                ids (e.g. the ENG2-1312 ``"id"`` super-session) that would
+                otherwise merge thousands of unrelated spans.
+        """
+        normalized = (session_id or "").strip()
+        if normalized.lower() in INVALID_SESSION_IDS:
+            raise ValueError(
+                f"Refusing to reconstruct session_id={session_id!r}: this is a "
+                "known-bad placeholder id (see ENG2-1312) that collapses many "
+                "users' spans into one merged super-session. Pass a real "
+                "36-char session UUID."
+            )
+
+        query = """
+            SELECT
+                s.span_id AS "context.span_id",
+                t.trace_id AS "context.trace_id",
+                s.parent_id,
+                s.name,
+                s.span_kind,
+                s.start_time,
+                s.end_time,
+                s.status_code,
+                s.status_message,
+                s.attributes,
+                s.events,
+                s.cumulative_error_count,
+                s.cumulative_llm_token_count_prompt,
+                s.cumulative_llm_token_count_completion,
+                s.llm_token_count_prompt,
+                s.llm_token_count_completion
+            FROM spans s
+            JOIN traces t ON s.trace_rowid = t.id
+            WHERE (s.attributes #>> '{metadata,user_api_key_end_user_id}') LIKE %s
+            ORDER BY s.start_time ASC
+        """
+        rows = self._execute_query(query, (f"%{normalized}%",))
+        df = pd.DataFrame(rows)
+
+        # Match SQLite/parquet client output: serialize JSONB to strings so
+        # callers that json.loads keep working.
         for col in ("attributes", "events"):
             if col in df.columns:
                 df[col] = df[col].apply(
