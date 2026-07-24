@@ -187,7 +187,9 @@ class PhoenixPostgresClient:
 
         return df
 
-    def get_session_spans(self, session_id: str) -> pd.DataFrame:
+    def get_session_spans(
+        self, session_id: str, since: datetime | None = None
+    ) -> pd.DataFrame:
         """Fetch every span for a single Claude Code session, live from Postgres.
 
         The Claude session id is embedded in the JSON *string*
@@ -197,17 +199,27 @@ class PhoenixPostgresClient:
         We extract just that one short JSON-path value and match the session id
         as a substring of it. This works across both known shapes of the field
         (a JSON object-string ``{"session_id": "..."}`` and the legacy
-        ``user_..._session_<uuid>`` string) and, crucially, avoids serialising
-        the whole ``attributes`` blob per row — a naive ``attributes::text
-        ILIKE '%sid%'`` scan times out on prod's ~1.3M spans. Extracting the
-        single ``#>>`` path and LIKE-ing the short result stays fast.
+        ``user_..._session_<uuid>`` string).
+
+        **Scale note:** this predicate — a per-row ``#>>`` extraction plus a
+        leading-``%`` ``LIKE`` — is *unindexable*, so it always runs as a full
+        sequential scan. On prod (~1.3M spans) an unbounded scan exceeds the
+        30s statement timeout, so the command cannot reconstruct from live prod
+        unless the scan is bounded. ``since`` supplies that bound via the
+        indexed ``start_time`` column: a ``start_time >= since`` floor lets
+        Postgres restrict the scan (e.g. a 7-day floor returns in ~20s, a 2-day
+        floor in ~8s). Pass ``since=None`` only for small stores (like the local
+        seed) where an unbounded scan is fine.
 
         Args:
             session_id: The 36-char Claude session UUID to reconstruct.
+            since: Optional lower bound on ``start_time``. When set, only spans
+                at or after this time are scanned — required to stay under the
+                statement timeout on prod-sized stores.
 
         Returns:
             DataFrame with the same columns as ``get_spans_dataframe``, ordered
-            by ``start_time``. Empty if the session has no spans.
+            by ``start_time``. Empty if the session has no spans in the window.
 
         Raises:
             ValueError: If ``session_id`` is one of the known-bad placeholder
@@ -244,9 +256,18 @@ class PhoenixPostgresClient:
             FROM spans s
             JOIN traces t ON s.trace_rowid = t.id
             WHERE (s.attributes #>> '{metadata,user_api_key_end_user_id}') LIKE %s
-            ORDER BY s.start_time ASC
         """
-        rows = self._execute_query(query, (f"%{normalized}%",))
+        params: list[Any] = [f"%{normalized}%"]
+
+        if since is not None:
+            # Bound the (unindexable) scan by the indexed start_time column so
+            # the query stays under the prod statement timeout.
+            query += " AND s.start_time >= %s"
+            params.append(since)
+
+        query += " ORDER BY s.start_time ASC"
+
+        rows = self._execute_query(query, tuple(params))
         df = pd.DataFrame(rows)
 
         # Match SQLite/parquet client output: serialize JSONB to strings so

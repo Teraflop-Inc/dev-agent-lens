@@ -205,6 +205,46 @@ class TestPhoenixPostgresClientQueries:
         assert "attributes::text" not in sql
         assert params == ("%242b4ca3-ecb8-4b67-a9bd-d640a98c4bab%",)
 
+    def test_get_session_spans_since_bounds_the_scan(self, mock_psycopg):
+        """Passing `since` adds a start_time floor so the scan stays bounded.
+
+        The session-id predicate is an unindexable full scan; on prod (~1.3M
+        spans) an unbounded scan times out, so `since` must inject an indexed
+        `start_time >= %s` bound and pass the value as a param.
+        """
+        _, fake_conn = mock_psycopg
+        cursor = _make_cursor([])
+        fake_conn.cursor.return_value = cursor
+
+        client = PhoenixPostgresClient(
+            connection_url="postgresql://u:p@h:5432/d",
+            project="sf-workspaces",
+        )
+        floor = datetime(2026, 7, 17, 0, 0)
+        client.get_session_spans("242b4ca3", since=floor)
+
+        sql, params = cursor.execute.call_args[0]
+        assert "s.start_time >= %s" in sql
+        # start_time floor must come before ORDER BY
+        assert sql.index("s.start_time >= %s") < sql.index("ORDER BY")
+        assert params == ("%242b4ca3%", floor)
+
+    def test_get_session_spans_without_since_is_unbounded(self, mock_psycopg):
+        """Omitting `since` leaves the query without a start_time floor."""
+        _, fake_conn = mock_psycopg
+        cursor = _make_cursor([])
+        fake_conn.cursor.return_value = cursor
+
+        client = PhoenixPostgresClient(
+            connection_url="postgresql://u:p@h:5432/d",
+            project="sf-workspaces",
+        )
+        client.get_session_spans("242b4ca3")
+
+        sql, params = cursor.execute.call_args[0]
+        assert "s.start_time >=" not in sql
+        assert params == ("%242b4ca3%",)
+
     def test_get_session_spans_rejects_super_session(self, mock_psycopg):
         """The known-bad session_id='id' super-session (ENG2-1312) errors clearly."""
         client = PhoenixPostgresClient(
