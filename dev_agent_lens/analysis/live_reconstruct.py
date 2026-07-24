@@ -30,6 +30,7 @@ from dev_agent_lens.analysis.threads import (
 )
 from dev_agent_lens.export.markdown_litellm import (
     _extract_input_messages_array,
+    _extract_input_value,
     _extract_model,
     _extract_output_messages_array,
     _parse_message_content,
@@ -144,6 +145,21 @@ def build_session_records(
         total_tokens += int(span.get("llm_token_count_prompt") or 0)
         total_tokens += int(span.get("llm_token_count_completion") or 0)
 
+        # The continuation/task markers can live in either message shape: the
+        # structured `llm.input_messages` OR the serialized `input.value`
+        # request string (which is what the parquet `export_chain_to_jsonl`
+        # pipeline checks). Scan input.value once so compaction is detected
+        # regardless of which shape carries the marker.
+        span_input_value = _extract_input_value(span)
+
+        # A compaction-summary *call* (input = the summarization prompt, output
+        # = the summary) is not conversation — skip the whole span so its giant
+        # prompt/summary isn't dumped as user/assistant turns.
+        if COMPACTION_TASK_MARKER in span_input_value:
+            continue
+
+        span_emitted_compaction = False
+
         # ---- User side: input_messages (one user message per exchange) --------
         for msg in _extract_input_messages_array(span):
             if msg.get("role") != "user":
@@ -154,6 +170,7 @@ def build_session_records(
             # Compaction: the post-compaction continuation carries the summary
             if COMPACTION_CONTINUATION_MARKER in content_str:
                 compaction_count += 1
+                span_emitted_compaction = True
                 events.append({
                     "record_type": "event",
                     "event_type": "compaction",
@@ -197,6 +214,20 @@ def build_session_records(
                             "input": {},
                             "result": result_str,
                         })
+
+        # Fallback: the continuation marker may live only in the serialized
+        # `input.value` request (not the structured messages). Emit a compaction
+        # event from there so it's caught regardless of message shape.
+        if not span_emitted_compaction and (
+            COMPACTION_CONTINUATION_MARKER in span_input_value
+        ):
+            compaction_count += 1
+            events.append({
+                "record_type": "event",
+                "event_type": "compaction",
+                "number": compaction_count,
+                "summary": _extract_compaction_summary(span_input_value),
+            })
 
         # ---- Assistant side: output_messages (this call's reply) --------------
         for msg in _extract_output_messages_array(span):

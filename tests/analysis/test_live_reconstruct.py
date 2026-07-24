@@ -19,11 +19,15 @@ from dev_agent_lens.analysis.live_reconstruct import build_session_records
 from dev_agent_lens.export.markdown_renderer import render_jsonl_to_markdown
 
 
-def _span(start, model, user_content, assistant_content, tokens=(10, 5)):
+def _span(
+    start, model, user_content, assistant_content, tokens=(10, 5), input_value=None
+):
     """Build a synthetic live litellm_request span.
 
     user_content / assistant_content are Python-repr block-list strings, exactly
     as Phoenix stores `attributes.llm.{input,output}_messages[i].message.content`.
+    `input_value` optionally sets `attributes.input.value` (the serialized
+    request string) to exercise the input.value fallback.
     """
     attrs = {
         "llm": {
@@ -34,6 +38,8 @@ def _span(start, model, user_content, assistant_content, tokens=(10, 5)):
             ],
         }
     }
+    if input_value is not None:
+        attrs["input"] = {"value": input_value}
     return {
         "name": "litellm_request",
         "start_time": start,
@@ -175,6 +181,79 @@ def test_compaction_summary_becomes_event():
     assert len(compactions) == 1
     assert "we did X and Y" in compactions[0]["summary"]
     assert header["compaction_count"] == 1
+
+
+def test_compaction_detected_from_input_value_fallback():
+    # The continuation marker may live only in the serialized input.value, not
+    # the structured input_messages. It must still register as compaction.
+    spans = [
+        _span(
+            "2026-07-23T12:00:00",
+            "claude-opus-4-8",
+            "[{'type': 'text', 'text': 'ordinary continuing content here'}]",
+            "[{'type': 'text', 'text': 'continuing'}]",
+            input_value=(
+                "This session is being continued from a previous conversation. "
+                "The conversation is summarized below: we did A and B."
+            ),
+        ),
+    ]
+    records = build_session_records("s", spans)
+    header = records[0]
+    evts = _events(records)
+    compactions = [e for e in evts if e["event_type"] == "compaction"]
+    assert len(compactions) == 1
+    assert "we did A and B" in compactions[0]["summary"]
+    assert header["compaction_count"] == 1
+
+
+def test_compaction_not_double_counted_when_marker_in_both_shapes():
+    # Marker present in BOTH the structured message and input.value must emit
+    # exactly one compaction event, not two.
+    marker = (
+        "This session is being continued from a previous conversation. "
+        "The conversation is summarized below: recap text."
+    )
+    spans = [
+        _span(
+            "2026-07-23T12:00:00",
+            "claude-opus-4-8",
+            f"[{{'type': 'text', 'text': '{marker}'}}]",
+            "[{'type': 'text', 'text': 'continuing'}]",
+            input_value=marker,
+        ),
+    ]
+    records = build_session_records("s", spans)
+    compactions = [e for e in _events(records) if e["event_type"] == "compaction"]
+    assert len(compactions) == 1
+    assert records[0]["compaction_count"] == 1
+
+
+def test_summarization_task_span_is_skipped_entirely():
+    # A compaction-summary *call* (task marker in input.value) is not
+    # conversation — the whole span is skipped, so neither its prompt nor the
+    # summary output leaks in as user/assistant turns.
+    spans = [
+        _span(
+            "2026-07-23T12:00:00",
+            "claude-opus-4-8",
+            "[{'type': 'text', 'text': 'placeholder'}]",
+            "[{'type': 'text', 'text': 'HERE IS THE GIANT SUMMARY OUTPUT'}]",
+            input_value="Your task is to create a detailed summary of the conversation",
+        ),
+        _span(
+            "2026-07-23T12:00:01",
+            "claude-opus-4-8",
+            "[{'type': 'text', 'text': 'a real human turn after the summary call'}]",
+            "[{'type': 'text', 'text': 'ok'}]",
+        ),
+    ]
+    evts = _events(build_session_records("s", spans))
+    # Summary output must not appear; only the real turn survives.
+    assert all("GIANT SUMMARY" not in e.get("text", "") for e in evts)
+    users = [e for e in evts if e["event_type"] == "user"]
+    assert len(users) == 1
+    assert "real human turn" in users[0]["text"]
 
 
 def test_output_at_parity_with_renderer():
