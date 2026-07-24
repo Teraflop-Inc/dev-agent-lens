@@ -2696,6 +2696,165 @@ def reconstruct_session_cmd(session_id: str, source: str | None, output: str | N
         click.echo(click.style(f"Error: {e}", fg="red"))
 
 
+@main.command("reconstruct-live")
+@click.argument("session_id")
+@click.option(
+    "--output", "-o", type=click.Path(), default=None,
+    help="Write markdown here (default: stdout)",
+)
+@click.option(
+    "--connection-url", default=None,
+    help="Postgres connection string. Falls back to PHOENIX_SQL_DATABASE_URL env var.",
+)
+@click.option(
+    "--schema", default=None,
+    help="Phoenix schema (default 'phoenix'). Falls back to PHOENIX_SQL_DATABASE_SCHEMA env var.",
+)
+@click.option(
+    "--project", default=None,
+    help="Phoenix project name (optional; session id is matched globally).",
+)
+@click.option(
+    "--days", type=int, default=7, show_default=True,
+    help="Only scan spans from the last N days (bounds the query so it stays "
+         "under the prod statement timeout). Use 0 to scan all history (slow; "
+         "may time out on large stores).",
+)
+def reconstruct_live_cmd(
+    session_id: str,
+    output: str | None,
+    connection_url: str | None,
+    schema: str | None,
+    project: str | None,
+    days: int,
+) -> None:
+    """Reconstruct a session to markdown DIRECTLY from live Supabase-Phoenix.
+
+    Reads the session's spans straight from live Postgres (no `dal sync` /
+    parquet step), reconstructs the conversation in start_time order, and emits
+    markdown at parity with `dal reconstruct`.
+
+    The Claude session id is matched against
+    `attributes.metadata.user_api_key_end_user_id`; only main-thread (non-Haiku)
+    turns are rendered. The session-id predicate is unindexable (full scan), so
+    by default only the last `--days` of spans are scanned to stay under the
+    prod statement timeout; widen with `--days` (or `--days 0`) for old sessions.
+
+    Examples:
+
+        dal reconstruct-live 242b4ca3-ecb8-4b67-a9bd-d640a98c4bab -o session.md
+
+        # Reconstruct an older session by widening the scan window
+        dal reconstruct-live <session_id> --days 30
+
+        PHOENIX_SQL_DATABASE_URL=postgres://... dal reconstruct-live <session_id>
+    """
+    import json
+    from datetime import datetime, timedelta, timezone
+    from pathlib import Path
+
+    from dev_agent_lens.analysis.live_reconstruct import build_session_records
+    from dev_agent_lens.clients.phoenix_postgres import (
+        PhoenixPostgresClient,
+        PhoenixPostgresError,
+    )
+    from dev_agent_lens.export.markdown_renderer import render_jsonl_to_markdown
+
+    connection_url = connection_url or os.getenv("PHOENIX_SQL_DATABASE_URL")
+    if not connection_url:
+        click.echo(
+            click.style(
+                "Error: no Postgres connection. Pass --connection-url or set "
+                "PHOENIX_SQL_DATABASE_URL.",
+                fg="red",
+            )
+        )
+        raise SystemExit(1)
+
+    schema = schema or os.getenv("PHOENIX_SQL_DATABASE_SCHEMA", "phoenix")
+    project = project or os.getenv("OTEL_SERVICE_NAME", "dev-agent-lens")
+
+    client = PhoenixPostgresClient(
+        connection_url=connection_url,
+        project=project,
+        schema=schema,
+    )
+
+    # Bound the (unindexable) full scan by a start_time floor so the query
+    # stays under the prod statement timeout. --days 0 disables the bound.
+    since = datetime.now(timezone.utc) - timedelta(days=days) if days else None
+
+    try:
+        df = client.get_session_spans(session_id, since=since)
+    except ValueError as e:
+        # Known-bad super-session (ENG2-1312) or invalid id.
+        click.echo(click.style(f"Error: {e}", fg="red"))
+        raise SystemExit(1)
+    except PhoenixPostgresError as e:
+        # Connection / query failures (bad URL, wrong schema, unreachable host).
+        click.echo(click.style(f"Error reading live Postgres: {e}", fg="red"))
+        raise SystemExit(1)
+    finally:
+        client.close()
+
+    if df.empty:
+        window_hint = (
+            f" within the last {days} day(s) — the session may be older than "
+            "the scan window; widen it with --days (or --days 0 to scan all "
+            "history)."
+            if since is not None
+            else " in live Postgres."
+        )
+        click.echo(
+            click.style(
+                f"No spans found for session '{session_id}'{window_hint}",
+                fg="yellow",
+            )
+        )
+        raise SystemExit(1)
+
+    # Map live Phoenix rows into the span shape the reconstructor consumes:
+    # wrap the Phoenix `attributes` blob under an "attributes" key so the
+    # existing extractors find `attributes.llm.input_messages` etc.
+    spans: list[dict] = []
+    for row in df.to_dict("records"):
+        attrs = row.get("attributes")
+        if isinstance(attrs, str):
+            try:
+                attrs = json.loads(attrs)
+            except json.JSONDecodeError:
+                attrs = {}
+        spans.append({
+            "name": row.get("name"),
+            "start_time": row.get("start_time"),
+            "end_time": row.get("end_time"),
+            "trace_id": row.get("context.trace_id"),
+            "raw_attributes_json": json.dumps({"attributes": attrs or {}}),
+            "llm_token_count_prompt": row.get("llm_token_count_prompt"),
+            "llm_token_count_completion": row.get("llm_token_count_completion"),
+        })
+
+    records = build_session_records(session_id, spans)
+    export = render_jsonl_to_markdown(records)
+    content = export.main_content
+
+    if output:
+        Path(output).write_text(content, encoding="utf-8")
+        stats = export.stats
+        click.echo(
+            click.style(
+                f"Wrote {len(content):,} chars → {output} "
+                f"({stats.get('user_turns', 0)} user, "
+                f"{stats.get('assistant_turns', 0)} assistant, "
+                f"{stats.get('tool_calls', 0)} tool results, "
+                f"{stats.get('compactions', 0)} compactions)",
+                fg="green",
+            )
+        )
+    else:
+        click.echo(content)
+
+
 @main.command("list-sessions")
 @click.option("--source", default=None, help="Parquet source (default: all sources)")
 @click.option("--pattern", default=None, help="Substring/regex to match in span content")
