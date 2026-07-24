@@ -160,6 +160,60 @@ class TestPhoenixPostgresClientQueries:
         assert df["attributes"].iloc[0] == json.dumps({"foo": "bar"})
         assert df["events"].iloc[0] == json.dumps([])
 
+    def test_get_session_spans_filters_by_end_user_id(self, mock_psycopg):
+        """get_session_spans matches the session id inside the end_user_id path."""
+        _, fake_conn = mock_psycopg
+        cursor = _make_cursor([
+            {
+                "context.span_id": "s1",
+                "context.trace_id": "t1",
+                "parent_id": None,
+                "name": "litellm_request",
+                "span_kind": "LLM",
+                "start_time": datetime(2026, 7, 23, 12, 0),
+                "end_time": datetime(2026, 7, 23, 12, 0, 5),
+                "status_code": "OK",
+                "status_message": None,
+                "attributes": {"llm": {"model_name": "claude-opus-4-8"}},
+                "events": [],
+                "cumulative_error_count": 0,
+                "cumulative_llm_token_count_prompt": 10,
+                "cumulative_llm_token_count_completion": 5,
+                "llm_token_count_prompt": 10,
+                "llm_token_count_completion": 5,
+            }
+        ])
+        fake_conn.cursor.return_value = cursor
+
+        client = PhoenixPostgresClient(
+            connection_url="postgresql://u:p@h:5432/d",
+            project="sf-workspaces",
+        )
+        df = client.get_session_spans("242b4ca3-ecb8-4b67-a9bd-d640a98c4bab")
+
+        assert isinstance(df, pd.DataFrame)
+        assert df.shape[0] == 1
+        # JSONB serialized to string for parity
+        assert df["attributes"].iloc[0] == json.dumps(
+            {"llm": {"model_name": "claude-opus-4-8"}}
+        )
+
+        # The query must extract the single end_user_id JSON path and LIKE it,
+        # NOT serialize the whole attributes blob (that scan times out on prod).
+        sql, params = cursor.execute.call_args[0]
+        assert "user_api_key_end_user_id" in sql
+        assert "attributes::text" not in sql
+        assert params == ("%242b4ca3-ecb8-4b67-a9bd-d640a98c4bab%",)
+
+    def test_get_session_spans_rejects_super_session(self, mock_psycopg):
+        """The known-bad session_id='id' super-session (ENG2-1312) errors clearly."""
+        client = PhoenixPostgresClient(
+            connection_url="postgresql://u:p@h:5432/d",
+            project="x",
+        )
+        with pytest.raises(ValueError, match="ENG2-1312"):
+            client.get_session_spans("id")
+
     def test_get_time_range_raises_on_empty_project(self, mock_psycopg):
         """Empty project surfaces a clear ValueError."""
         _, fake_conn = mock_psycopg
