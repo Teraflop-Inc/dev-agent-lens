@@ -245,6 +245,34 @@ def test_compaction_deduped_across_cumulative_spans():
     assert records[0]["compaction_count"] == 1
 
 
+def test_two_distinct_compactions_counted_separately():
+    """Dedup must collapse the SAME continuation across cumulative spans, but
+    must NOT collapse two DIFFERENT compactions in one session — even though
+    real summaries share a long boilerplate preamble. Guards the dedup-key
+    window against the ENG2-1441 class of 'clean assumption breaks on real
+    data'."""
+    preamble = (
+        "This session is being continued from a previous conversation that ran "
+        "out of context. The summary below covers the earlier portion of the "
+        "conversation.\\n\\nSummary:\\n## 1. Primary Request and Intent\\n\\n"
+    )
+    first = preamble + "The user asked to implement ticket ENG2-1431."
+    second = preamble + "The user asked to refactor the export pipeline."
+    spans = [
+        _span("2026-07-23T12:00:00", "claude-opus-4-8",
+              f'[{{\'type\': \'text\', \'text\': "{first}"}}]',
+              "[{'type': 'text', 'text': 'reply one'}]"),
+        _span("2026-07-23T13:00:00", "claude-opus-4-8",
+              f'[{{\'type\': \'text\', \'text\': "{second}"}}]',
+              "[{'type': 'text', 'text': 'reply two'}]"),
+    ]
+    records = build_session_records("s", spans)
+    compactions = [e for e in _events(records) if e["event_type"] == "compaction"]
+    assert len(compactions) == 2
+    assert records[0]["compaction_count"] == 2
+    assert compactions[0]["number"] == 1 and compactions[1]["number"] == 2
+
+
 def test_output_at_parity_with_renderer():
     """The records must render cleanly through the shared markdown renderer."""
     spans = [

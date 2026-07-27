@@ -165,7 +165,11 @@ def build_session_records(
             if COMPACTION_CONTINUATION_MARKER not in content_str:
                 continue
             summary = _extract_compaction_summary(content_str)
-            key = hash(summary[:500])
+            # Key on the full summary (already bounded to the continuation block,
+            # not the whole history): two real compactions share a ~160-char
+            # boilerplate preamble, so a truncated key could collapse distinct
+            # summaries into one.
+            key = hash(summary)
             if key in seen_compaction_keys:
                 break  # same compaction, already counted on an earlier span
             seen_compaction_keys.add(key)
