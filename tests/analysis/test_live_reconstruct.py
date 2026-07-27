@@ -177,6 +177,74 @@ def test_compaction_summary_becomes_event():
     assert header["compaction_count"] == 1
 
 
+def test_compaction_marker_on_haiku_span_is_detected():
+    """Regression for ENG2-1441 — the shape a synthetic clean test can't catch.
+
+    On real prod/seed data the ONLY span carrying the post-compaction
+    continuation marker is a *haiku* background call (a title/topic call that
+    carries the resumed context); no main-model span in the window carries it.
+    The marker also sits several blocks deep in a python-repr content string and
+    uses the "The summary below covers..." phrasing (no `SUMMARY_MARKER`). The
+    original code skipped all haiku spans BEFORE detection, so it reported 0
+    compactions on a genuinely compacted session. Detection must fire anyway.
+    """
+    continuation = (
+        "This session is being continued from a previous conversation that ran "
+        "out of context. The summary below covers the earlier portion of the "
+        "conversation.\\n\\nSummary:\\n## 1. Primary Request and Intent\\n\\n"
+        "The user asked to implement ticket ENG2-1431."
+    )
+    haiku_span = _span(
+        "2026-07-23T12:00:05",
+        "claude-haiku-4-5-20251001",
+        # Multiple blocks, marker is NOT first — mirrors the real cumulative
+        # history the haiku call receives as context.
+        "[{'type': 'text', 'text': '<system-reminder>\\nnoise\\n</system-reminder>'}, "
+        f'{{\'type\': \'text\', \'text\': "{continuation}"}}]',
+        "[{'type': 'text', 'text': 'ancillary haiku output'}]",
+    )
+    opus_span = _span(
+        "2026-07-23T12:00:06",
+        "claude-opus-4-8",
+        "[{'type': 'text', 'text': 'a real human turn after the compaction here'}]",
+        "[{'type': 'text', 'text': 'picking up where we left off'}]",
+    )
+    records = build_session_records("s", [haiku_span, opus_span])
+    header = records[0]
+    evts = _events(records)
+
+    compactions = [e for e in evts if e["event_type"] == "compaction"]
+    assert len(compactions) == 1, "haiku-only continuation marker must be counted"
+    assert header["compaction_count"] == 1
+    # Summary is bounded to the continuation block, not the whole history.
+    assert compactions[0]["summary"].startswith("This session is being continued")
+    assert "ENG2-1431" in compactions[0]["summary"]
+    assert "<system-reminder>" not in compactions[0]["summary"]
+    # The haiku span's ancillary body is still excluded from the conversation.
+    assert all(e.get("text") != "ancillary haiku output" for e in evts)
+    assert header["metrics"]["models_used"] == {"claude-opus-4-8": 1}
+
+
+def test_compaction_deduped_across_cumulative_spans():
+    """The same continuation persists in later spans' cumulative history on prod;
+    it must count as ONE compaction, not one per span carrying it."""
+    continuation = (
+        "This session is being continued from a previous conversation that ran "
+        "out of context.\\n\\nSummary:\\n## 1. Primary Request and Intent"
+    )
+    user_content = f'[{{\'type\': \'text\', \'text\': "{continuation}"}}]'
+    spans = [
+        _span("2026-07-23T12:00:00", "claude-opus-4-8", user_content,
+              "[{'type': 'text', 'text': 'reply one'}]"),
+        _span("2026-07-23T12:00:01", "claude-opus-4-8", user_content,
+              "[{'type': 'text', 'text': 'reply two'}]"),
+    ]
+    records = build_session_records("s", spans)
+    compactions = [e for e in _events(records) if e["event_type"] == "compaction"]
+    assert len(compactions) == 1
+    assert records[0]["compaction_count"] == 1
+
+
 def test_output_at_parity_with_renderer():
     """The records must render cleanly through the shared markdown renderer."""
     spans = [
