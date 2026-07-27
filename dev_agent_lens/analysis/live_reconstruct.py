@@ -83,11 +83,25 @@ def _stringify_tool_result(content: Any) -> str:
 
 
 def _extract_compaction_summary(text: str) -> str:
-    """Pull the summary body out of a post-compaction continuation message."""
-    marker = COMPACTION_SUMMARY_MARKER
-    idx = text.find(marker)
-    if idx != -1:
-        return text[idx:]
+    """Pull the summary body out of a post-compaction continuation message.
+
+    The continuation message's ``content`` is a stringified block list, and the
+    summary lives in the single text block carrying the continuation marker.
+    Return just that block, so the rendered marker is the summary itself rather
+    than the entire cumulative history the block list also carries (which on
+    real spans is tens of KB — see ENG2-1441).
+    """
+    for block in _parse_message_content(text):
+        if block.get("type") == "text":
+            btext = block.get("text", "")
+            if COMPACTION_CONTINUATION_MARKER in btext:
+                return btext
+    # Fallbacks for shapes the block parser can't split: slice from whichever
+    # marker is present so we never dump the whole history verbatim.
+    for marker in (COMPACTION_SUMMARY_MARKER, COMPACTION_CONTINUATION_MARKER):
+        idx = text.find(marker)
+        if idx != -1:
+            return text[idx:]
     return text
 
 
@@ -120,6 +134,10 @@ def build_session_records(
     total_tokens = 0
     models_used: dict[str, int] = {}
     compaction_count = 0
+    # Dedup compactions by summary: the same continuation persists in the
+    # cumulative history of every later span on prod, so a raw per-span count
+    # would multiply one compaction into dozens.
+    seen_compaction_keys: set[int] = set()
 
     timestamps: list[Any] = []
     for span in ordered:
@@ -130,10 +148,41 @@ def build_session_records(
         if ts_end:
             timestamps.append(ts_end)
 
+        input_messages = _extract_input_messages_array(span)
+
+        # ---- Compaction detection (runs for EVERY span, incl. haiku) ---------
+        # On real data the post-compaction continuation marker can land only on
+        # a background *haiku* span (e.g. a title/topic call that carries the
+        # resumed context) — no main-model span in the window carries it. The
+        # haiku skip below drops such spans from the conversation body, so
+        # detection MUST run first or the compaction is missed entirely, which
+        # is exactly the ENG2-1441 bug (0 compactions on a compacted session).
+        for msg in input_messages:
+            if msg.get("role") != "user":
+                continue
+            content = msg.get("content", "")
+            content_str = content if isinstance(content, str) else str(content)
+            if COMPACTION_CONTINUATION_MARKER not in content_str:
+                continue
+            summary = _extract_compaction_summary(content_str)
+            key = hash(summary[:500])
+            if key in seen_compaction_keys:
+                break  # same compaction, already counted on an earlier span
+            seen_compaction_keys.add(key)
+            compaction_count += 1
+            events.append({
+                "record_type": "event",
+                "event_type": "compaction",
+                "number": compaction_count,
+                "summary": summary,
+            })
+            break  # one continuation marker per span
+
         # Claude Code routes ancillary background work (quota checks, topic
         # detection, conversation-title generation, bash-safety checks) to
         # Haiku. Those are not part of the main conversation, so skip them for
-        # parity with `dal reconstruct`'s main-thread-only default.
+        # parity with `dal reconstruct`'s main-thread-only default. (Compaction
+        # was already detected above, so a haiku-only marker isn't lost.)
         model = _extract_model(span)
         if "haiku" in model.lower():
             continue
@@ -145,21 +194,15 @@ def build_session_records(
         total_tokens += int(span.get("llm_token_count_completion") or 0)
 
         # ---- User side: input_messages (one user message per exchange) --------
-        for msg in _extract_input_messages_array(span):
+        for msg in input_messages:
             if msg.get("role") != "user":
                 continue
             content = msg.get("content", "")
             content_str = content if isinstance(content, str) else str(content)
 
-            # Compaction: the post-compaction continuation carries the summary
+            # Compaction continuation already counted above; don't re-emit it as
+            # a user turn.
             if COMPACTION_CONTINUATION_MARKER in content_str:
-                compaction_count += 1
-                events.append({
-                    "record_type": "event",
-                    "event_type": "compaction",
-                    "number": compaction_count,
-                    "summary": _extract_compaction_summary(content_str),
-                })
                 continue
             # The summarization request itself is not a human turn — skip its
             # (huge) prompt rather than dumping it as user text.
