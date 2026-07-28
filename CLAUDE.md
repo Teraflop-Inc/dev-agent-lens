@@ -83,7 +83,11 @@ uv run dal run cleanup --all                 # Clean up after testing
 
 ## Code Style
 
-- Use `uv run` for all Python commands
+- Use `uv run` for all Python commands — including **ad-hoc DAL/DuckDB queries** (`uv run
+  python`, never bare `python`/`python3`). A bare `python` on a miniconda-`base` machine
+  dumps `numpy._ARRAY_API` tracebacks (numpy 2.x vs pandas-1.x optional imports) that look
+  fatal but aren't — the import succeeds and the query returns correct data. `uv run` is the
+  pinned, clean env. (ENG2-1447)
 - Type hints for public APIs
 - `pathlib.Path` over string paths
 - `logging` module, not print

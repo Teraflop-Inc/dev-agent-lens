@@ -5,12 +5,32 @@ verified against the live Supabase backend. Start from the closest recipe and ad
 
 New to this? Read [querying.md](querying.md) first — it covers the one-time setup, the
 `postgres_query()` pushdown rule, and the known limits (connection cap, JSON timeout).
-Everything below assumes you've done:
 
-```sql
-INSTALL postgres; LOAD postgres;
-ATTACH getenv('PHOENIX_SQL_DATABASE_URL') AS pg (TYPE postgres, READ_ONLY);
+**Preflight (do this once per shell):** run everything through the project's `uv`
+environment — `uv run python`, never a bare `python`/`python3` or the standalone `duckdb`
+CLI (see querying.md for *why* — miniconda numpy tracebacks + un-pinned CLI):
+
+```bash
+cd dev-agent-lens
+[ -f .env ] || cp .env.example .env  # one-time: then uncomment + fill PHOENIX_SQL_DATABASE_URL (pooler password is out-of-band)
+set -a; source .env; set +a          # exports PHOENIX_SQL_DATABASE_URL (NOT exported by default)
+uv run python                        # pinned duckdb (tested 1.4.3), clean numpy
 ```
+
+Everything below assumes you've attached in that `uv run python` — `ATTACH` needs a
+string-literal path, so pass `os.environ[...]` (a bare `ATTACH getenv(...)` is a
+`Parser Error`):
+
+```python
+import duckdb, os
+con = duckdb.connect()
+con.execute("INSTALL postgres; LOAD postgres;")
+con.execute(f"ATTACH '{os.environ['PHOENIX_SQL_DATABASE_URL']}' AS pg (TYPE postgres, READ_ONLY)")
+```
+
+Keep that `con` — the recipes below run in the **same `uv run python` session**: recipes #1
+and #2 each rebuild `con` so they stand alone, but #3–#4 reuse the `con` above, and the
+bare-```sql``` recipes (#5–#7) run by wrapping the SQL: `con.execute("""<sql>""").df()`.
 
 Two conventions used throughout:
 
@@ -22,7 +42,7 @@ The `account_uuid → person` map lives in `dev_agent_lens/core/identity.yaml` �
 Look up a person's UUIDs there, or resolve in Python:
 
 ```python
-from dev_agent_lens.core.identity import label_account, resolve_account
+from dev_agent_lens.core.identity import label_account, resolve_account, load_identity_map
 label_account("<account-uuid>")                 # -> the person's email
 [a for p in load_identity_map().people if p.email == "someone@example.com" for a in p.accounts]
 ```
@@ -34,18 +54,49 @@ local map.
 
 ## 1. Who is active? (the team roster)
 
-```sql
-SELECT * FROM postgres_query('pg', $$
-  SELECT ((attributes->'metadata'->>'user_api_key_end_user_id')::jsonb)->>'account_uuid' AS account_uuid,
-         count(*) AS spans, max(start_time)::date AS last_seen
-  FROM phoenix.spans
-  WHERE start_time > now() - INTERVAL '14 days'
-  GROUP BY 1 ORDER BY 2 DESC
-$$);
+Self-contained — paste the whole block into `uv run python` (after the preflight above):
+
+```python
+import duckdb, os
+from dev_agent_lens.core.identity import label_account
+
+con = duckdb.connect()
+con.execute("INSTALL postgres; LOAD postgres;")
+con.execute(f"ATTACH '{os.environ['PHOENIX_SQL_DATABASE_URL']}' AS pg (TYPE postgres, READ_ONLY)")
+
+roster = con.execute("""
+  SELECT * FROM postgres_query('pg', $q$
+    SELECT ((attributes->'metadata'->>'user_api_key_end_user_id')::jsonb)->>'account_uuid' AS account_uuid,
+           count(*) AS spans, max(start_time)::date AS last_seen
+    FROM phoenix.spans
+    WHERE start_time > now() - INTERVAL '14 days'
+    GROUP BY 1 ORDER BY 2 DESC
+  $q$)
+""").df()
+# account_uuid = NULL is sandbox VMs (no identity on the span), not a person.
+roster["who"] = roster["account_uuid"].map(lambda a: label_account(a) if a else "sandbox VM")
+print(roster.to_string(index=False))
 ```
 
-`account_uuid = NULL` is sandbox VMs (no identity on the span), not a person. Resolve the
-rest to names via `identity.yaml`.
+`label_account` resolves each `account_uuid` → email via the local `identity.yaml` (copy
+`identity.example.yaml` and fill it, or get it out-of-band — it's gitignored PII). Without
+that file it degrades gracefully (a benign `[identity] no identity file` note on stderr, no
+crash); unresolved uuids render as `(unclaimed:<prefix>)`, so the roster still prints.
+
+<details><summary>Raw <code>duckdb</code> CLI fallback</summary>
+
+```bash
+duckdb -c "INSTALL postgres; LOAD postgres;
+ATTACH '$PHOENIX_SQL_DATABASE_URL' AS pg (TYPE postgres, READ_ONLY);
+SELECT * FROM postgres_query('pg', \$\$
+  SELECT ((attributes->'metadata'->>'user_api_key_end_user_id')::jsonb)->>'account_uuid' AS account_uuid,
+         count(*) AS spans, max(start_time)::date AS last_seen
+  FROM phoenix.spans WHERE start_time > now() - INTERVAL '14 days'
+  GROUP BY 1 ORDER BY 2 DESC
+\$\$);"
+```
+(un-pinned DuckDB; resolve names by hand via `identity.yaml`.)
+</details>
 
 ## 2. One person's working sessions
 

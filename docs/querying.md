@@ -20,18 +20,43 @@ The backend is a Supabase Postgres. You do **not** need `psql`, and you do **not
 
 ### Setup (once)
 
-Put the connection string in your environment. It's the `PHOENIX_SQL_DATABASE_URL` value
-from `dev-agent-lens/.env` (ask a teammate, or read it from Fly):
+**Run everything through the project's `uv` environment — `uv run python`, NOT a bare
+`python`/`python3` or the standalone `duckdb` CLI.** The connection string lives in
+`.env` (unexported), and the pinned `duckdb` (tested: **1.4.3**) comes from `uv.lock` — a
+bare `python` on a machine whose default is miniconda `base` dumps `numpy._ARRAY_API`
+tracebacks (numpy 2.x vs pandas-1.x optional imports) that look fatal but aren't (the
+query still returns correct data), and a brew `duckdb` CLI is a different, un-pinned
+version. So:
 
 ```bash
-export PHOENIX_SQL_DATABASE_URL='postgresql://…@…pooler.supabase.com:5432/postgres'
-duckdb   # or: brew install duckdb
+cd dev-agent-lens
+[ -f .env ] || cp .env.example .env  # one-time: then uncomment + fill PHOENIX_SQL_DATABASE_URL (pooler password is out-of-band)
+set -a; source .env; set +a          # exports PHOENIX_SQL_DATABASE_URL (it is NOT exported by default)
+uv run python                        # the project venv — pinned duckdb, clean numpy
 ```
 
-```sql
-INSTALL postgres; LOAD postgres;
-ATTACH getenv('PHOENIX_SQL_DATABASE_URL') AS pg (TYPE postgres, READ_ONLY);
+Then attach in Python — DuckDB's `ATTACH` needs a **string-literal** path, so pass
+`os.environ[...]` (any function call in that position is a `Parser Error`, so
+`ATTACH getenv(...)` fails; `getenv` also isn't available in DuckDB's Python API):
+
+```python
+import duckdb, os
+con = duckdb.connect()
+con.execute("INSTALL postgres; LOAD postgres;")
+con.execute(f"ATTACH '{os.environ['PHOENIX_SQL_DATABASE_URL']}' AS pg (TYPE postgres, READ_ONLY)")
 ```
+
+<details><summary>Raw <code>duckdb</code> CLI fallback (only if you can't use <code>uv run</code>)</summary>
+
+The CLI can't read env vars into `ATTACH`, so interpolate the DSN in the shell — and know
+you're on an **un-pinned** DuckDB, which may differ from the tested 1.4.3:
+
+```bash
+duckdb -c "INSTALL postgres; LOAD postgres;
+ATTACH '$PHOENIX_SQL_DATABASE_URL' AS pg (TYPE postgres, READ_ONLY);
+SELECT 1;"
+```
+</details>
 
 ### The one rule that matters: push work down with `postgres_query()`
 
