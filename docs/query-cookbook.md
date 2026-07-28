@@ -12,6 +12,7 @@ CLI (see querying.md for *why* — miniconda numpy tracebacks + un-pinned CLI):
 
 ```bash
 cd dev-agent-lens
+[ -f .env ] || cp .env.example .env  # one-time: then uncomment + fill PHOENIX_SQL_DATABASE_URL (pooler password is out-of-band)
 set -a; source .env; set +a          # exports PHOENIX_SQL_DATABASE_URL (NOT exported by default)
 uv run python                        # pinned duckdb (tested 1.4.3), clean numpy
 ```
@@ -27,6 +28,10 @@ con.execute("INSTALL postgres; LOAD postgres;")
 con.execute(f"ATTACH '{os.environ['PHOENIX_SQL_DATABASE_URL']}' AS pg (TYPE postgres, READ_ONLY)")
 ```
 
+Keep that `con` — the recipes below run in the **same `uv run python` session**: recipes #1
+and #2 each rebuild `con` so they stand alone, but #3–#4 reuse the `con` above, and the
+bare-```sql``` recipes (#5–#7) run by wrapping the SQL: `con.execute("""<sql>""").df()`.
+
 Two conventions used throughout:
 
 - **`ACCT_UUID`** is the JSON path `((attributes->'metadata'->>'user_api_key_end_user_id')::jsonb)->>'account_uuid'` — the per-person identity on a span. It's verbose, so recipes alias it early.
@@ -37,7 +42,7 @@ The `account_uuid → person` map lives in `dev_agent_lens/core/identity.yaml` �
 Look up a person's UUIDs there, or resolve in Python:
 
 ```python
-from dev_agent_lens.core.identity import label_account, resolve_account
+from dev_agent_lens.core.identity import label_account, resolve_account, load_identity_map
 label_account("<account-uuid>")                 # -> the person's email
 [a for p in load_identity_map().people if p.email == "someone@example.com" for a in p.accounts]
 ```
@@ -74,8 +79,9 @@ print(roster.to_string(index=False))
 ```
 
 `label_account` resolves each `account_uuid` → email via the local `identity.yaml` (copy
-`identity.example.yaml` and fill it, or get it out-of-band — it's gitignored PII). Rows it
-can't resolve print the raw uuid.
+`identity.example.yaml` and fill it, or get it out-of-band — it's gitignored PII). Without
+that file it degrades gracefully (a benign `[identity] no identity file` note on stderr, no
+crash); unresolved uuids render as `(unclaimed:<prefix>)`, so the roster still prints.
 
 <details><summary>Raw <code>duckdb</code> CLI fallback</summary>
 

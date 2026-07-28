@@ -30,13 +30,14 @@ version. So:
 
 ```bash
 cd dev-agent-lens
+[ -f .env ] || cp .env.example .env  # one-time: then uncomment + fill PHOENIX_SQL_DATABASE_URL (pooler password is out-of-band)
 set -a; source .env; set +a          # exports PHOENIX_SQL_DATABASE_URL (it is NOT exported by default)
 uv run python                        # the project venv — pinned duckdb, clean numpy
 ```
 
 Then attach in Python — DuckDB's `ATTACH` needs a **string-literal** path, so pass
-`os.environ[...]` (a bare `ATTACH getenv(...)` is a `Parser Error` — `getenv()` is a
-`SELECT` scalar, not a valid ATTACH target):
+`os.environ[...]` (any function call in that position is a `Parser Error`, so
+`ATTACH getenv(...)` fails; `getenv` also isn't available in DuckDB's Python API):
 
 ```python
 import duckdb, os
