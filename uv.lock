@@ -579,7 +579,7 @@ requires-dist = [
     { name = "arize", specifier = ">=7.0.3" },
     { name = "arize-phoenix", specifier = ">=4.0.0" },
     { name = "click", specifier = ">=8.0.0" },
-    { name = "duckdb", specifier = ">=1.4.3" },
+    { name = "duckdb", specifier = ">=1.4.3,<1.6" },
     { name = "openai", specifier = ">=2.13.0" },
     { name = "oxenai", specifier = ">=0.42.0" },
     { name = "pandas", specifier = ">=2.0.0" },
