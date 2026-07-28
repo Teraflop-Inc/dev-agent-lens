@@ -13,10 +13,15 @@ right conversation events:
 
 from __future__ import annotations
 
+import inspect
 import json
 
 from dev_agent_lens.analysis.live_reconstruct import build_session_records
-from dev_agent_lens.export.markdown_renderer import render_jsonl_to_markdown
+from dev_agent_lens.export.markdown_renderer import (
+    COMPACTION_SUMMARY_INLINE_LIMIT,
+    _render_compaction_section,
+    render_jsonl_to_markdown,
+)
 
 
 def _span(start, model, user_content, assistant_content, tokens=(10, 5)):
@@ -291,3 +296,91 @@ def test_output_at_parity_with_renderer():
     assert "### Assistant" in export.main_content
     assert export.stats["user_turns"] == 1
     assert export.stats["assistant_turns"] == 1
+
+
+# ── ENG2-1446: no dangling `→ Full summary` sidecar link ──────────────────────
+
+def test_long_compaction_summary_renders_inline_with_no_sidecar_link():
+    """A compaction summary longer than the old inline limit must render fully
+    inline — NO `→ Full summary` link and NO `compaction_N_summary` sidecar.
+
+    The reconstruct-live/reconstruct-session CLIs write only `main_content` and
+    discard `tool_result_files`, so any such link would dangle (ENG2-1446).
+    """
+    long_summary = "SUMMARY_SENTINEL " + ("blah " * COMPACTION_SUMMARY_INLINE_LIMIT)
+    assert len(long_summary) > COMPACTION_SUMMARY_INLINE_LIMIT  # guard the premise
+
+    tool_result_files: dict[str, str] = {}
+    lines = _render_compaction_section(
+        1,
+        long_summary,
+        pipeline="litellm",
+        tool_result_files=tool_result_files,
+    )
+    out = "\n".join(lines)
+
+    # No dangling pointer of any form.
+    assert "Full summary" not in out
+    assert "compaction_" not in out
+    assert ".txt" not in out
+    # And nothing was stashed for a sidecar the CLI would never write.
+    assert tool_result_files == {}
+    # The summary itself is present inline (bounded, but not linked away).
+    assert "SUMMARY_SENTINEL" in out
+    assert "> **Context Summary**:" in out
+
+
+def test_reconstruct_live_export_has_no_compaction_sidecar_file():
+    """End-to-end through the shared renderer: a long compaction summary leaves
+    no `compaction_*` entry in `export.tool_result_files` and no dangling link
+    in `main_content`."""
+    long_summary = "END_TO_END_SENTINEL " + ("x " * COMPACTION_SUMMARY_INLINE_LIMIT)
+    records = [
+        {"record_type": "header", "session_id": "sess-1446", "compaction_count": 1},
+        {
+            "record_type": "event",
+            "event_type": "compaction",
+            "number": 1,
+            "summary": long_summary,
+        },
+    ]
+    export = render_jsonl_to_markdown(records)
+
+    assert "Full summary" not in export.main_content
+    assert "END_TO_END_SENTINEL" in export.main_content
+    assert not any(k.startswith("compaction_") for k in export.tool_result_files)
+
+
+def test_claude_pipeline_still_writes_sidecar_and_link():
+    """Gate boundary: the `dal reconstruct` (pipeline="claude") path DOES persist
+    `tool_result_files` to disk (via `export_to_files`), so it keeps the
+    truncate-inline + `→ Full summary` sidecar link for long summaries. ENG2-1446
+    only drops the link on the live path that discards those files — don't let a
+    future refactor silently strip the sidecar the Claude path actually writes."""
+    long_summary = "CLAUDE_SENTINEL " + ("blah " * COMPACTION_SUMMARY_INLINE_LIMIT)
+
+    tool_result_files: dict[str, str] = {}
+    lines = _render_compaction_section(
+        1,
+        long_summary,
+        pipeline="claude",
+        tool_result_files=tool_result_files,
+    )
+    out = "\n".join(lines)
+
+    assert "→ Full summary: [compaction_1_summary.txt](./compaction_1_summary.txt)" in out
+    assert tool_result_files["compaction_1_summary"] == long_summary
+
+
+def test_reconstruct_session_litellm_path_has_no_dangling_link():
+    """Criterion 2: the reconstruct-session renderer (markdown_litellm) already
+    renders the compaction summary inline with no `→ Full summary` pointer, so it
+    never emitted the dangling link. Pin that so it can't regress into one."""
+    from dev_agent_lens.export import markdown_litellm
+
+    src = inspect.getsource(markdown_litellm)
+    # The litellm renderer must not introduce a compaction sidecar pointer.
+    assert "Full summary" not in src
+    assert "compaction_{" not in src  # no f-string sidecar filename
+    # It does render the summary inline under a Context Summary blockquote.
+    assert "Previous Context Summary" in src
