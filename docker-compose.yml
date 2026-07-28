@@ -5,7 +5,7 @@
 services:
   # Arize AX LiteLLM proxy (use with --profile arize)
   litellm-proxy:
-    image: aowen14/litellm-oauth-fix:latest
+    image: aowen14/litellm-oauth-fix:multi-arch
     ports:
       - "4000:4000"
     volumes:
@@ -45,7 +45,7 @@ services:
 
   # Phoenix-based LiteLLM proxy (use with --profile phoenix)
   litellm-proxy-phoenix:
-    image: aowen14/litellm-oauth-fix:latest
+    image: aowen14/litellm-oauth-fix:multi-arch
     ports:
       - "4000:4000"
     volumes:
@@ -198,7 +198,7 @@ services:
   # Test container for Arize AX (cloud) - semi-persistent, on-demand
   # Usage: docker compose --profile test-arize up -d litellm-test-arize
   litellm-test-arize:
-    image: aowen14/litellm-oauth-fix:latest
+    image: aowen14/litellm-oauth-fix:multi-arch
     ports:
       - "4100:4000"
     volumes:
@@ -232,7 +232,7 @@ services:
   # Uses the same Phoenix server as dev, but different project name
   # Usage: docker compose --profile test-phoenix up -d litellm-test-phoenix
   litellm-test-phoenix:
-    image: aowen14/litellm-oauth-fix:latest
+    image: aowen14/litellm-oauth-fix:multi-arch
     ports:
       - "4101:4000"
     volumes:
