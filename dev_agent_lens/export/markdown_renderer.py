@@ -605,14 +605,30 @@ def _render_compaction_section(
     lines.append("<!-- END PIPELINE_SPECIFIC -->")
     lines.append("")
 
-    # Context summary (outside PIPELINE_SPECIFIC per spec)
-    # Truncate long summaries and create external file
-    if len(summary) > COMPACTION_SUMMARY_INLINE_LIMIT and tool_result_files is not None:
-        # Store full summary in external file
+    # Context summary (outside PIPELINE_SPECIFIC per spec).
+    #
+    # Only the Claude-JSONL path (`dal reconstruct`, pipeline="claude") persists
+    # `tool_result_files` to disk (via `export_to_files`), so only there can a
+    # `→ Full summary: [compaction_N_summary.txt]` link actually resolve. There
+    # the summary is the *full* post-compaction continuation message and can be
+    # large, so we keep the truncate-inline + sidecar-file behavior.
+    #
+    # The live path (`dal reconstruct-live`, pipeline="litellm") renders only
+    # `main_content` and discards `tool_result_files` — so emitting that link
+    # would dangle (ENG2-1446). Its summary is already bounded to the
+    # continuation block by ENG2-1441, so render it inline with no pointer,
+    # matching the LiteLLM renderer used by `dal reconstruct-session`.
+    write_sidecar = (
+        pipeline == "claude"
+        and len(summary) > COMPACTION_SUMMARY_INLINE_LIMIT
+        and tool_result_files is not None
+    )
+    if write_sidecar:
+        # Store full summary in an external file the caller will write to disk.
         filename = f"compaction_{number}_summary"
         tool_result_files[filename] = summary
 
-        # Show truncated inline with link
+        # Show truncated inline with a link to the sidecar.
         truncated = truncate(summary, COMPACTION_SUMMARY_INLINE_LIMIT)
         lines.append("> **Context Summary**:")
         for line in truncated.split("\n"):
