@@ -70,6 +70,17 @@ litellm_settings:
   set_verbose: false
   pass_through_params: true
 
+# ENG2-1461: kill the OTEL raw-request child span (the O(L²) re-bleed).
+# That span dumps the FULL request — entire message history + tool list +
+# system prompt — as llm.anthropic.* on EVERY call (~1.3MB/span, the 30GB
+# TOAST). Span 1 keeps latest-turn content via the patched (ENG2-1036)
+# arize set_attributes, so nothing DAL needs is lost.
+# Requires the fork patch that forwards callback_settings into the
+# arize_phoenix logger (litellm_logging.py) — config is inert without it.
+callback_settings:
+  arize_phoenix:
+    message_logging: false
+
 router_settings:
   routing_strategy: "simple-shuffle"
   enable_pre_call_checks: false
