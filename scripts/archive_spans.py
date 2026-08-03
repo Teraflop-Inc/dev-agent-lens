@@ -76,6 +76,10 @@ def connect(dsn: str, timeout_s: int) -> psycopg.Connection:
     conn = psycopg.connect(dsn, connect_timeout=15)
     conn.execute(f"SET statement_timeout = '{timeout_s}s'")
     conn.execute("SET default_transaction_read_only = on")
+    # Bucket comparisons (date_trunc) must agree with DuckDB, which truncates
+    # parquet timestamps in UTC — a non-UTC session TZ shuffles boundary rows
+    # between week buckets and fails verify with zero actual drift.
+    conn.execute("SET TIME ZONE 'UTC'")
     return conn
 
 
@@ -189,6 +193,10 @@ def verify(conn: psycopg.Connection, out_dir: Path, sample_n: int) -> dict:
     import duckdb
 
     duck = duckdb.connect()
+    # Same UTC pinning as the PG session (see connect()): DuckDB's date_trunc
+    # on timestamptz uses its TimeZone setting, which defaults to the SYSTEM
+    # timezone — bucket comparisons need both engines truncating in UTC.
+    duck.execute("SET TimeZone='UTC'")
     glob = str(out_dir / "spans_*.parquet")
     report: dict = {"ok": True, "checks": []}
 
