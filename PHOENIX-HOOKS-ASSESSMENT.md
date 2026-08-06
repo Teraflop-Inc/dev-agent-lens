@@ -5,11 +5,13 @@
 
 ## TL;DR
 
-**🚨 Phoenix Endpoint is currently unreachable from external machines** — sf-phoenix.fly.dev has no public IP. This blocks all plugin testing from customer machines and developer laptops. **Recommend customer-run Phoenix or plugin marketplace deployment (no public endpoint needed).**
+**🚨 The sf-phoenix reachability blocker is NOT resolved.** sf-phoenix.fly.dev has no public IP, so it's unreachable from developer laptops and customer machines. The plugin marketplace does **not** fix this — the marketplace is an *install* mechanism (it registers hooks and drops the plugin code), not a *transport*. The plugin still POSTs spans to whatever backend endpoint you configure, which defaults to `http://localhost:6006` for Phoenix. There is no reachable self-hosted Phoenix today.
 
-**✅ Adopt the NEW actively-maintained plugin** (`Arize-ai/coding-harness-tracing`, not the deprecated `Arize-ai/arize-claude-code-plugin`). It has 16 hooks vs 9, better error handling, and Windows batch scripts.
+**➡️ The one public endpoint that works today is Arize AX (`otlp.arize.com:443`).** DAL's `.env` already carries `ARIZE_API_KEY` + `ARIZE_SPACE_KEY`. The tradeoff: spans land in Arize's SaaS, **not** our self-hosted Phoenix. See Part 2b.
 
-**⚠️ LOCAL TESTING BLOCKED** — Docker unavailable in this VM, so we cannot run a local Phoenix here to prove the mechanics end-to-end. However, we CAN verify the plugin code and recommend deployment patterns.
+**✅ Adopt the NEW actively-maintained repo** (`Arize-ai/coding-harness-tracing`). The older `Arize-ai/arize-claude-code-plugin` is **superseded in practice** — not archived, no deprecation notice on `main`, but its last push was 2026-03-31 and active development has clearly moved. The new repo has 16 hooks vs 9, better error handling, and — importantly — uses **Python hooks with native Windows `.exe` shims** instead of bash, which materially de-risks the Windows question the old bash plugin raised.
+
+**⚠️ LOCAL TESTING BLOCKED** — Docker unavailable in this VM, so we cannot run a local Phoenix here to prove the mechanics end-to-end. We verified the plugin code and transport paths by reading the source.
 
 ---
 
@@ -35,26 +37,23 @@ curl -X POST "$PHOENIX_ENDPOINT/v1/projects/$project/spans" \
 
 Requires an HTTP-reachable endpoint. Currently, Phoenix is only reachable internally within Fly's private network via `http://sf-phoenix.internal:4317`.
 
+**Note on the marketplace:** installing via `claude plugin marketplace add ...` does not change any of this. It registers the hook commands in `~/.claude/settings.json` and installs the plugin code. The span transport is entirely separate: the plugin reads `PHOENIX_ENDPOINT` (default `http://localhost:6006`) or `ARIZE_API_KEY`+`ARIZE_SPACE_ID` (default `otlp.arize.com:443`) and POSTs there itself. Marketplace ≠ a reachable backend.
+
 ### Options to Resolve (ranked by practicality)
 
 | Option | Pros | Cons | Customer-Ready |
 |--------|------|------|-----------------|
-| **A: Customer-run Phoenix** | Completely solves the endpoint problem; customer controls data | Adds Phoenix infrastructure burden | ✅ Yes |
-| **B: Plugin Marketplace** | No public IP needed; marketplace handles the endpoint | Depends on Claude Code Cloud availability | ✅ Yes |
-| **C: Allocate public IP + Auth** | Fixes the host-side endpoint | Exposes unauthenticated service; requires OAuth | ⚠️ Partially |
-| **D: Tailnet routing** | Works for internal team | Cornerstone not on tailnet; doesn't solve customer case | ❌ No |
-| **E: Local Phoenix in VM** | Proves the mechanics | Docker not available in this VM; endpoint still unsolved | ❌ No |
+| **A: Arize AX (public OTLP)** | `otlp.arize.com:443` is public and reachable **today**; creds already in DAL `.env`; no infra to stand up | Spans land in Arize SaaS, not our Phoenix; DAL's Phoenix analysis tooling won't see them | ✅ Yes |
+| **B: Customer-run Phoenix** | Customer controls data; keeps everything on Phoenix | Adds Phoenix infrastructure burden on the customer | ✅ Yes |
+| **C: Allocate public IP on sf-phoenix + Auth** | Keeps data on our Phoenix | Exposes a currently-unauthenticated service; requires OAuth before exposure | ⚠️ Partially |
+| **D: Tailnet routing** | Works for internal team | Cornerstone not on our tailnet; doesn't solve the customer case | ❌ No |
+| **E: Local Phoenix in VM** | Would prove the mechanics | Docker not available in this VM; endpoint still unsolved | ❌ No |
 
 ### Recommended Path
 
-**Use Option B (Plugin Marketplace) for Phase 0.**
+**For a working pipeline TODAY: Option A (Arize AX).** Its endpoint is public, the credentials already exist in DAL's `.env`, and the new repo sends to it over plain HTTP/JSON (no gRPC, no extra Python deps — see Part 2b). The cost is data location: telemetry lands in Arize's SaaS rather than our self-hosted Phoenix, so it won't flow through DAL's existing Phoenix-based analysis.
 
-- Zero infrastructure burden on customer
-- Plugin registers hooks automatically
-- Credentials set in `~/.claude/settings.json` (or managed settings on Windows)
-- Claude Code Cloud handles the Phoenix endpoint routing
-
-If customer prefers self-hosted: **Option A (Customer-run Phoenix)** — they run their own Phoenix and set `PHOENIX_ENDPOINT` in settings.
+**If keeping data on our Phoenix is a hard requirement:** Option B (customer-run Phoenix) or Option C (expose sf-phoenix with auth). Both require net-new infrastructure or a security review before they're usable — neither is available today.
 
 ---
 
@@ -62,9 +61,12 @@ If customer prefers self-hosted: **Option A (Customer-run Phoenix)** — they ru
 
 ### Old Plugin: Arize-ai/arize-claude-code-plugin
 
-**Status**: DEPRECATED as of 2026-07-22  
-**Last working commit**: 2026-03-31 (4 months old at ticket creation)  
-**Maintenance**: Archived in favor of `Arize-ai/coding-harness-tracing`
+**Status**: Superseded in practice (NOT formally deprecated or archived)  
+**Last commit on `main`**: 2026-03-31 (4 months old at ticket creation)  
+**Repo `pushedAt`**: 2026-07-22 — but that's an unmerged branch (`duncankmckinnon-patch-1`) push, not a release; `main`'s README carries no deprecation notice and `gh repo view` reports `isArchived: false`  
+**Maintenance**: Active development has moved to `Arize-ai/coding-harness-tracing`; this repo is stale but still functional
+
+> Verified 2026-08-06: `gh repo view Arize-ai/arize-claude-code-plugin --json isArchived,pushedAt` → `{"isArchived": false, "pushedAt": "2026-07-22T20:32:15Z"}`. The only "DEPRECATED" text lives on the unmerged `duncankmckinnon-patch-1` branch, not `main`.
 
 **Hooks registered** (9 total):
 1. SessionStart
@@ -107,18 +109,46 @@ If customer prefers self-hosted: **Option A (Customer-run Phoenix)** — they ru
 
 **Windows support**: Native batch scripts (`install.bat`), tested and maintained.
 
-### Verdict: FORK, DO NOT DEPEND ON DEPRECATED PLUGIN
+### Verdict: ADOPT THE NEW REPO — DON'T DEPEND ON THE STALE ONE
 
 **Recommendation**: Adopt `Arize-ai/coding-harness-tracing`.
 
 - ✅ Actively maintained (pushed 2026-08-06)
 - ✅ 77% more hook coverage (16 vs 9)
 - ✅ Better error tracking (PostToolUseFailure, StopFailure, PermissionDenied)
-- ✅ Windows batch scripts (production-ready)
+- ✅ **Python hooks with native Windows `.exe` shims** (POSIX: `venv/bin/<hook>`, Windows: `venv/Scripts/<hook>.exe` — see `core/setup/__init__.py:venv_bin`). This is a better Windows story than the old repo's bash hooks.
 - ✅ Multi-harness framework (extensible if we support other coding harnesses later)
 - ✅ Clear migration path for existing users
 
-**Risks**: None identified. The old plugin is strictly superseded.
+**Risks**: The new repo requires a Python venv to be provisioned at install time (its hooks are console-script entry points, not standalone bash). That's a different install footprint than the old pure-bash plugin — confirm the installer provisions the venv correctly on the target OS. The Windows *bash-hook* risk from the old plugin does not apply here, but a Windows *Python/venv* smoke test is still warranted.
+
+---
+
+## Part 2b: Arize AX Backend — the endpoint that actually works today
+
+The sf-phoenix blocker means there is no reachable **self-hosted Phoenix**. But the plugin's *other* backend, Arize AX, is a public hosted service — and it's the one route that requires no infrastructure work on our side.
+
+### Why it's viable right now
+
+- **Public endpoint**: `otlp.arize.com:443` is internet-reachable from any laptop, including Cornerstone's Windows machines. No IP allocation, no tailnet, no customer-hosted service.
+- **Credentials already exist**: DAL's `.env` carries `ARIZE_API_KEY` and `ARIZE_SPACE_KEY` (verified present 2026-08-06). These are the same credentials the LiteLLM proxy already uses for the Arize path (`docker-compose.yml`, `litellm_config_arize.yaml`).
+- **No gRPC / no extra Python deps**: The new repo sends Arize spans over plain **HTTP/JSON via `urllib.request`** (stdlib) — it POSTs to `https://otlp.arize.com/v1/traces` with an `authorization: Bearer <api_key>` header and a `space_id` header (`core/common.py:751-785`). The old README's `pip install opentelemetry-proto grpcio` requirement is **gone** in this repo.
+
+### The credential-name gotcha (must verify before relying on it)
+
+The plugin reads **`ARIZE_SPACE_ID`** (`tracing/claude_code/constants.py:39`, `core/common.py:146`). DAL's `.env` provides **`ARIZE_SPACE_KEY`**. Arize renamed "space key" → "space id" historically, so the *value* is very likely the same credential under a new name — but this is **unverified**. Before depending on it, do one test send with `ARIZE_SPACE_ID` set to the current `ARIZE_SPACE_KEY` value and confirm a span lands in Arize. Do **not** assume they're interchangeable without that check.
+
+### The tradeoff — read before choosing this
+
+Spans land in **Arize's SaaS, not our self-hosted Phoenix.** Concretely:
+
+- ❌ **DAL's Phoenix-based analysis tooling won't see these spans.** Everything DAL does downstream (`clients/`, `analysis/`, `export/`) reads from Phoenix. Arize-hosted Claude Code telemetry is a separate silo unless/until we build an Arize reader.
+- ⚠️ **Data governance**: Cornerstone's Claude Code activity (prompts, tool commands, file paths if content logging is on) would flow to Arize's hosted platform. That's a customer-data-location decision, not just a technical one — confirm it's acceptable to Cornerstone before enabling.
+- ✅ **But it works today**, end to end, with zero infrastructure. For a Phase-0 "prove the pipeline captures Claude Code sessions" milestone, this is the lowest-friction path.
+
+### Recommendation
+
+If the goal is **a working capture pipeline this week**, Arize AX is the answer — with the explicit caveat that the data lands in Arize, not Phoenix, and DAL's analysis stack won't consume it yet. If the goal is **keeping everything on our Phoenix**, this path doesn't serve it, and we're back to Options B/C in Part 1 (customer-run Phoenix, or expose sf-phoenix with auth), neither of which is available today.
 
 ---
 
@@ -132,7 +162,7 @@ Per docs: *"Hooks run wherever Claude Code runs: sessions in the terminal, IDE e
 |---------|-------|----------|
 | Terminal CLI | ✅ | Yes (plugin registers hooks in ~/.claude/settings.json) |
 | Desktop | ✅ | Yes (shares ~/.claude/settings.json with CLI) |
-| Web / Cloud | ✅ | Yes (marketplace flow handles endpoint routing) |
+| Web / Cloud | ✅ | Hooks fire per Arize docs, but the span still needs a *reachable* endpoint from wherever the hook runs — a cloud session cannot POST to `localhost:6006`. Only a public backend (e.g. Arize AX) works here. |
 
 ### Traps & Caveats from Research Phase
 
@@ -204,11 +234,12 @@ EOF
 **Pros**: Enforced fleet-wide, survives Claude Code updates, no per-user setup  
 **Cons**: Requires Windows infrastructure (GPO or similar), API keys in managed config (use secrets store or `otelHeadersHelper`)
 
-### Pattern 3: Plugin Marketplace + `enabledPlugins` (recommended for cloud/web)
+### Pattern 3: Plugin Marketplace + `enabledPlugins` (for cloud/web reach)
 
-**For**: Claude Code Cloud sessions (no local file access)  
+**For**: Reaching Claude Code Cloud/web sessions (the only install path that does)  
 **How**: Marketplace metadata declares plugin + env vars in `~/.claude/settings.json`  
-**Limitations**: Credentials must be in `~/.claude/settings.json` or managed settings (no GitOps friendly)
+**Limitations**: Credentials must be in `~/.claude/settings.json` or managed settings (not GitOps-friendly).  
+**Important**: This is an *install* path, not a transport. A cloud session's hook still has to POST to a **publicly reachable** backend — it cannot reach `localhost:6006` or `sf-phoenix.internal`. Pair this pattern with Arize AX (or another public endpoint), never with an unreachable Phoenix.
 
 ---
 
@@ -233,23 +264,25 @@ EOF
 
 ## Part 6: What Remains Unsolved (out of scope for this ticket)
 
-- **Windows bash hooks** — No CI to test; Cornerstone to validate on their machines
-- **Phoenix public endpoint auth** — If allocating public IP, requires OAuth implementation
+- **Windows Python/venv hooks** — New repo uses Python console-script hooks with Windows `.exe` shims, not bash. No Windows CI; Cornerstone to smoke-test that the venv provisions and hooks fire. (The old bash-hook risk is moot on this repo.)
+- **Self-hosted Phoenix reachability** — sf-phoenix has no public IP; NOT resolved. Customer-run Phoenix or exposing sf-phoenix with auth are the only Phoenix-preserving options, neither available today.
+- **`ARIZE_SPACE_KEY` vs `ARIZE_SPACE_ID`** — likely the same credential renamed, but unverified. One test send required before relying on it.
 - **Managed settings at org level** — Requires Cornerstone's infrastructure decisions (GPO, Intune, etc.)
 
 ---
 
 ## Recommendation Summary
 
-**Use `Arize-ai/coding-harness-tracing` (new, maintained plugin).**
+**Use `Arize-ai/coding-harness-tracing`** (actively maintained; the older `arize-claude-code-plugin` is superseded in practice, not deprecated/archived).
 
-**For endpoint:**
-- Phase 0: Plugin Marketplace (no public IP needed)
-- Fallback: Customer-run Phoenix instance
+**For endpoint — the sf-phoenix blocker is NOT resolved, so pick by goal:**
+- **Working pipeline this week** → **Arize AX** (`otlp.arize.com:443`, public, creds already in `.env`). Tradeoff: spans land in Arize's SaaS, not our Phoenix; DAL's analysis stack won't consume them yet.
+- **Keep data on our Phoenix** → customer-run Phoenix, or allocate a public IP on sf-phoenix **with auth first**. Neither is available today.
+- The plugin **marketplace does not provide an endpoint** — it's install-only. Don't rely on it to reach an unreachable Phoenix.
 
 **For Cornerstone Windows deployment:**
-- Recommend GPO-rendered managed settings with secrets store for API keys
-- Provide bootstrap script templates for both patterns
+- Recommend GPO-rendered managed settings with a secrets store for API keys
+- Provide bootstrap script templates (Arize AX config, since that's the reachable backend)
 
-**Next step**: Write deployment guide into `/workspace/dev-setup/ARIZE-CLAUDE-CODE-DEPLOYMENT.md` and create PRs on both repos.
+**Next step**: Cornerstone runs the Windows venv/hook smoke test and confirms whether Arize-hosted data location is acceptable; if not, scope the Phoenix-reachability work as a separate deliverable.
 
