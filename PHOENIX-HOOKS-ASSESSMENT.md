@@ -5,7 +5,7 @@
 
 ## TL;DR
 
-**🚨 The sf-phoenix reachability blocker is NOT resolved.** sf-phoenix.fly.dev has no public IP, so it's unreachable from developer laptops and customer machines. The plugin marketplace does **not** fix this — the marketplace is an *install* mechanism (it registers hooks and drops the plugin code), not a *transport*. The plugin still POSTs spans to whatever backend endpoint you configure, which defaults to `http://localhost:6006` for Phoenix. There is no reachable self-hosted Phoenix today.
+**🚨 The sf-phoenix reachability blocker is NOT resolved.** sf-phoenix.fly.dev has no public IP, so it's unreachable from developer laptops and customer machines. The plugin marketplace does **not** fix this — the marketplace is an *install* mechanism (it registers hooks and drops the plugin code), not a *transport*. The plugin still POSTs spans to whatever backend endpoint you configure — and its setup wizard/docs default the Phoenix endpoint to `http://localhost:6006` (the send path itself errors if no endpoint is set). There is no reachable self-hosted Phoenix today.
 
 **➡️ The one public endpoint that works today is Arize AX (`otlp.arize.com:443`).** DAL's `.env` already carries `ARIZE_API_KEY` + `ARIZE_SPACE_KEY`. The tradeoff: spans land in Arize's SaaS, **not** our self-hosted Phoenix. See Part 2b.
 
@@ -105,9 +105,9 @@ Requires an HTTP-reachable endpoint. Currently, Phoenix is only reachable intern
 15. PreCompact ← NEW
 16. PostCompact ← NEW
 
-**Mechanism**: Same (pure bash for Phoenix), but with more comprehensive error handling and new hooks for session stability and tool lifecycle visibility.
+**Mechanism**: Python console-script hooks (a re-architecture from the old repo's pure bash) that POST OpenInference JSON over stdlib `urllib` — with more comprehensive error handling and new hooks for session stability and tool lifecycle visibility.
 
-**Windows support**: Native batch scripts (`install.bat`), tested and maintained.
+**Windows support**: Ships an `install.bat` and OS-aware hook shims (`venv\Scripts\*.exe`). NOT verified here (Linux VM) — Cornerstone to smoke-test.
 
 ### Verdict: ADOPT THE NEW REPO — DON'T DEPEND ON THE STALE ONE
 
@@ -120,7 +120,7 @@ Requires an HTTP-reachable endpoint. Currently, Phoenix is only reachable intern
 - ✅ Multi-harness framework (extensible if we support other coding harnesses later)
 - ✅ Clear migration path for existing users
 
-**Risks**: The new repo requires a Python venv to be provisioned at install time (its hooks are console-script entry points, not standalone bash). That's a different install footprint than the old pure-bash plugin — confirm the installer provisions the venv correctly on the target OS. The Windows *bash-hook* risk from the old plugin does not apply here, but a Windows *Python/venv* smoke test is still warranted.
+**Risks**: The hooks are Python console-scripts, so the machine needs **Python 3.9+** on PATH (`run-hook` probes `python3`/`python`/`py`). The venv self-bootstraps: `hooks.json` invokes `${CLAUDE_PLUGIN_ROOT}/scripts/run-hook`, a POSIX `sh` dispatcher that creates the venv on first hook fire and fingerprints `pyproject.toml` to re-install on change (verified in `tracing/claude_code/scripts/run-hook`). So the *marketplace* path is self-sufficient — no separate `install.sh` needed. The real prerequisite to smoke-test on Windows is therefore "is Python 3.9+ present and does `sh` run the dispatcher," not "did the installer build the venv." Note the dispatcher exits 0 on any failure, so a missing Python makes tracing **silently** no-op — test explicitly, don't assume silence means success.
 
 ---
 
