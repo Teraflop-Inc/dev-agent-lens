@@ -86,6 +86,43 @@ See [docs/quickstart_session_export.md](docs/quickstart_session_export.md) for C
 
 ---
 
+## What Did My Team Do? (Daily Reports & Questions Library)
+
+### Quick Daily Report
+
+Every query you need to understand team activity is available in one command:
+
+```bash
+dal report                  # Yesterday's activity
+dal report --since today    # Just today
+dal report --since 7        # Past 7 days
+```
+
+Output shows: team activity per person, session categories with patterns, week-over-week changes, and which sessions ran long.
+
+### Queryable Questions
+
+The **Questions Library** lets you explore team data with pre-built queries. Open [docs/questions-library.md](docs/questions-library.md) to see examples, or use Python:
+
+```python
+from dev_agent_lens.analysis.questions import (
+    get_team_activity,       # What did my team do this week?
+    get_active_roster,       # Who's active and what changed?
+    get_repeated_patterns,   # What patterns repeat often enough to be a skill?
+    get_stalled_sessions,    # Which sessions ran long?
+    get_project_distribution,# Where is time going? (by project)
+    get_weekly_summary,      # Breakdown by category and person
+)
+
+# Example: Team activity past 7 days
+df = get_team_activity(days=7)
+print(df)  # person, sessions, llm_calls, tool_calls, categories
+```
+
+Built on `dal_catalog.sessions` (1,300+ sessions, 2026-05-06 → 08-04) with person attribution, category assignments, and call/tool counts. Read [docs/questions-library.md](docs/questions-library.md) for coverage limits and query examples.
+
+---
+
 ## Team Collaboration
 
 Share Claude session data with your team for aggregate analysis. This integrates with the existing [Oxen](https://oxen.ai) data version control already used by the DAL toolkit.
