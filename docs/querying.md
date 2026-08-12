@@ -24,8 +24,16 @@ data — it looks like an empty result, not like an error.
 | `phoenix.spans` | what the **model** saw and said — one `litellm_request` span per model call, JSONB `attributes` | 129,347 spans, 2026-05-06 → present |
 | `<workspace_*>.sandbox_agent_events` | what the **agent did** — tool calls, statuses, prompts; `tool_name` / `tool_call_id` / `status` are first-class columns | 17 schemas (11 populated), 1,218 `tool_call` events |
 
-They join on `session_id`, so "what the model said" lines up with "what the agent did" per
-sandbox run.
+They join on `session_id` — but **not by the path you would guess.** `session_id` is **not** at `attributes->'metadata'->>'session_id'` — that path returns **0 rows**. It is nested inside the same field the account id lives in:
+
+```sql
+CASE WHEN attributes->'metadata'->>'user_api_key_end_user_id' LIKE '{%'
+     THEN ((attributes->'metadata'->>'user_api_key_end_user_id')::jsonb)->>'session_id' END
+```
+
+That resolves on 67,128 spans; 102 of the 117 `sandbox_agent_events` sessions (87%) match.
+
+That lets "what the model said" line up with "what the agent did" per sandbox run.
 
 **Rules of thumb.** Questions about people, tokens, cost, or prompt text → `phoenix.spans`.
 Questions about tools, agent actions, or anything in the 2026-08-03 → 08-12 redaction window
@@ -36,7 +44,8 @@ for one.
 
 Two further surfaces exist outside this Postgres and are worth knowing about: the local
 session JSONLs in `~/.claude/projects/` (richest per-session record, pruned ~30 days,
-per-machine) and the parquet archive at `~/dal-archive/phoenix-2026-08-03` + S3 (full
+per-machine) and the parquet archive at `~/dal-archive/phoenix-2026-08-03` + S3 — that local
+path is per-machine and may not exist on yours; the S3 copy is the durable one — (full
 pre-cleanup span history). See
 [dal-db-learnings-oltp-olap.md](design/dal-db-learnings-oltp-olap.md) for the full inventory.
 
@@ -118,7 +127,9 @@ placeholder `oauth@claude-code.ai`. The `account_uuid → person` map lives in
 from dev_agent_lens.core.identity import label_account, resolve_account
 
 label_account("00000000-0000-0000-0000-000000000001")   # -> 'person-a@example.com'
-resolve_account("00000000-0000-0000-0000-000000000002").email   # -> 'person-b@example.com'
+resolve_account("00000000-0000-0000-0000-000000000002")          # -> Person | None
+# NB: these placeholder uuids are in no real map, so resolve_account() returns None and
+# chaining .email raises AttributeError. Guard it, or use label_account() which never raises.
 ```
 
 Unknown accounts resolve to `None` (never a guess). One person can own several accounts —
@@ -149,8 +160,9 @@ spans = con.execute("""
            coalesce(llm_token_count_prompt,0)+coalesce(llm_token_count_completion,0) AS tokens
     FROM phoenix.spans
     WHERE start_time > now() - INTERVAL '30 days'
+      -- '<account-uuid>': resolve a person's uuid(s) via core.identity
       AND CASE WHEN attributes->'metadata'->>'user_api_key_end_user_id' LIKE '{%' THEN ((attributes->'metadata'->>'user_api_key_end_user_id')::jsonb)->>'account_uuid' END
-          = '<account-uuid>'   -- resolve a person's uuid(s) via core.identity
+          = '<account-uuid>'
   $q$)
 """).df()
 

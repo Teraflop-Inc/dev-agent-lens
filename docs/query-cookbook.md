@@ -36,7 +36,16 @@ bare-```sql``` recipes (#5–#9) run by wrapping the SQL: `con.execute("""<sql>"
 `<workspace_*>.sandbox_agent_events` is what the *agent* did — tool calls, statuses,
 prompts — across 17 per-workspace schemas. Recipes 1–7 are span recipes; **if your question
 is about tools or agent actions, start at [Recipe 8](#8-what-tools-did-the-agent-actually-run),
-not here.** The two join on `session_id`. See [querying.md](querying.md#the-two-surfaces).
+not here.** See [querying.md](querying.md#the-two-surfaces).
+
+**To join the two surfaces:** `session_id` is **not** at `attributes->'metadata'->>'session_id'` — that path returns **0 rows**. It is nested inside the same field the account id lives in:
+
+```sql
+CASE WHEN attributes->'metadata'->>'user_api_key_end_user_id' LIKE '{%'
+     THEN ((attributes->'metadata'->>'user_api_key_end_user_id')::jsonb)->>'session_id' END
+```
+
+That resolves on 67,128 spans; 102 of the 117 `sandbox_agent_events` sessions (87%) match.
 
 Two conventions used throughout:
 
@@ -80,13 +89,17 @@ Two conventions used throughout:
 > | Gap | Window | Filter |
 > |---|---|---|
 > | **litellm redaction** (ENG2-1510) | 2026-08-03 → 2026-08-12 | `attributes::text NOT LIKE '%redacted-by-litellm%'` |
-> | **`dal_trim` dedupe** (ENG2-1469) | historical fat spans, trimmed 2026-08-06 | `... NOT LIKE '%dal_trim%'` |
+> | **`dal_trim` dedupe** (ENG2-1469) | historical fat spans, trimmed 2026-08-06 | `attributes->'input'->>'value' NOT LIKE '%dal_trim%'` |
 >
-> Redaction hit **96–98% of `litellm_request` spans** on 08-04 → 08-11. It was fixed on
+> Redaction hit **90–98% of `litellm_request` spans** on 08-04 → 08-11 (most days 96–98%; 08-09 was 90.2% on a low-volume day). It was fixed on
 > 2026-08-12 by commit `59c7e14` — same-day spans were 47% redacted as the fix rolled out,
 > and capture after that is healthy. So this is a **bounded historical hole, not an ongoing
 > outage**: `start_time < '2026-08-03'` is clean, and so is anything after 08-12. The
 > `dal_trim` rows point at `llm.input_messages` or the parquet archive for their content.
+>
+> **Apply the `dal_trim` filter to `attributes->'input'->>'value'`, not `attributes::text`** —
+> the marker also appears elsewhere in the blob, so the broad form excludes **47,926** spans
+> (37% of the corpus) where the narrow one excludes **14,164** (11%). Recipes here use narrow.
 >
 > `sandbox_agent_events` is unaffected by both — it's a separate capture path. That's the
 > fallback for any question about the August window ([Recipe 8](#8-what-tools-did-the-agent-actually-run)).
@@ -176,8 +189,9 @@ spans = con.execute("""
            coalesce(llm_token_count_prompt,0)+coalesce(llm_token_count_completion,0) AS tokens
     FROM phoenix.spans
     WHERE start_time > now() - INTERVAL '30 days'
+      -- '<account-uuid>': a person's uuid, from identity.yaml
       AND CASE WHEN attributes->'metadata'->>'user_api_key_end_user_id' LIKE '{%' THEN ((attributes->'metadata'->>'user_api_key_end_user_id')::jsonb)->>'account_uuid' END
-          = '<account-uuid>'   -- a person's uuid, from identity.yaml
+          = '<account-uuid>'
   $q$)
 """).df()
 
@@ -201,11 +215,21 @@ turn is the agent talking to itself — `extract_human_turns()` drops it.
 | Corpus | Candidate user turns | Genuine human turns | Drop rate |
 |---|---|---|---|
 | `phoenix.spans` text turns (this recipe, pre-08-01, content-bearing) | 9,261 | 5,473 | **40.9%** |
-| Local session JSONLs (`~/.claude/projects/`, 65-day window) | 14,209 | 3,928 | **72%** |
+| `phoenix.spans`, scoped to `sf-workspaces` (what [Recipe 9](#9-whats-our-autonomy-ratio-inferring-the-stop-signal-without-stop_reason) uses) | 6,511 | 4,538 | **30.3%** |
+| Local JSONLs — **all** `type:"user"` events (396 files) | 38,343 | 3,994 | **89.6%** |
+| Local JSONLs — only events carrying a text block | 5,616 | 3,994 | **28.9%** |
 
-Both measured 2026-08-12. The local JSONLs drop far more because they also carry
-machine-injected "user" events — tool results, system reminders, hook output — that never
-reach the model as a text turn. **Budget sample sizes off the row that matches your source.**
+All measured 2026-08-12. **The definition of "candidate" matters more than the corpus does** —
+the two local-JSONL rows share a numerator and differ 3× in rate purely on what counts as a
+candidate. Most `type:"user"` events are machine-injected (tool results, system reminders,
+hook output) and carry no text block at all, so counting them inflates the denominator ~7×.
+**Budget off the row matching your source *and* your candidate definition, and say which.**
+
+> An earlier draft cited **72%** (14,209 → 3,928) for the local JSONLs, taken from ENG2-1509.
+> It does not reproduce: sweeping all 396 files under every reasonable candidate definition
+> brackets it (28.9% … 89.6%) but never lands on it, and no subset reaches 14,209 candidates.
+> The numerator was close (3,928 vs 3,994); the denominator was not. The rows above are a
+> re-measurement, not the ticket's figure.
 
 ```python
 from dev_agent_lens.core.prompts import extract_human_turns
@@ -255,8 +279,13 @@ rows["week"] = ...   # bucket by the span's start_time week, then classify + rat
 ## 5. Where did they get stuck? (blockers — user story 2)
 
 > **Content-based recipe** — the `context` column below reads `attributes->'input'->>'value'`,
-> so redacted and `dal_trim` rows return blank context next to a real `status_message`. Add
-> the exclusions from Recipe 3, or the friction in the 08-03 → 08-12 window looks contextless.
+> so redacted and `dal_trim` rows return blank context. Add the exclusions from Recipe 3, or
+> the friction in the 08-03 → 08-12 window looks contextless.
+>
+> **`status_message` is empty for every span in this corpus** (verified 2026-08-12: 0 non-empty
+> of ~130k, across all of OK/UNSET/ERROR) — so select `status_code`, not `status_message`, or
+> you get a column that is silently always `''`. The signal is in `context`: of ~1,524 ERROR
+> rows in a 30-day window, ~1,028 are the string `quota` and the rest are real turns.
 
 Errors and their surrounding context are the cheap version of "find the friction":
 
@@ -264,11 +293,12 @@ Errors and their surrounding context are the cheap version of "find the friction
 SELECT * FROM postgres_query('pg', $$
   SELECT start_time::date AS day,
          left(attributes->'input'->>'value', 120) AS context,
-         status_message
+         status_code
   FROM phoenix.spans
   WHERE start_time > now() - INTERVAL '30 days'
+    -- '<account-uuid>': a person's uuid, from identity.yaml
     AND CASE WHEN attributes->'metadata'->>'user_api_key_end_user_id' LIKE '{%' THEN ((attributes->'metadata'->>'user_api_key_end_user_id')::jsonb)->>'account_uuid' END
-        = '<account-uuid>'   -- a person's uuid, from identity.yaml
+        = '<account-uuid>'
     AND status_code = 'ERROR'
   ORDER BY start_time DESC LIMIT 50
 $$);
@@ -380,7 +410,8 @@ $$);
 Answering the ticket's motivating question — *what tools ran in the UUH replay eval?* —
 that returns `Bash 26, Write 2, Monitor 1`: **29 tool calls**. If you have seen "212 tool
 events" quoted for this eval, that is `count(*) WHERE tool_call_id IS NOT NULL` — 212 of the
-schema's 586 rows carry a tool id (the 29 calls, 180 status updates, and 3 others). It counts
+schema's 586 rows carry a tool id (the 29 calls, 180 status updates, and 3 `assistant` rows
+tagged `tool_name='Agent'`). It counts
 *rows about tools*, not tools run. **29 is the number of tools that ran.**
 
 Fleet-wide, top tools across all 11 populated schemas: `Bash 735 · Read 237 · Edit 85 ·
@@ -415,8 +446,8 @@ $$);
 > a small but *consistent* sample.
 
 **Do NOT grep `tool_calls`** — that's OpenAI's vocabulary (the estate is Anthropic-native:
-`/v1/messages` ≫ `/v1/chat/completions`). It matches ~0.25% of this corpus and reads as
-confirmation the data is missing.
+`/v1/messages` ≫ `/v1/chat/completions`). Measured, it matches **0.30%** of `input.value` —
+small enough to read as confirmation the data is missing.
 
 > **This advice is dated 2026-08-12 and will age.** Post-ENG2-1510, Phoenix *is* starting to
 > emit properly-named tool spans (`Claude_Code_Tool_Bash`, `Claude_Code_Tool_Read`, …) under
@@ -476,16 +507,21 @@ $$);
 **Correct the denominator.** The text bucket is not all human — it includes the agent
 talking to itself. The query above returns *counts*, so to apply the correction you re-run it
 selecting the text bucket's `v` instead of counting it, and pass that through
-`extract_human_turns()` exactly as Recipe 3 does. On the span corpus that drops **40.9%**, so
-the corrected ratio is the raw one **÷ 0.591** (≈1.7×).
+`extract_human_turns()` exactly as Recipe 3 does.
+
+**Use the divisor for the corpus you filtered to.** This recipe pins `sf-workspaces`, where
+the drop rate is **30.3%** → divide by **0.697**. The 40.9% figure in Recipe 3 is the
+*all-projects* rate and gives a divisor of 0.591 — applying it here would overstate every
+corrected ratio by ~18%. Same trap as the project filter itself: change the corpus, change
+the constant.
 
 **Measured baseline (`sf-workspaces`, 2026-08-12), so you have a reference to diff against:**
 
-| Month | agent-continued | text turns | raw ratio | corrected (÷0.591) |
+| Month | agent-continued | text turns | raw ratio | corrected (÷0.697) |
 |---|---|---|---|---|
-| 2026-05 | 240 | 39 | 6.15 : 1 | ~10.4 : 1 |
-| 2026-06 | 8,862 | 2,361 | 3.75 : 1 | ~6.4 : 1 |
-| 2026-07 | 9,902 | 3,127 | 3.17 : 1 | ~5.4 : 1 |
+| 2026-05 | 240 | 39 | 6.15 : 1 | ~8.8 : 1 |
+| 2026-06 | 8,862 | 2,361 | 3.75 : 1 | ~5.4 : 1 |
+| 2026-07 | 9,902 | 3,127 | 3.17 : 1 | ~4.5 : 1 |
 | 2026-08 | 540 | 328 | 1.65 : 1 | **unusable** — 97% redacted, tiny surviving sample |
 
 **Read the trend with care, and don't headline it.** On live-project traffic the ratio
@@ -512,7 +548,7 @@ Supabase enforces a `statement_timeout`, and `attributes` (JSONB) has no index.
 
 **This is much less of a problem than it used to be.** Post-debloat (see the corpus-size
 note at the top), full-corpus scans over all 129k spans — including `attributes::text LIKE`
-predicates — completed in **6–18s** when this page was verified on 2026-08-12. Reach for the
+predicates — completed in **6–35s** when this page was verified on 2026-08-12. Reach for the
 mitigations below only when you actually hit a timeout, not pre-emptively.
 
 If a query does die with `canceling statement due to statement timeout`:
