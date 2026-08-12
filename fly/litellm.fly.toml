@@ -32,6 +32,12 @@ primary_region = "iad"
 
 [env]
   # Phoenix OTLP target — internal-only, no public listener on sf-phoenix:4317.
+  # gRPC here is deliberate and verified (ENG2-1494): the arize_phoenix callback
+  # resolves a bare `:4317` endpoint to the otlp_grpc exporter itself. Do NOT
+  # append `/v1/traces` to a :4317 endpoint — that flips the resolver to HTTP
+  # and POSTs at a gRPC listener, which is the real failure mode behind the old
+  # "gRPC silently drops spans" myth. See
+  # docs/design/observability-backend-strategy.md §1.
   OTEL_EXPORTER_OTLP_ENDPOINT = "http://sf-phoenix.internal:4317"
   OTEL_EXPORTER_OTLP_PROTOCOL = "grpc"
   PHOENIX_COLLECTOR_ENDPOINT  = "http://sf-phoenix.internal:4317"
