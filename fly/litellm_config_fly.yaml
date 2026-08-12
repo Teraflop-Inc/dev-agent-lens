@@ -87,11 +87,13 @@ litellm_settings:
 # and the arize `set_messages()` maps last-message content -> INPUT_VALUE,
 # so every span landed with `attributes.input.value = "redacted-by-litellm"`
 # (19 chars — exactly the median input length observed during the outage).
-# It also stripped metadata.requester_metadata, which carries session_id:
-# %redacted and %null_session tracked each other to within 0.1% for 9 days.
 #
-# Net effect from 2026-08-03 (deploy of 7aaa658) to the fix: ~66% of spans
-# lost content AND session correlation. One line, two symptoms.
+# session_id was NOT affected. It rides on metadata.requester_metadata and is
+# still present on litellm_request spans at 99.5%, unchanged from before 08-03.
+#
+# Net effect from 2026-08-03 (deploy of 7aaa658) to the fix: of spans that
+# carry an input field, ~98.6% lost their content. Over 24h only 68 spans held
+# real content. One line, one symptom — a total content blackout.
 #
 # There is no config-only lever in upstream litellm that drops the
 # raw-request span while keeping content: `_maybe_log_raw_request()` early

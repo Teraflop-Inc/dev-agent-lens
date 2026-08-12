@@ -71,10 +71,17 @@ Chain, all in upstream `litellm`:
 4. Arize `set_messages()` maps last-message content → `SpanAttributes.INPUT_VALUE`.
 
 Result: `attributes.input.value == "redacted-by-litellm"` (19 chars — exactly
-the median input length observed during the outage), and
-`metadata.requester_metadata` (which carries `session_id`) stripped alongside.
-`%redacted` and `%null_session` tracked each other to within 0.1% for 9
-consecutive days: one cause, two symptoms.
+the median input length observed during the outage).
+
+**`session_id` was not affected.** It rides on `metadata.requester_metadata`
+and is still present on `litellm_request` spans at 99.5%, unchanged from before
+08-03. An earlier reading of this outage claimed `%redacted` and
+`%null_session` were the same spans — they are not. `%null_session` rose only
+because two span types that never carried `session_id`
+(`Claude_Code_Final_Output_0`, `Claude_Code_Internal_Prompt_0`) first appear on
+08-03 and are now two-thirds of all volume. That is dilution, not loss. Both
+rates land near 66% because each of the three span types emitted per call is
+roughly a third of the total, so any two-of-three subset does.
 
 Onset was **2026-08-03**, the deploy of `7aaa658` — not "~08-01" as originally
 filed; 08-01 and 08-02 were a weekend with zero rows.
@@ -94,22 +101,30 @@ Decoupling them requires a fork patch exposing a separate `raw_request_logging`
 setting. Until that lands, span bloat is contained by the ENG2-1476 size
 sentinel and the ENG2-1469 trim script — not by this flag.
 
-## 3. Unresolved: the ~34% that kept content
+## 3. Resolved: there was no surviving-content population
 
-Every day of the outage, ~66% of spans were redacted and ~34% were not, stable
-to within 0.4% for 9 days. That stability is not explained yet, and it should
-be understood before anyone concludes the fix is complete.
+The "~34% that kept content" was an artifact. Splitting by span name and
+separating "no input field" from "real content" (24h window, 2026-08-12):
 
-Note a discrepancy worth resolving first: ENG2-1510's own monthly table implies
-only **623** August LLM spans (1.5%) carry real content, while 13,812 (32.6%)
-have **no** `input.value` at all. 32.6% is suspiciously close to the reported
-34% — so the "survivors" may be spans that never had an input value (parent
-`litellm_proxy_request` SERVER spans, guardrail spans), counted as
-"not redacted" because the marker string is absent rather than because content
-survived.
+| span name | n | no input field | redacted | real content |
+| -- | --: | --: | --: | --: |
+| `litellm_request` | 2516 | 0 | 2448 | **68** |
+| `Claude_Code_Final_Output_0` | 2448 | 2448 | 0 | 0 |
+| `Claude_Code_Internal_Prompt_0` | 2448 | 0 | 2448 | 0 |
 
-Discriminating query — split the non-redacted bucket by project and span name,
-and separate "real content" from "no content":
+`Claude_Code_Final_Output_0` is an output span with **no `input.value` field at
+all**. It scored as "not redacted" only because the marker string cannot appear
+in a field that does not exist — not because content survived.
+
+So of spans that actually carry an input field, **98.6% were redacted**, and
+only **68 spans in 24 hours** held real content. ENG2-1510's original headline
+figure of ~98% was correct; the ~66%/~34% split that appeared mid-investigation
+was computed over a denominator that included a span type with no input field,
+and should be disregarded.
+
+The blackout was total, not partial. Nothing about §3 blocks closing ENG2-1510.
+
+Discriminating query, kept for re-verification after deploy:
 
 ```sql
 SELECT p.name AS project,
@@ -127,9 +142,9 @@ GROUP BY 1, 2, 3
 ORDER BY 4 DESC;
 ```
 
-If `real_content` collapses to a single project (e.g. `dev-agent-lens` rather
-than `sf-workspaces`), the survivors are simply traffic from a proxy that never
-received the flag, and the prod outage was total rather than partial.
+Post-deploy, `real_content` should dominate `litellm_request` and
+`Claude_Code_Internal_Prompt_0`; `Claude_Code_Final_Output_0` stays `no_input`
+either way, as it has no input field by construction.
 
 ## 4. Post-deploy verification (not yet run)
 
@@ -141,11 +156,17 @@ Config-only change; requires an `sf-litellm` deploy, which is gated on Adam.
       land — quantifies any gRPC drop rather than assuming zero
 - [ ] Confirm `%redacted` < 1% and median `input.value` back in the 400–600
       char range
-- [ ] Confirm `%null_session` falls with it (same-span hypothesis)
+- [ ] Confirm real content on `litellm_request` and
+      `Claude_Code_Internal_Prompt_0` (not `%null_session`, which is unrelated
+      to this bug — see §2)
 - [ ] Run `uv run python scripts/span_size_sentinel.py --days 1` — the
       raw-request span returns with content, so bloat will regrow; this
       quantifies how fast and whether the fork patch is urgent
-- [ ] Resolve §3 before closing ENG2-1510
+- [ ] Add an inverted check alongside the size sentinel: it only alarms when
+      spans grow, so this outage — which made spans *smaller* — scored as a win
+      and ran 9 days unnoticed. Needs a content-presence floor
+      (`%redacted < 5%`) to catch the next one. Covers ENG2-1510's existing
+      "add a monitor" acceptance criterion.
 
 **2026-08-03 → fix is a permanent gap** in the Phoenix content record.
 Redaction happens before export, so nothing recoverable is stored. The
