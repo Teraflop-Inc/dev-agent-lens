@@ -174,6 +174,12 @@ for s in summarize(spans):          # ~46 real sessions, not 1 thread
 
 ## 3. What did they actually type? (human turns, no agent noise)
 
+> **Content-based recipe — exclude the two content gaps** (see [the note above](#query-cookbook)):
+> add `AND attributes::text NOT LIKE '%redacted-by-litellm%'` and
+> `AND attributes->'input'->>'value' NOT LIKE '%dal_trim%'`, or window to
+> `start_time < '2026-08-03'`. Without them, 96–98% of 08-04 → 08-11 rows are empty text and
+> your counts silently undercount.
+
 The prompt text is at the tail of the message array. A large share of what looks like a user
 turn is the agent talking to itself — `extract_human_turns()` drops it.
 
@@ -211,6 +217,10 @@ for turn in extract_human_turns(candidates):
 
 ## 4. Learning vs. building (user story 1)
 
+> **Content-based recipe** — it inherits Recipe 3's output, so it inherits Recipe 3's
+> redaction / `dal_trim` exclusions too. A learning-vs-building split computed over the
+> 2026-08-03 → 08-12 window is measuring the surviving 2–4% of turns, not the month.
+
 Recipes 2 + 3 give you the person's real sessions and real prompts. The learning-vs-building
 split is a *judgment* over those prompts — there's no column for it. Two ways:
 
@@ -230,6 +240,10 @@ rows["week"] = ...   # bucket by the span's start_time week, then classify + rat
 ```
 
 ## 5. Where did they get stuck? (blockers — user story 2)
+
+> **Content-based recipe** — the `context` column below reads `attributes->'input'->>'value'`,
+> so redacted and `dal_trim` rows return blank context next to a real `status_message`. Add
+> the exclusions from Recipe 3, or the friction in the 08-03 → 08-12 window looks contextless.
 
 Errors and their surrounding context are the cheap version of "find the friction":
 
