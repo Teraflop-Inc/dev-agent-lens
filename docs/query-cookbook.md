@@ -30,7 +30,7 @@ con.execute(f"ATTACH '{os.environ['PHOENIX_SQL_DATABASE_URL']}' AS pg (TYPE post
 
 Keep that `con` — the recipes below run in the **same `uv run python` session**: recipes #1
 and #2 each rebuild `con` so they stand alone, but #3–#4 reuse the `con` above, and the
-bare-```sql``` recipes (#5–#7) run by wrapping the SQL: `con.execute("""<sql>""").df()`.
+bare-```sql``` recipes (#5–#9) run by wrapping the SQL: `con.execute("""<sql>""").df()`.
 
 **There are two surfaces, not one.** `phoenix.spans` is what the *model* saw and said.
 `<workspace_*>.sandbox_agent_events` is what the *agent* did — tool calls, statuses,
@@ -51,6 +51,10 @@ Two conventions used throughout:
   ```
 
   Shape breakdown: 67,016 castable JSON objects · 54,958 absent · 7,421 raw strings.
+  **All 7,421 raw-string rows fall on 2026-05-21 → 05-22**, so a query windowed to recent
+  data won't trip the error and the guard will look pointless — it isn't, it just only
+  fires on windows covering those two days. A `start_time > '2026-05-23'` floor is the
+  cheaper alternative when your question allows it.
 - **Push work down.** Anything that scans or groups goes inside `postgres_query('pg', $$ … $$)` so Postgres does it.
 
 > **Corpus size (measured 2026-08-12): 129,347 spans, 2026-05-06 → present.** An earlier
@@ -374,8 +378,10 @@ $$);
 ```
 
 Answering the ticket's motivating question — *what tools ran in the UUH replay eval?* —
-that returns `Bash 26, Write 2, Monitor 1`: **29 tool calls** (plus 180 `tool_call_update`
-rows, which is where a "212 tool events" figure comes from).
+that returns `Bash 26, Write 2, Monitor 1`: **29 tool calls**. If you have seen "212 tool
+events" quoted for this eval, that is `count(*) WHERE tool_call_id IS NOT NULL` — 212 of the
+schema's 586 rows carry a tool id (the 29 calls, 180 status updates, and 3 others). It counts
+*rows about tools*, not tools run. **29 is the number of tools that ran.**
 
 Fleet-wide, top tools across all 11 populated schemas: `Bash 735 · Read 237 · Edit 85 ·
 mcp__linear-server__get_issue 43 · Write 41`.
@@ -386,16 +392,39 @@ that path and the `tool_name` column agreed on 1,218 of 1,218 `tool_call` rows. 
 column; keep the JSON path as a fallback if you hit a row where the column is null.
 
 **Phoenix-side complement.** If you must find tool activity in spans, grep the *content*,
-not `span_kind`:
+not `span_kind` — and **carry the redaction filter**, or you will reproduce the exact wrong
+conclusion this recipe exists to prevent:
 
 ```sql
--- the estate is Anthropic-native: /v1/messages ≫ /v1/chat/completions
-attributes->'input'->>'value' LIKE '%tool_use%'      -- the model asked for a tool
-attributes->'input'->>'value' LIKE '%tool_result%'   -- a tool came back
+SELECT * FROM postgres_query('pg', $$
+  SELECT to_char(start_time,'YYYY-MM') AS mon,
+         count(*)                                                      AS spans,
+         count(*) FILTER (WHERE attributes->'input'->>'value' LIKE '%tool_use%')    AS asked_for_tool,
+         count(*) FILTER (WHERE attributes->'input'->>'value' LIKE '%tool_result%') AS tool_returned
+  FROM phoenix.spans
+  WHERE name = 'litellm_request'
+    AND attributes::text NOT LIKE '%redacted-by-litellm%'   -- ← omit this and August reads ~0
+  GROUP BY 1 ORDER BY 1
+$$);
 ```
 
-**Do NOT grep `tool_calls`** — that's OpenAI's vocabulary. It matches ~0.25% of this corpus
-and reads as confirmation the data is missing.
+> **Why the filter is not optional here.** Without it, the `tool_use` hit rate reads ~16% in
+> May, ~45% in June and July, and **3.5% in August** — a 13× cliff that looks exactly like
+> "we stopped capturing tool activity." It isn't; it's the redaction window. That inference
+> is the one that produced the "DAL has zero tool spans" claim. With the filter, August is
+> a small but *consistent* sample.
+
+**Do NOT grep `tool_calls`** — that's OpenAI's vocabulary (the estate is Anthropic-native:
+`/v1/messages` ≫ `/v1/chat/completions`). It matches ~0.25% of this corpus and reads as
+confirmation the data is missing.
+
+> **This advice is dated 2026-08-12 and will age.** Post-ENG2-1510, Phoenix *is* starting to
+> emit properly-named tool spans (`Claude_Code_Tool_Bash`, `Claude_Code_Tool_Read`, …) under
+> `span_kind='TOOL'`. Today there are too few, over too short a window, to be a usable index —
+> hence content-grepping. **Re-check before relying on this:** if
+> `SELECT min(start_time), max(start_time), count(*) FROM phoenix.spans WHERE span_kind='TOOL'`
+> now spans weeks rather than a single day, prefer querying those spans directly and treat
+> this section as historical.
 
 ---
 
@@ -404,7 +433,7 @@ and reads as confirmation the data is missing.
 The share of turns the agent takes *without* a human typing something is the centerpiece of
 the off-call-human-time program. It is computable today, from spans alone.
 
-**Don't reach for `stop_reason` — it's near-absent.** Only 703 of 129,355 spans carry it
+**Don't reach for `stop_reason` — it's near-absent.** Only 703 of ~129.3k spans carry it
 (0.54%); `sandbox_agent_events` is similar at ~1%. Any recipe gated on it silently returns
 almost nothing.
 
@@ -418,13 +447,23 @@ its shape tells you who initiated:
 
 The ratio of the two **is** the autonomy signal:
 
+> **Filter to one project or this number is wrong** — this is Recipe 7's warning, and it
+> bites hardest right here. `dev-agent-lens` died on 2026-06-06 but still holds 36,250
+> spans, and it was a *far* less autonomous workload. Left unfiltered it supplies **93% of
+> May's rows** and drags the May ratio from 6.15:1 down to 1.23:1 — which flips the headline
+> from "autonomy is declining" to "autonomy tripled." Join to `phoenix.projects` and pick
+> one.
+
 ```sql
 SELECT * FROM postgres_query('pg', $$
   WITH b AS (
-    SELECT to_char(start_time,'YYYY-MM') AS mon, attributes->'input'->>'value' AS v
-    FROM phoenix.spans
-    WHERE name = 'litellm_request'
-      AND attributes::text NOT LIKE '%redacted-by-litellm%'   -- see the content-gap note
+    SELECT to_char(s.start_time,'YYYY-MM') AS mon, s.attributes->'input'->>'value' AS v
+    FROM phoenix.spans s
+    JOIN phoenix.traces   t ON t.id = s.trace_rowid
+    JOIN phoenix.projects p ON p.id = t.project_rowid
+    WHERE s.name = 'litellm_request'
+      AND p.name = 'sf-workspaces'                             -- live project; NOT the dead dev-agent-lens
+      AND s.attributes::text NOT LIKE '%redacted-by-litellm%'  -- see the content-gap note
   )
   SELECT mon,
     count(*) FILTER (WHERE v NOT LIKE '%dal_trim%' AND v LIKE '%tool_result%') AS agent_continued,
@@ -435,17 +474,31 @@ $$);
 ```
 
 **Correct the denominator.** The text bucket is not all human — it includes the agent
-talking to itself. Pass it through `extract_human_turns()` (Recipe 3) before treating it as
-"human turns"; on the span corpus that drops ~41%, which raises the ratio by ~1.7×.
+talking to itself. The query above returns *counts*, so to apply the correction you re-run it
+selecting the text bucket's `v` instead of counting it, and pass that through
+`extract_human_turns()` exactly as Recipe 3 does. On the span corpus that drops **40.9%**, so
+the corrected ratio is the raw one **÷ 0.591** (≈1.7×).
 
-**Measured baseline (2026-08-12), so you have a reference to diff against:**
+**Measured baseline (`sf-workspaces`, 2026-08-12), so you have a reference to diff against:**
 
-| Month | agent-continued | text turns | raw ratio | corrected (÷0.59) |
+| Month | agent-continued | text turns | raw ratio | corrected (÷0.591) |
 |---|---|---|---|---|
-| 2026-05 | 3,530 | 2,862 | 1.23 : 1 | ~2.1 : 1 |
-| 2026-06 | 8,938 | 2,375 | 3.76 : 1 | ~6.4 : 1 |
+| 2026-05 | 240 | 39 | 6.15 : 1 | ~10.4 : 1 |
+| 2026-06 | 8,862 | 2,361 | 3.75 : 1 | ~6.4 : 1 |
 | 2026-07 | 9,902 | 3,127 | 3.17 : 1 | ~5.4 : 1 |
-| 2026-08 | 516 | 314 | 1.64 : 1 | **unusable** — 97% redacted, tiny surviving sample |
+| 2026-08 | 540 | 328 | 1.65 : 1 | **unusable** — 97% redacted, tiny surviving sample |
+
+**Read the trend with care, and don't headline it.** On live-project traffic the ratio
+*declines* May → July. But May is only 279 classifiable spans (the project had just started;
+the retention floor is 2026-05-06), against ~11k in June and ~13k in July — so the "6.15"
+is a thin, early-adopter sample, not a fleet baseline. June → July, where the volume is
+comparable, is the only month-over-month comparison here that carries weight: **3.75 → 3.17,
+a mild decline.** Anyone quoting a May-to-July trend is quoting sampling noise.
+
+> For contrast, the **unfiltered** numbers — which include the dead `dev-agent-lens`
+> project — are May 3,530/2,862 = 1.23:1, June 8,938/2,375 = 3.76:1. The May figure is 93%
+> dead-project traffic and inverts the trend. This is what the project filter is protecting
+> you from.
 
 **Cross-check against `sandbox_agent_events`**, which gives an exact per-tool count with no
 redaction exposure and no inference at all (Recipe 8). If the two disagree sharply for a

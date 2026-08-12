@@ -230,9 +230,9 @@ sync, no export:
 ```sql
 INSTALL postgres; LOAD postgres;
 ATTACH getenv('PHOENIX_SQL_DATABASE_URL') AS pg (TYPE postgres, READ_ONLY);
--- push aggregates down with postgres_query(); a plain scan of 1.2M spans times out
+-- push aggregates down with postgres_query() so Postgres does the work
 SELECT * FROM postgres_query('pg', $$
-  SELECT ((attributes->'metadata'->>'user_api_key_end_user_id')::jsonb)->>'account_uuid' AS who,
+  SELECT CASE WHEN attributes->'metadata'->>'user_api_key_end_user_id' LIKE '{%' THEN ((attributes->'metadata'->>'user_api_key_end_user_id')::jsonb)->>'account_uuid' END AS who,
          count(*) AS spans FROM phoenix.spans
   WHERE start_time > now() - INTERVAL '14 days' GROUP BY 1 ORDER BY 2 DESC
 $$);
