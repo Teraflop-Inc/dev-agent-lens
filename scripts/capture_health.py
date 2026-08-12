@@ -45,7 +45,25 @@ REDACTION_MARKER = "redacted-by-litellm"
 
 # Only spans that carry an input field participate. See the docstring.
 _HAS_INPUT = "attributes -> 'input' ->> 'value' IS NOT NULL"
-_IS_REDACTED = f"attributes -> 'input' ->> 'value' LIKE '%%{REDACTION_MARKER}%%'"
+
+# EXACT match, deliberately not LIKE '%...%'.
+#
+# When litellm redacts, it replaces the ENTIRE value: every one of the 9,308
+# redacted spans in the 2026-08-03..12 outage had input.value exactly equal to
+# the 19-character marker, one distinct value, no variants.
+#
+# A substring predicate additionally matches any span whose content merely
+# *mentions* the marker -- which includes every trace of an engineer debugging
+# this very outage. That is not hypothetical: during the post-deploy
+# verification on 2026-08-12 the LIKE form reported 6.8% redaction and failed
+# the check, when the true rate was 0.00%. The five "redacted" spans were
+# 616-3613 chars of the operator's own session discussing the bug. A genuinely
+# redacted span is 19 chars.
+#
+# Getting this wrong is worse than a nuisance: it makes the check cry wolf
+# exactly when someone is investigating a capture problem, which is precisely
+# when they need to trust it.
+_IS_REDACTED = f"attributes -> 'input' ->> 'value' = '{REDACTION_MARKER}'"
 
 _SQL = f"""
     SELECT name,
