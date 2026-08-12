@@ -58,8 +58,10 @@ Two conventions used throughout:
 > accurate when written on 2026-07-15 and stopped being true on **2026-08-03**, when
 > `scripts/debloat_spans.py` (ENG2-1461) deliberately deleted ~1.24M duplicate rows —
 > `raw_gen_ai_request` and pre-May `Claude_Code%` L² children — after archiving them to
-> `~/dal-archive/phoenix-2026-08-03` + S3. Nothing was lost; the DB went 31 GB → 5.5 GB.
-> Scans are fast now. Don't size capacity or cost off the old number.
+> `~/dal-archive/phoenix-2026-08-03` + S3 (the script refuses to run without a verified
+> archive). Nothing was lost. Measured 2026-08-12 after reclaim: **whole DB 1,761 MB, of
+> which `phoenix.spans` is 1,345 MB** — down from ~31 GB pre-debloat. Scans are fast now.
+> Don't size capacity or cost off the old number.
 
 > **⚠ Two content gaps every content-based recipe must exclude.** Both leave the span row
 > in place with its metadata intact, so counts look healthy while the *text* is gone:
