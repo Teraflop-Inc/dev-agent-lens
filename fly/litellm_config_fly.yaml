@@ -70,16 +70,39 @@ litellm_settings:
   set_verbose: false
   pass_through_params: true
 
-# ENG2-1461: kill the OTEL raw-request child span (the O(L²) re-bleed).
-# That span dumps the FULL request — entire message history + tool list +
-# system prompt — as llm.anthropic.* on EVERY call (~1.3MB/span, the 30GB
-# TOAST). Span 1 keeps latest-turn content via the patched (ENG2-1036)
-# arize set_attributes, so nothing DAL needs is lost.
-# Requires the fork patch that forwards callback_settings into the
-# arize_phoenix logger (litellm_logging.py) — config is inert without it.
-callback_settings:
-  arize_phoenix:
-    message_logging: false
+# DO NOT re-add `callback_settings.arize_phoenix.message_logging: false`.
+#
+# ENG2-1461 set it here to kill the raw-request child span (~1.3MB/span of
+# llm.anthropic.* re-bleed, the 30GB TOAST). It did kill that span — and it
+# also blinded the whole capture path for 9 days (ENG2-1510).
+#
+# `message_logging` is NOT a per-child-span toggle. It is the callback-wide
+# content kill-switch. In litellm/integrations/opentelemetry.py,
+# `_resolve_capture_mode()` falls through to:
+#     return SPAN_AND_EVENT if self.message_logging else NO_CONTENT
+# NO_CONTENT then gates BOTH `_maybe_log_raw_request()` (the span we wanted
+# gone) and the content on the spans DAL actually reads. Downstream,
+# `perform_redaction()` rewrites messages to
+#     [{"role": "user", "content": "redacted-by-litellm"}]
+# and the arize `set_messages()` maps last-message content -> INPUT_VALUE,
+# so every span landed with `attributes.input.value = "redacted-by-litellm"`
+# (19 chars — exactly the median input length observed during the outage).
+#
+# session_id was NOT affected. It rides on metadata.requester_metadata and is
+# still present on litellm_request spans at 99.5%, unchanged from before 08-03.
+#
+# Net effect from 2026-08-03 (deploy of 7aaa658) to the fix: of spans that
+# carry an input field, ~98.6% lost their content. Over 24h only 68 spans held
+# real content. One line, one symptom — a total content blackout.
+#
+# There is no config-only lever in upstream litellm that drops the
+# raw-request span while keeping content: `_maybe_log_raw_request()` early
+# -returns only on `not _capture_in_span()` (kills content too) or on
+# `_gen_ai_semconv_latest_experimental` (renames every attribute to gen_ai.*
+# and would break DAL's normalizer + Phoenix's openinference rendering).
+# Decoupling them needs a fork patch exposing a separate `raw_request_logging`
+# setting. Until that lands, bloat is contained by the ENG2-1476 span-size
+# sentinel and the ENG2-1469 trim script, not by this flag.
 
 router_settings:
   routing_strategy: "simple-shuffle"
