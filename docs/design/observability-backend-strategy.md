@@ -159,9 +159,21 @@ Config-only change; requires an `sf-litellm` deploy, which is gated on Adam.
 - [ ] Confirm real content on `litellm_request` and
       `Claude_Code_Internal_Prompt_0` (not `%null_session`, which is unrelated
       to this bug — see §2)
-- [ ] Run `uv run python scripts/span_size_sentinel.py --days 1` — the
-      raw-request span returns with content, so bloat will regrow; this
-      quantifies how fast and whether the fork patch is urgent
+- [x] Size sentinel — **moved to agent-infrastructure-toolkit** (2026-08-12) and
+      scheduled hourly there, because it needs a DB credential and this repo is
+      public. The local `scripts/span_size_sentinel.py` copy was deleted: two
+      copies with only one wired to a clock is the ENG2-1510 failure shape.
+      Canonical: `workspace_runner.span_size_sentinel`, run by
+      `.github/workflows/capture-health.yml`, which watches BOTH
+      `litellm_request` and the `raw_gen_ai_request` whale.
+      Ad-hoc (pass the whale's thresholds — the defaults are sized for
+      `litellm_request` at ~4 KB and will report a false breach against a span
+      that is legitimately ~500 KB):
+      `uv run --project workspace-runner python -m
+      workspace_runner.span_size_sentinel --span-name raw_gen_ai_request
+      --days 1 --avg-kb 1100 --p95-kb 1600`
+      Add `--since <ISO8601>` to exclude a known, already-fixed bloat episode
+      still sitting inside the window.
 - [ ] Add an inverted check alongside the size sentinel: it only alarms when
       spans grow, so this outage — which made spans *smaller* — scored as a win
       and ran 9 days unnoticed. Needs a content-presence floor
