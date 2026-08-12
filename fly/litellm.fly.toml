@@ -50,6 +50,45 @@ primary_region = "iad"
   # errors hid a misrouted endpoint for half a day in dev-agent-lens.
   LITELLM_LOG = "INFO"
 
+  # --- gRPC 4 MiB ceiling containment (ENG2-1510 follow-up, 2026-08-12) ---
+  #
+  # Symptom: HITL rollouts were NOT being captured at all, while host sessions
+  # captured fine. Proven live: the in-VM shim POSTed 3x 200 OK to this proxy,
+  # and 3s later sf-litellm logged
+  #     Transient error StatusCode.RESOURCE_EXHAUSTED ... retrying in 1s/2s/4s/8s/16s/32s
+  # and the spans never landed. Last sandbox-tagged span in the whole DB was
+  # 17:08 that day. gRPC caps a message at 4 MiB (4096 kB) AFTER decompression.
+  #
+  # Cause, measured (uncompressed, `length(attributes::text)`):
+  #     raw_gen_ai_request   avg 1519 kB   max 3419 kB   <- the whale
+  #     litellm_request      avg   11 kB   max  111 kB   <- what DAL reads
+  # Same trace, side by side: whale 3419 kB vs its own litellm_request 61 kB.
+  # The whale is a ~55x duplicate of the request (llm.anthropic.messages
+  # 2968 kB + .tools 440 kB, both FLAT STRING attributes). Rollouts carry the
+  # full CLAUDE.md + skills, so their batches blow the cap first — which is
+  # exactly why rollouts died and host sessions lived.
+  #
+  # ENG2-1461 tried to kill the whale via callback_settings.message_logging and
+  # blinded content for 9 days (see litellm_config_fly.yaml). The config note
+  # there concludes there is "no config-only lever" — true of LITELLM settings,
+  # but the lever exists one layer down, in the OTel SDK, and shrinks the whale
+  # WITHOUT touching content:
+  #
+  #   * ATTRIBUTE VALUE LIMIT 256 kB — truncates llm.anthropic.messages/.tools
+  #     (MB-scale) while every real content attribute stays whole: largest
+  #     observed is 111 kB, so this keeps 2.3x headroom. DAL never reads
+  #     llm.anthropic.* (0 refs); it reads litellm_request input/output.
+  #     Post-truncation the whale is ~525 kB (256 + 256 + 11).
+  #   * BATCH 4 — 4 x ~525 kB ~= 2.1 MB, ~2x under the 4 MiB cap. Required:
+  #     the default batch of 512 would still overflow at any span size.
+  #
+  # Do NOT "fix" this by changing the endpoint/protocol instead. Switching
+  # OTEL_EXPORTER_OTLP_ENDPOINT to :6006/v1/traces http/protobuf was tried on
+  # 2026-08-12 and stopped ingestion outright for ~9 minutes. Endpoints stay
+  # gRPC :4317 (see the block above).
+  OTEL_SPAN_ATTRIBUTE_VALUE_LENGTH_LIMIT = "262144"
+  OTEL_BSP_MAX_EXPORT_BATCH_SIZE = "4"
+
 # Ship the config into the image at deploy time. Fly's [[files]] copies the
 # local file into the running container — no custom Dockerfile needed, no
 # volume to keep in sync. The image's entrypoint reads /app/config.yaml
