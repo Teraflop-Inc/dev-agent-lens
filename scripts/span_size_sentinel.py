@@ -46,6 +46,38 @@ def dsn_from_env() -> str:
     return m.group(2)
 
 
+def evaluate(
+    n: int | None,
+    avg_b: float | None,
+    p95_b: float | None,
+    max_b: float | None,
+    *,
+    avg_kb_threshold: float,
+    p95_kb_threshold: float,
+) -> tuple[int, list[str]]:
+    """Pure verdict so it can be unit-tested without a database.
+
+    Returns (exit_code, messages). 0 healthy, 1 size breach, 2 inconclusive.
+
+    NOTE (ENG2-1510): this check is DIRECTIONAL — it only fires when spans get
+    bigger. It cannot detect content loss, because losing content makes spans
+    smaller. See test_span_size_sentinel.py::test_cannot_detect_content_loss;
+    scripts/capture_health.py is the inverse check and both must be green.
+    """
+    if not n:
+        return 2, ["no spans in window - inconclusive"]
+    avg_kb, p95_kb, max_kb = (avg_b or 0) / 1024, (p95_b or 0) / 1024, (max_b or 0) / 1024
+    msgs = [f"{n} spans: avg={avg_kb:.1f}KB p95={p95_kb:.1f}KB max={max_kb:.1f}KB"]
+    if avg_kb > avg_kb_threshold or p95_kb > p95_kb_threshold:
+        msgs.append(
+            "SIZE BREACH - span bloat is back (3rd-regression guard, see "
+            "ENG2-1476/1461/1036). Check the sf-litellm image for a lost patch."
+        )
+        return 1, msgs
+    msgs.append("healthy")
+    return 0, msgs
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--days", type=float, default=7.0, help="lookback window in days")
@@ -85,19 +117,16 @@ def main() -> int:
         n, avg_b, p95_b, max_b = cur.fetchone()
         elapsed = time.perf_counter() - t0
 
-        if not n:
-            log.warning("[sentinel] no %s spans in window — inconclusive (%.1fs)",
-                        args.span_name, elapsed)
+        code, msgs = evaluate(
+            n, avg_b, p95_b, max_b,
+            avg_kb_threshold=args.avg_kb, p95_kb_threshold=args.p95_kb,
+        )
+        for m in msgs:
+            (log.error if "BREACH" in m else log.info)("[sentinel] %s (%.1fs)", m, elapsed)
+        if code == 2:
             return 2
 
-        avg_kb, p95_kb, max_kb = avg_b / 1024, p95_b / 1024, max_b / 1024
-        log.info(
-            "[sentinel] %d spans: avg=%.1fKB p95=%.1fKB max=%.1fKB in %.1fs",
-            n, avg_kb, p95_kb, max_kb, elapsed,
-        )
-
-        breach = avg_kb > args.avg_kb or p95_kb > args.p95_kb
-        if breach:
+        if code == 1:
             # Diagnose: fattest recent spans + which attribute key carries the bytes.
             cur.execute(
                 """
@@ -122,13 +151,8 @@ def main() -> int:
                     "[sentinel] BREACH sample: span id=%s total=%.1fKB fattest_key=%r (%.1fKB)",
                     span_id, total / 1024, key, key_bytes / 1024,
                 )
-            log.error(
-                "[sentinel] SIZE BREACH — span bloat is back (3rd-regression guard, "
-                "see ENG2-1476/1461/1036). Check the sf-litellm image for a lost patch."
-            )
             return 1
 
-        log.info("[sentinel] healthy")
         return 0
 
 
