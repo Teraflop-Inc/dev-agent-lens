@@ -8,8 +8,36 @@ Two ways to query the team's Claude Code trace data:
    heavy queries over a source you've pulled down.
 
 Start with (1). It needs nothing but the connection string. For copy-paste recipes that
-answer real questions (who's active, one person's sessions, learning-vs-building, blockers),
-see the [query cookbook](query-cookbook.md).
+answer real questions (who's active, one person's sessions, learning-vs-building, blockers,
+tool usage, autonomy ratio), see the [query cookbook](query-cookbook.md).
+
+---
+
+## The two surfaces
+
+**`phoenix.spans` is not the whole world.** It is one of two capture surfaces in the same
+Postgres, and picking the wrong one is the most expensive mistake you can make against this
+data — it looks like an empty result, not like an error.
+
+| Surface | Holds | Scale (2026-08-12) |
+|---|---|---|
+| `phoenix.spans` | what the **model** saw and said — one `litellm_request` span per model call, JSONB `attributes` | 129,347 spans, 2026-05-06 → present |
+| `<workspace_*>.sandbox_agent_events` | what the **agent did** — tool calls, statuses, prompts; `tool_name` / `tool_call_id` / `status` are first-class columns | 17 schemas (11 populated), 1,218 `tool_call` events |
+
+They join on `session_id`, so "what the model said" lines up with "what the agent did" per
+sandbox run.
+
+**Rules of thumb.** Questions about people, tokens, cost, or prompt text → `phoenix.spans`.
+Questions about tools, agent actions, or anything in the 2026-08-03 → 08-12 redaction window
+→ `sandbox_agent_events`. There is no reliable `span_kind = 'TOOL'` in `phoenix.spans`; see
+[Recipe 8](query-cookbook.md#8-what-tools-did-the-agent-actually-run) before you go looking
+for one.
+
+Two further surfaces exist outside this Postgres and are worth knowing about: the local
+session JSONLs in `~/.claude/projects/` (richest per-session record, pruned ~30 days,
+per-machine) and the parquet archive at `~/dal-archive/phoenix-2026-08-03` + S3 (full
+pre-cleanup span history). See
+[dal-db-learnings-oltp-olap.md](design/dal-db-learnings-oltp-olap.md) for the full inventory.
 
 ---
 
