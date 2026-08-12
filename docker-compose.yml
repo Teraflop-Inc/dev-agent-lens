@@ -58,12 +58,22 @@ services:
       # CLAUDE_LENS_PROJECT or PHOENIX_PROJECT can override the default project name
       - OTEL_SERVICE_NAME=${PHOENIX_PROJECT:-${CLAUDE_LENS_PROJECT:-dev-agent-lens}}
 
-      # Phoenix OTLP endpoint
-      # Use Phoenix's HTTP OTLP endpoint (port 6006/v1/traces),
-      # not the gRPC endpoint (port 4317). LiteLLM's arize_phoenix callback
-      # uses requests/HTTP under the hood — pointing at the gRPC port causes
-      # silent span drops with "Custom Logger Error" tracebacks. Phoenix
-      # accepts OTLP/HTTP at /v1/traces on its UI port.
+      # Phoenix OTLP endpoint — HTTP here, gRPC in prod. Both are supported.
+      #
+      # This comment used to claim the arize_phoenix callback was "HTTP-only"
+      # and that pointing it at 4317 silently dropped spans. That is FALSE
+      # (ENG2-1494). ArizePhoenixLogger.get_arize_phoenix_config() branches on
+      # the endpoint and selects the gRPC exporter itself:
+      #     if endpoint.startswith("grpc://") or (":4317" in endpoint
+      #                                    and "/v1/traces" not in endpoint):
+      #         protocol = "otlp_grpc"
+      # so prod's http://sf-phoenix.internal:4317 resolves to otlp_grpc and
+      # exports fine — which is why sf-workspaces spans have been landing all
+      # along. fly/phoenix.fly.toml:29-33 documents 4317 as the deliberate
+      # path; the real IPv6 quirk was on 6006, fixed with PHOENIX_HOST="::".
+      #
+      # We keep HTTP locally only because compose already publishes 6006 and
+      # it is easier to curl when debugging. Not a correctness constraint.
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://phoenix:6006/v1/traces
       - OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
       - PHOENIX_COLLECTOR_ENDPOINT=http://phoenix:6006
