@@ -22,7 +22,7 @@ from pathlib import Path
 # Add scripts directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
 
-from capture_health import _HAS_INPUT, _SQL, evaluate  # noqa: E402
+from capture_health import _HAS_INPUT, _IS_REDACTED, _SQL, evaluate  # noqa: E402
 
 THRESHOLDS = {"max_redacted_pct": 5.0, "min_median_chars": 100}
 
@@ -102,3 +102,25 @@ def test_partial_regression_on_one_span_type_is_caught_by_median():
     code, msgs = evaluate(rows, **THRESHOLDS)
     assert code == 1, msgs
     assert any("median input length" in m for m in msgs)
+
+
+def test_redaction_predicate_is_exact_not_substring():
+    """Lesson #3, found during live post-deploy verification on 2026-08-12.
+
+    litellm replaces the WHOLE value when it redacts -- all 9,308 redacted spans
+    in the outage had input.value exactly equal to the 19-char marker, one
+    distinct value.
+
+    A `LIKE '%marker%'` predicate also matches any span whose content merely
+    MENTIONS the marker, which includes every trace of an engineer debugging
+    this outage. In the live check that inflated a true 0.00% to 6.8% and
+    failed the run -- the "redacted" spans were 616-3613 chars of an operator's
+    own session discussing the bug.
+
+    Crying wolf while someone investigates a capture problem is the one time
+    this check must be trustworthy, so the predicate stays exact.
+    """
+    assert "LIKE" not in _IS_REDACTED.upper(), (
+        "substring matching re-introduces the 2026-08-12 false positive"
+    )
+    assert "= 'redacted-by-litellm'" in _IS_REDACTED
