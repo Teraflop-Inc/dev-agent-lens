@@ -63,6 +63,13 @@ Two conventions used throughout:
 > which `phoenix.spans` is 1,345 MB** — down from ~31 GB pre-debloat. Scans are fast now.
 > Don't size capacity or cost off the old number.
 
+> **Retention floor: 2026-05-06. There is nothing before it — on either surface.** The
+> earliest span is 2026-05-06 (a partial day, 94 rows); `sandbox_agent_events` doesn't start
+> until 2026-05-15; and the parquet archive itself only runs 2026-05-06 → 08-03. So the
+> **2026-04-01 → 2026-05-06 window is a hard capture gap with no data anywhere**, not a
+> query you haven't written yet. This bounds every longitudinal claim: any "since Q2" or
+> "over the last N months" analysis silently starts on 2026-05-06. Say so when you report one.
+
 > **⚠ Two content gaps every content-based recipe must exclude.** Both leave the span row
 > in place with its metadata intact, so counts look healthy while the *text* is gone:
 >
