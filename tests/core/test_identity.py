@@ -95,9 +95,12 @@ class TestResolution:
 
 
 class TestLabels:
-    def test_sandbox_spans_are_labelled_unattributed(self, tmp_path):
+    def test_missing_account_labelled_unattributed_not_sandbox(self, tmp_path):
+        # A missing account_uuid is NOT evidence of a sandbox — that reading is backwards.
+        # Measured 2026-08-12 (ENG2-1509): sandbox spans are 93.6% attributed, and 98.5%
+        # of unattributed spans are laptop traffic. The label must not say "sandbox".
         m = _load(_write(tmp_path, "people: []\nunclaimed: []\n"))
-        assert m.label(None) == "(sandbox/unattributed)"
+        assert m.label(None) == "(unattributed)"
 
     def test_unknown_account_labelled_as_unclaimed_not_blank(self, tmp_path):
         m = _load(_write(tmp_path, "people: []\nunclaimed: []\n"))
