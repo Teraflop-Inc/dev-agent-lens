@@ -37,8 +37,9 @@ That lets "what the model said" line up with "what the agent did" per sandbox ru
 
 **Rules of thumb.** Questions about people, tokens, cost, or prompt text → `phoenix.spans`.
 Questions about tools, agent actions, or anything in the 2026-08-03 → 08-12 redaction window
-→ `sandbox_agent_events`. `span_kind = 'TOOL'` is not a usable tool index here — it was absent entirely until
-2026-08-12 and is still thin and new; see
+→ `sandbox_agent_events`. `span_kind = 'TOOL'` only exists from 2026-08-12 onward (4,721
+spans by 08-14, growing) — usable for windows after that date, absent by construction before
+it, and synthesis is proxy/tool-dependent; see
 [Recipe 8](query-cookbook.md#8-what-tools-did-the-agent-actually-run) before you go looking
 for one.
 

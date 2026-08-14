@@ -66,7 +66,8 @@ Two conventions used throughout:
   cheaper alternative when your question allows it.
 - **Push work down.** Anything that scans or groups goes inside `postgres_query('pg', $$ … $$)` so Postgres does it.
 
-> **Corpus size (measured 2026-08-12): 129,347 spans, 2026-05-06 → present.** An earlier
+> **Corpus size (measured 2026-08-14): 147,208 spans, 2026-05-06 → present** (~9k/day growth;
+> 129,347 when first measured 2026-08-12). An earlier
 > version of this page said 1.2M and warned that plain DuckDB scans time out. That was
 > accurate when written on 2026-07-15 and stopped being true on **2026-08-03**, when
 > `scripts/debloat_spans.py` (ENG2-1461) deliberately deleted ~1.24M duplicate rows —
@@ -93,7 +94,8 @@ Two conventions used throughout:
 >
 > Redaction hit **90–98% of `litellm_request` spans** on 08-04 → 08-11 (most days 96–98%; 08-09 was 90.2% on a low-volume day). It was fixed on
 > 2026-08-12 by commit `59c7e14` — same-day spans were 47% redacted as the fix rolled out,
-> and capture after that is healthy. So this is a **bounded historical hole, not an ongoing
+> and capture after that is healthy (re-verified 2026-08-14: 0.3% on 08-13, 0.0% on 08-14).
+> So this is a **bounded historical hole, not an ongoing
 > outage**: `start_time < '2026-08-03'` is clean, and so is anything after 08-12. The
 > `dal_trim` rows point at `llm.input_messages` or the parquet archive for their content.
 >
@@ -422,6 +424,12 @@ The canonical name is also at
 that path and the `tool_name` column agreed on 1,218 of 1,218 `tool_call` rows. Use the
 column; keep the JSON path as a fallback if you hit a row where the column is null.
 
+> **Substring searches over `agent_message_chunk` events miss split tokens.** Streaming
+> chunks split words across events — a final reply of `DONE` arrives as `'D'` + `'ONE'`
+> in two rows (observed live, session `ce6da45d`, 2026-08-14). Concatenate a session's
+> chunks in `created_at` order before grepping, or search the harvested session JSONL
+> (which holds the assembled message) instead.
+
 **Phoenix-side complement.** If you must find tool activity in spans, grep the *content*,
 not `span_kind` — and **carry the redaction filter**, or you will reproduce the exact wrong
 conclusion this recipe exists to prevent:
@@ -449,13 +457,14 @@ $$);
 `/v1/messages` ≫ `/v1/chat/completions`). Measured, it matches **0.30%** of `input.value` —
 small enough to read as confirmation the data is missing.
 
-> **This advice is dated 2026-08-12 and will age.** Post-ENG2-1510, Phoenix *is* starting to
-> emit properly-named tool spans (`Claude_Code_Tool_Bash`, `Claude_Code_Tool_Read`, …) under
-> `span_kind='TOOL'`. Today there are too few, over too short a window, to be a usable index —
-> hence content-grepping. **Re-check before relying on this:** if
-> `SELECT min(start_time), max(start_time), count(*) FROM phoenix.spans WHERE span_kind='TOOL'`
-> now spans weeks rather than a single day, prefer querying those spans directly and treat
-> this section as historical.
+> **This advice ages — re-measure before relying on it.** Post-ENG2-1510, Phoenix emits
+> properly-named tool spans (`Claude_Code_Tool_Bash`, `Claude_Code_Tool_Read`, …) under
+> `span_kind='TOOL'`. Re-measured 2026-08-14: **4,721 TOOL spans spanning 2026-08-12 → 08-14**
+> and growing — so for windows entirely after 2026-08-12, `span_kind='TOOL'` is now a usable
+> index. For anything touching earlier data it is still absent by construction (0 spans before
+> 08-12 against a 147k corpus), so use `sandbox_agent_events` or content-grepping there. Also
+> note tool-span **synthesis is proxy-version/tool-dependent** (observed: Bash synthesized,
+> Read not, on some proxies) — `sandbox_agent_events` remains the authoritative count.
 
 ---
 
@@ -522,7 +531,7 @@ the constant.
 | 2026-05 | 240 | 39 | 6.15 : 1 | ~8.8 : 1 |
 | 2026-06 | 8,862 | 2,361 | 3.75 : 1 | ~5.4 : 1 |
 | 2026-07 | 9,902 | 3,127 | 3.17 : 1 | ~4.5 : 1 |
-| 2026-08 | 540 | 328 | 1.65 : 1 | **unusable** — 97% redacted, tiny surviving sample |
+| 2026-08 | 540 | 328 | 1.65 : 1 | **unusable at measurement time** (97% redacted through 08-12); post-08-12 August data is clean — re-measure on a `start_time > '2026-08-12'` window |
 
 **Read the trend with care, and don't headline it.** On live-project traffic the ratio
 *declines* May → July. But May is only 279 classifiable spans (the project had just started;
@@ -539,6 +548,64 @@ a mild decline.** Anyone quoting a May-to-July trend is quoting sampling noise.
 **Cross-check against `sandbox_agent_events`**, which gives an exact per-tool count with no
 redaction exposure and no inference at all (Recipe 8). If the two disagree sharply for a
 window, trust the events table and suspect a content gap in the spans.
+
+---
+
+## 10. Is thinking on, and where's the reasoning text?
+
+> **⚠ Do not detect thinking by grepping `budget_tokens`.** That parameter was **removed from
+> the API on Opus 4.7+** (sending it returns a 400) — only pre-4.6 models (in our fleet:
+> Haiku 4.5) can still legally send it. Grepping it "proves" only Haiku thinks, and
+> `{"type": "adaptive"}` counted as "disabled" completes the inversion. Both produced the
+> false "0.9% thinking-enabled" figure in ENG2-1487. Classify on `thinking.type`:
+
+```sql
+SELECT * FROM postgres_query('pg', $$
+  SELECT coalesce(attributes->'llm'->>'model_name','(null)') AS model,
+         CASE WHEN attributes->'llm'->>'invocation_parameters' ~ '"thinking":\s*\{"type":\s*"adaptive"' THEN 'ON (adaptive)'
+              WHEN attributes->'llm'->>'invocation_parameters' ~ '"thinking":\s*\{"type":\s*"disabled"' THEN 'off (disabled)'
+              WHEN attributes->'llm'->>'invocation_parameters' LIKE '%budget_tokens%' THEN 'ON (budget_tokens, pre-4.6)'
+              ELSE 'absent (model default)' END AS thinking,
+         count(*) AS n
+  FROM phoenix.spans
+  WHERE start_time > now() - INTERVAL '7 days' AND name = 'litellm_request'
+  GROUP BY 1, 2 ORDER BY 3 DESC
+$$);
+```
+
+Verified 2026-08-14: `claude-opus-5` ON (adaptive) 7,027 · off 477 · absent 282 — thinking is
+ON for ~95% of Opus 5 traffic. `absent` means the model's own default applies (Opus 5 /
+Sonnet 5 / Fable default to adaptive).
+
+**Where the reasoning text lives — and the two traps that hid it:**
+
+- Anthropic never returns raw chain of thought. `thinking.display` decides what you get:
+  `"omitted"` (the old fleet default) returns thinking blocks with **empty text but real
+  signatures** — 5,253 such signed-empty blocks accumulated in this store and read as
+  "nothing captured." Since **2026-08-14** the proxy injects `display: "summarized"` on
+  adaptive requests (ENG2-1487, dev-agent-lens PR #64), so summaries flow: **576 spans with
+  reasoning text in the first 90 minutes.**
+- The text lands on the callback-synthesized `Claude_Code_*` spans (`span_kind` **UNKNOWN**,
+  packed `llm` attributes) — **not** on `litellm_request.output_messages`. Scan the whole
+  frame, not LLM-kind rows.
+- Attribute JSON arrives with **escaped quotes** (and dict-repr in some client dataframes) —
+  quote-exact patterns like `'"signature"'` silently match nothing. Use quote-agnostic
+  regexes:
+
+```sql
+SELECT * FROM postgres_query('pg', $$
+  SELECT count(*) FILTER (WHERE attributes::text ~ 'display.{0,4}:\s*.{0,3}summarized') AS asked_for_summary,
+         count(*) FILTER (WHERE attributes::text ~ 'thinking.{0,4}:\s*.{0,3}[A-Za-z][^"\\]{10}') AS has_reasoning_text
+  FROM phoenix.spans
+  WHERE start_time > '2026-08-14'
+$$);
+```
+
+Reasoning-token counts are **not separable**: Anthropic folds thinking into `output_tokens`,
+and `usage_object.reasoning_tokens` is ~always 0 (65 non-zero of 28,578 field-carrying spans).
+"How many tokens went to reasoning?" is not answerable on this path — don't build a report on
+it. Cache accounting IS real: `usage_object.cache_read/creation_input_tokens` non-zero on ~90%
+of carrying spans.
 
 ---
 
