@@ -291,3 +291,20 @@ def test_read_roundtrip_nonce_assertion():
 
     o.nonce = None
     assert "read_content_roundtrip" not in o._content_assertions(df_hit)
+
+
+def test_thinking_summary_in_packed_llm_column_passes():
+    """arize-phoenix stores thinking blocks inside the packed `attributes.llm`
+    dict cell, not the dotted columns (live run 20260814-134345)."""
+    row = {
+        "span_kind": "LLM",
+        "attributes.input.value": "hello",
+        "attributes.llm": {
+            "invocation_parameters": '{"thinking": {"type": "adaptive", "display": "summarized"}}',
+            "output_messages": [
+                {"contents": [{"type": "thinking", "thinking": "Reading the nonce file", "signature": "xyz"}]}
+            ],
+        },
+    }
+    result = assertions_for([row])
+    assert result["thinking_content_captured"] is True
