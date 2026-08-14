@@ -11,6 +11,8 @@ Field Mappings:
 
 from __future__ import annotations
 
+import json
+
 from datetime import datetime
 from typing import Any, TypedDict
 
@@ -252,6 +254,46 @@ def _get_column(row: pd.Series, *column_names: str) -> Any:
     return None
 
 
+def _parse_packed_attributes(row: pd.Series) -> dict:
+    """Return the row's `attributes` payload as a dict, or {}.
+
+    The HTTP Phoenix client flattens attributes into dotted columns
+    (`attributes.input.value`), but `PhoenixPostgresClient` and
+    `PhoenixSQLiteClient` return one packed `attributes` column (JSON string
+    or dict). `normalize_phoenix` only read the flattened form, so every
+    content field normalized from the Postgres backend came out None — the
+    database had the content and the unified layer dropped all of it
+    (verified live on rollout session ce6da45d, 2026-08-14: 0/4 LLM rows
+    populated). This fallback closes that gap.
+    """
+    if "attributes" not in row.index:
+        return {}
+    attrs = row["attributes"]
+    if isinstance(attrs, str):
+        try:
+            attrs = json.loads(attrs)
+        except (ValueError, TypeError):
+            return {}
+    return attrs if isinstance(attrs, dict) else {}
+
+
+def _dig(obj: Any, *path: str) -> Any:
+    """Walk nested dict keys; None on any miss."""
+    for key in path:
+        if not isinstance(obj, dict):
+            return None
+        obj = obj.get(key)
+    return None if _is_missing(obj) else obj
+
+
+def _attr(row: pd.Series, packed: dict, dotted: str, *extra_columns: str) -> Any:
+    """Read an attribute by flattened column, packed-dict path, or fallback column."""
+    val = _get_column(row, dotted, *extra_columns)
+    if val is not None:
+        return val
+    return _dig(packed, *dotted.removeprefix("attributes.").split("."))
+
+
 def normalize_phoenix(df: pd.DataFrame) -> pd.DataFrame:
     """
     Convert Phoenix DataFrame to unified schema.
@@ -287,30 +329,39 @@ def normalize_phoenix(df: pd.DataFrame) -> pd.DataFrame:
     for _, row in df.iterrows():
         raw_dict = row.to_dict()  # Preserve all original columns for metadata extraction
         identity_span = {"raw_attributes": raw_dict}
+        # Postgres/SQLite backends pack everything into one `attributes` column;
+        # the HTTP client flattens into dotted columns. _attr reads either shape.
+        packed = _parse_packed_attributes(row)
         unified = {
             "span_id": _safe_str(_get_column(row, "context.span_id")),
             "trace_id": _safe_str(_get_column(row, "context.trace_id")),
             "parent_id": _safe_str(_get_column(row, "parent_id")),
             "name": _safe_str(_get_column(row, "name")),
             "span_kind": _safe_str(
-                _get_column(row, "span_kind", "attributes.openinference.span.kind")
+                _attr(row, packed, "attributes.openinference.span.kind", "span_kind")
             ),
             "start_time": _to_iso8601(_get_column(row, "start_time")),
             "end_time": _to_iso8601(_get_column(row, "end_time")),
             "status_code": _safe_str(_get_column(row, "status_code", "status")),
-            "input_value": _safe_str(_get_column(row, "attributes.input.value")),
-            "output_value": _safe_str(_get_column(row, "attributes.output.value")),
-            "input_messages": _safe_str(_get_column(row, "attributes.llm.input_messages")),
-            "output_messages": _safe_str(_get_column(row, "attributes.llm.output_messages")),
-            "llm_model_name": _safe_str(_get_column(row, "attributes.llm.model_name")),
+            "input_value": _safe_str(_attr(row, packed, "attributes.input.value")),
+            "output_value": _safe_str(_attr(row, packed, "attributes.output.value")),
+            "input_messages": _safe_str(_attr(row, packed, "attributes.llm.input_messages")),
+            "output_messages": _safe_str(_attr(row, packed, "attributes.llm.output_messages")),
+            "llm_model_name": _safe_str(_attr(row, packed, "attributes.llm.model_name")),
             "llm_token_count_prompt": _safe_int(
-                _get_column(row, "attributes.llm.token_count.prompt")
+                # last name: the Postgres/SQLite SELECT exposes this directly
+                _attr(row, packed, "attributes.llm.token_count.prompt", "llm_token_count_prompt")
             ),
             "llm_token_count_completion": _safe_int(
-                _get_column(row, "attributes.llm.token_count.completion")
+                _attr(
+                    row,
+                    packed,
+                    "attributes.llm.token_count.completion",
+                    "llm_token_count_completion",
+                )
             ),
             "llm_token_count_total": _safe_int(
-                _get_column(row, "attributes.llm.token_count.total")
+                _attr(row, packed, "attributes.llm.token_count.total")
             ),
             "user_id": extract_user_id_from_span(identity_span),
             "account_id": extract_account_id_from_span(identity_span),

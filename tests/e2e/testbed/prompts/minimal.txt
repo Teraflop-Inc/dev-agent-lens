@@ -1,3 +1,9 @@
 PIPELINE_TEST_MODE ACTIVE
 
-Smoke test: Read sample_code/main.py and output "PIPELINE_TEST_COMPLETE".
+Smoke test. Use the Read tool on nonce.txt in the current directory, then answer
+with one line in exactly this form (no other text):
+
+PIPELINE_TEST_COMPLETE <the full NONCE=... line from the file>
+
+The nonce is random and generated per run — it cannot be guessed, so the file
+must actually be read.
