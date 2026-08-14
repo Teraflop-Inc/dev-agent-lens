@@ -50,6 +50,7 @@ services:
       - "127.0.0.1:4000:4000"
     volumes:
       - ./litellm_config_phoenix.yaml:/app/config.yaml
+      - ./thinking_display_hook.py:/app/thinking_display_hook.py
     environment:
       # Anthropic + runtime
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
@@ -248,6 +249,7 @@ services:
     volumes:
       # Use test-specific config that uses host.docker.internal
       - ./litellm_config_test_phoenix.yaml:/app/config.yaml
+      - ./thinking_display_hook.py:/app/thinking_display_hook.py
     environment:
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
 

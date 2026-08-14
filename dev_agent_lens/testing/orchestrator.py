@@ -590,6 +590,35 @@ class TestOrchestrator:
             counts = pd.to_numeric(prompt_tokens, errors="coerce").fillna(0)
             assertions["llm_token_counts_populated"] = bool(counts.gt(0).any())
 
+        # Thinking blocks ride on the callback-synthesized Claude_Code_* spans,
+        # whose span_kind is UNKNOWN — so the thinking gate must scan the WHOLE
+        # frame, not just LLM rows (live run 20260814-134530: summaries present,
+        # LLM-scoped blob missed them).
+        full_parts = [
+            series.astype(str)
+            for series in (
+                _column(spans_df, "raw_attributes", "attributes"),
+                _column(spans_df, "attributes.llm"),
+                _column(spans_df, "attributes.usage_object"),
+                _column(spans_df, "attributes.output.value"),
+                _column(spans_df, "attributes.llm.invocation_parameters"),
+            )
+            if series is not None
+        ]
+        if full_parts:
+            full_blob = full_parts[0]
+            for part in full_parts[1:]:
+                full_blob = full_blob + " " + part
+            if full_blob.str.contains(
+                r"display\\?['\"]\s*:\s*\\?['\"]summarized", na=False, regex=True
+            ).any():
+                has_thinking = full_blob.str.contains(
+                    r"['\"]signature\\?['\"]\s*:", na=False, regex=True
+                ) | full_blob.str.contains(
+                    r"thinking\\?['\"]\s*:\s*\\?['\"][^'\"\\]", na=False, regex=True
+                )
+                assertions["thinking_content_captured"] = bool(has_thinking.any())
+
         # The attribute payload arrives in different shapes per client: one raw JSON
         # string (`raw_attributes`, or `attributes::text` from Postgres), or flattened
         # `attributes.*` columns holding dicts/JSON-strings (the arize-phoenix client).
@@ -603,6 +632,10 @@ class TestOrchestrator:
             for series in (
                 _column(llm_rows, "raw_attributes", "attributes"),
                 _column(llm_rows, "attributes.usage_object"),
+                # packed llm dict: the arize-phoenix client keeps thinking blocks
+                # (incl. summaries + signatures) here, not in the dotted columns —
+                # verified live on run 20260814-134345
+                _column(llm_rows, "attributes.llm"),
                 _column(llm_rows, "attributes.llm.invocation_parameters"),
             )
             if series is not None
@@ -627,25 +660,6 @@ class TestOrchestrator:
                 ).any()
             )
 
-        # Thinking content is only *obtainable* when the request asked for summaries:
-        # with the default `display: "omitted"` the API returns thinking blocks whose
-        # text is empty, so there is genuinely nothing to capture and asserting would
-        # fail for the wrong reason. Gate on the actual `display` PARAMETER — a bare
-        # "summarized" substring false-arms, because invocation_parameters carries the
-        # system prompt and tool descriptions, and ordinary prose contains that word
-        # (live testbed run 20260814-121204 armed exactly that way).
-        if blob.str.contains(
-            r"display\\?['\"]\s*:\s*\\?['\"]summarized", na=False, regex=True
-        ).any():
-            has_thinking = blob.str.contains(
-                # a `signature` *key* (thinking blocks always carry one)…
-                r"['\"]signature\\?['\"]\s*:", na=False, regex=True
-            ) | blob.str.contains(
-                # …or a `thinking` key whose value is a non-empty string (the object
-                # form `"thinking": {…}` in request params deliberately doesn't match)
-                r"thinking\\?['\"]\s*:\s*\\?['\"][^'\"\\]", na=False, regex=True
-            )
-            assertions["thinking_content_captured"] = bool(has_thinking.any())
 
         return assertions
 

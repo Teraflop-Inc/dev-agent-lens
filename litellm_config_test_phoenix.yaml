@@ -13,7 +13,7 @@ model_list:
       api_key: os.environ/ANTHROPIC_API_KEY
 
 litellm_settings:
-  callbacks: ["arize_phoenix"]
+  callbacks: ["arize_phoenix", "thinking_display_hook.proxy_handler_instance"]
   drop_params: false
   set_verbose: true
   pass_through_params: true

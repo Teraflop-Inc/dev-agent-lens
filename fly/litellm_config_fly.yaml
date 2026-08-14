@@ -65,7 +65,7 @@ model_list:
       custom_llm_provider: "anthropic"
 
 litellm_settings:
-  callbacks: ["arize_phoenix"]
+  callbacks: ["arize_phoenix", "thinking_display_hook.proxy_handler_instance"]
   drop_params: false
   set_verbose: false
   pass_through_params: true
