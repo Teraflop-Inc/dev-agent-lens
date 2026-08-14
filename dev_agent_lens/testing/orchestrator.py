@@ -23,6 +23,28 @@ import requests
 
 logger = logging.getLogger(__name__)
 
+# Sentinel LiteLLM substitutes when it strips request content (ENG2-1510).
+REDACTION_SENTINEL = "redacted-by-litellm"
+
+
+def _column(df: pd.DataFrame, *candidates: str) -> pd.Series | None:
+    """Return the first candidate column present, or None.
+
+    Column naming differs between the Phoenix and Arize dataframes and between
+    the raw and normalized schemas, so content assertions look up by fallback
+    rather than assuming one layout.
+    """
+    for name in candidates:
+        if name in df.columns:
+            return df[name]
+    return None
+
+
+def _nonempty(series: pd.Series) -> pd.Series:
+    """Mask of rows whose text is genuinely populated."""
+    text = series.astype(str).str.strip()
+    return text.ne("") & ~text.isin({"None", "nan", "null", "[]", "{}"})
+
 
 class TestBackend(Enum):
     """Supported observability backends for testing."""
@@ -335,20 +357,37 @@ class TestOrchestrator:
                 self.container.stop()
 
     def _setup_run_directory(self) -> None:
-        """Create run directory with symlinks to shared resources."""
+        """Create run directory with copies of shared resources.
+
+        Copies, not symlinks: Claude Code resolves a symlink to its real path,
+        sees it escaping the run directory (its permission sandbox), and refuses
+        the read — which silently killed the `has_read_tool` smoke assertion
+        (observed live: "sample_code inside this run directory is a symlink …
+        pointing outside this session's working directory").
+        """
+        import shutil
+
         self.run_dir.mkdir(parents=True, exist_ok=True)
 
-        # Symlink shared files
         for shared in [".claude.md", "sample_code"]:
             src = self.testbed_root / shared
             dst = self.run_dir / shared
+            if dst.is_symlink():  # heal run dirs created by the old symlink code
+                dst.unlink()
             if not dst.exists() and src.exists():
-                # Use relative symlink for portability
-                try:
-                    dst.symlink_to(os.path.relpath(src, self.run_dir))
-                except OSError:
-                    # Fall back to absolute path if relative fails
-                    dst.symlink_to(src)
+                if src.is_dir():
+                    shutil.copytree(src, dst)
+                else:
+                    shutil.copy2(src, dst)
+
+        # Per-run nonce for the read-roundtrip assertion. A prompt that asks the
+        # model to read a file whose content is guessable proves nothing: Fable 5
+        # answered `numbers=[1, 2, 3, 4, 5]` from prior knowledge without a single
+        # tool call (run 20260814-121846). A random value the model cannot know
+        # forces the Read AND proves the read content survived into the captured
+        # spans end-to-end.
+        self.nonce = uuid.uuid4().hex[:12]
+        (self.run_dir / "nonce.txt").write_text(f"NONCE={self.nonce}\n")
 
     async def _run_claude_code(self) -> None:
         """Execute Claude Code with print mode in run directory."""
@@ -398,23 +437,45 @@ class TestOrchestrator:
         """Pull traces from test project."""
         from dev_agent_lens.clients import ArizeClient, PhoenixClient
 
-        now = datetime.now()
-        start_time = now - timedelta(minutes=15)
-
-        if self.config.backend == TestBackend.PHOENIX:
-            client = PhoenixClient(project_name=self.project_name)
-            return client.get_spans_dataframe(
-                project_name=self.project_name,
-                start_time=start_time,
-                end_time=now,
-            )
-        else:
+        def fetch() -> pd.DataFrame:
+            now = datetime.now()
+            start_time = now - timedelta(minutes=15)
+            if self.config.backend == TestBackend.PHOENIX:
+                client = PhoenixClient(project_name=self.project_name)
+                return client.get_spans_dataframe(
+                    project_name=self.project_name,
+                    start_time=start_time,
+                    end_time=now,
+                )
             client = ArizeClient(model_id=self.project_name)
             return client.get_spans_dataframe(
                 model_id=self.project_name,
                 start_time=start_time,
                 end_time=now,
             )
+
+        # OTLP export is asynchronous: spans keep arriving for a while after the
+        # claude process exits, and validating on the first fetch races ingestion
+        # (observed live: 4 spans at validation, 14 in the store a minute later —
+        # which made `has_read_tool` flap and skipped the content assertions
+        # entirely). Poll until the count is non-zero AND stable across two
+        # consecutive polls, bounded at ~90s.
+        deadline = asyncio.get_event_loop().time() + 90
+        df = await asyncio.to_thread(fetch)
+        stable = 0
+        while asyncio.get_event_loop().time() < deadline:
+            await asyncio.sleep(5)
+            newer = await asyncio.to_thread(fetch)
+            if len(newer) > 0 and len(newer) == len(df):
+                stable += 1
+                if stable >= 2:
+                    logger.info("Span count stable at %d; ingestion settled", len(newer))
+                    return newer
+            else:
+                stable = 0
+            df = newer
+        logger.warning("Span ingestion did not settle within 90s; using %d spans", len(df))
+        return df
 
     def _validate(self, spans_df: pd.DataFrame) -> TestResult:
         """Assert expected traces exist."""
@@ -438,10 +499,19 @@ class TestOrchestrator:
         else:
             assertions["has_llm_spans"] = True  # Assume true if we can't check
 
-        # Check for tool spans by name
+        # Check for tool spans by name. Claude_Code_Tool_* spans are SYNTHESIZED by
+        # the litellm callback, and synthesis is version/tool-dependent — observed
+        # live: Bash synthesized in the test container, Read not, nothing at all on
+        # the tailnet proxy. So name assertions only run when synthesis is provably
+        # active (some Tool span exists); the read guarantee itself comes from
+        # read_content_roundtrip above, which doesn't depend on synthesis.
         if "name" in spans_df.columns:
             names = spans_df["name"].astype(str)
-            assertions["has_read_tool"] = names.str.contains("Read", case=False, na=False).any()
+            synthesis_active = names.str.contains("Claude_Code_Tool_", na=False).any()
+            if synthesis_active:
+                assertions["has_read_tool"] = names.str.contains(
+                    "Read", case=False, na=False
+                ).any()
 
             # Check for subagent (Task) tool - only assert if prompt expects it
             has_task = names.str.contains("Task", case=False, na=False).any()
@@ -452,9 +522,8 @@ class TestOrchestrator:
             has_ask_user = names.str.contains("AskUserQuestion", case=False, na=False).any()
             if has_ask_user or "ask_user" in self.config.prompt_file:
                 assertions["has_ask_user_question_tool"] = has_ask_user
-        else:
-            # Can't verify without name column
-            assertions["has_read_tool"] = True
+
+        assertions.update(self._content_assertions(spans_df))
 
         return TestResult(
             test_run_id=self.config.test_run_id,
@@ -462,6 +531,137 @@ class TestOrchestrator:
             assertions=assertions,
             span_count=len(spans_df),
         )
+
+    def _content_assertions(self, spans_df: pd.DataFrame) -> dict[str, bool]:
+        """Assert spans actually carry content, not just that they exist.
+
+        Span *existence* is not capture. Two real defects shipped green against the
+        existence-only assertions above, because both produce perfectly well-formed
+        spans that happen to be hollow:
+
+        * ENG2-1510 — six weeks where ~98% of `input.value` was the literal string
+          `redacted-by-litellm`. Still an LLM span, still had tool names.
+        * The thinking-capture gap — 16,347 adaptive-thinking spans over 30 days with
+          zero thinking content and zero `signature` fields, going back as far as the
+          retention window reaches.
+
+        Each assertion here is gated on the signal being applicable, matching the
+        conditional style used for `has_task_tool` above: an assertion that cannot
+        apply is omitted rather than trivially passed, so a green run means the
+        checks that ran actually verified something.
+        """
+        assertions: dict[str, bool] = {}
+
+        # Read-content roundtrip: the per-run nonce (written by _setup_run_directory,
+        # readable only via the Read tool) must appear somewhere in the captured
+        # spans. This proves in one check that the model actually performed the read
+        # AND that tool/content capture stored it — name-matching a Read span proves
+        # neither. Scans every column: the nonce may land in tool spans, input
+        # messages (tool_result), or output text depending on the capture shape.
+        nonce = getattr(self, "nonce", None)
+        if nonce:
+            assertions["read_content_roundtrip"] = bool(
+                spans_df.astype(str)
+                .apply(lambda col: col.str.contains(nonce, na=False).any())
+                .any()
+            )
+
+        kind = _column(spans_df, "span_kind", "kind")
+        llm_rows = spans_df[kind == "LLM"] if kind is not None else spans_df
+        if llm_rows.empty:
+            return assertions
+
+        inputs = _column(llm_rows, "input_value", "attributes.input.value")
+        if inputs is not None:
+            text = inputs.astype(str)
+            populated = _nonempty(inputs) & ~text.str.contains(REDACTION_SENTINEL, na=False)
+            assertions["llm_input_content_populated"] = bool(populated.any())
+
+        outputs = _column(
+            llm_rows, "output_messages", "output_value", "attributes.llm.output_messages"
+        )
+        if outputs is not None:
+            assertions["llm_output_content_populated"] = bool(_nonempty(outputs).any())
+
+        prompt_tokens = _column(
+            llm_rows, "llm_token_count_prompt", "attributes.llm.token_count.prompt"
+        )
+        if prompt_tokens is not None:
+            counts = pd.to_numeric(prompt_tokens, errors="coerce").fillna(0)
+            assertions["llm_token_counts_populated"] = bool(counts.gt(0).any())
+
+        # Thinking blocks ride on the callback-synthesized Claude_Code_* spans,
+        # whose span_kind is UNKNOWN — so the thinking gate must scan the WHOLE
+        # frame, not just LLM rows (live run 20260814-134530: summaries present,
+        # LLM-scoped blob missed them).
+        full_parts = [
+            series.astype(str)
+            for series in (
+                _column(spans_df, "raw_attributes", "attributes"),
+                _column(spans_df, "attributes.llm"),
+                _column(spans_df, "attributes.usage_object"),
+                _column(spans_df, "attributes.output.value"),
+                _column(spans_df, "attributes.llm.invocation_parameters"),
+            )
+            if series is not None
+        ]
+        if full_parts:
+            full_blob = full_parts[0]
+            for part in full_parts[1:]:
+                full_blob = full_blob + " " + part
+            if full_blob.str.contains(
+                r"display\\?['\"]\s*:\s*\\?['\"]summarized", na=False, regex=True
+            ).any():
+                has_thinking = full_blob.str.contains(
+                    r"['\"]signature\\?['\"]\s*:", na=False, regex=True
+                ) | full_blob.str.contains(
+                    r"thinking\\?['\"]\s*:\s*\\?['\"][^'\"\\]", na=False, regex=True
+                )
+                assertions["thinking_content_captured"] = bool(has_thinking.any())
+
+        # The attribute payload arrives in different shapes per client: one raw JSON
+        # string (`raw_attributes`, or `attributes::text` from Postgres), or flattened
+        # `attributes.*` columns holding dicts/JSON-strings (the arize-phoenix client).
+        # Concatenate whatever is present into one searchable blob per row, and keep
+        # every pattern quote-agnostic — nested JSON strings arrive with their quotes
+        # backslash-escaped, and dict cells stringify with single quotes, so a plain
+        # `"summarized"` pattern silently never matches either. (That exact bug hid
+        # case 3 during development; don't reintroduce it.)
+        blob_parts = [
+            series.astype(str)
+            for series in (
+                _column(llm_rows, "raw_attributes", "attributes"),
+                _column(llm_rows, "attributes.usage_object"),
+                # packed llm dict: the arize-phoenix client keeps thinking blocks
+                # (incl. summaries + signatures) here, not in the dotted columns —
+                # verified live on run 20260814-134345
+                _column(llm_rows, "attributes.llm"),
+                _column(llm_rows, "attributes.llm.invocation_parameters"),
+            )
+            if series is not None
+        ]
+        if not blob_parts:
+            return assertions
+        blob = blob_parts[0]
+        for part in blob_parts[1:]:
+            blob = blob + " " + part
+
+        # Cache accounting: only assert once the backend reports the fields at all,
+        # so this doesn't fail on a provider that never emits them. Either field arms
+        # the gate — a span can carry only cache_creation (first write, no read yet).
+        if blob.str.contains(
+            r"cache_(?:read|creation)_input_tokens", na=False, regex=True
+        ).any():
+            assertions["cache_token_breakdown_populated"] = bool(
+                blob.str.contains(
+                    r"cache_(?:read|creation)_input_tokens\\?['\"]?\s*:\s*[1-9]",
+                    na=False,
+                    regex=True,
+                ).any()
+            )
+
+
+        return assertions
 
     def cleanup_run_dir(self) -> None:
         """Remove the run directory."""

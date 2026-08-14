@@ -55,7 +55,7 @@ model_list:
 
 litellm_settings:
   # Enable Arize Phoenix callbacks for local observability
-  callbacks: ["arize_phoenix"]
+  callbacks: ["arize_phoenix", "thinking_display_hook.proxy_handler_instance"]
 
   # Don't drop any parameters - preserve everything Claude Code sends
   drop_params: false
