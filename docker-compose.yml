@@ -7,7 +7,7 @@ services:
   litellm-proxy:
     image: aowen14/litellm-oauth-fix:latest
     ports:
-      - "4000:4000"
+      - "127.0.0.1:4000:4000"
     volumes:
       - ./litellm_config_arize.yaml:/app/config.yaml
     environment:
@@ -47,7 +47,7 @@ services:
   litellm-proxy-phoenix:
     image: aowen14/litellm-oauth-fix:latest
     ports:
-      - "4000:4000"
+      - "127.0.0.1:4000:4000"
     volumes:
       - ./litellm_config_phoenix.yaml:/app/config.yaml
     environment:
@@ -105,8 +105,8 @@ services:
     # arm64 image is fixed.
     platform: linux/amd64
     ports:
-      - "6006:6006" # Phoenix UI
-      - "4317:4317" # OTLP gRPC endpoint
+      - "127.0.0.1:6006:6006" # Phoenix UI
+      - "127.0.0.1:4317:4317" # OTLP gRPC endpoint
     environment:
       - PHOENIX_PORT=6006
       - PHOENIX_HOST=0.0.0.0
@@ -156,7 +156,7 @@ services:
       postgres:
         condition: service_healthy
     ports:
-      - "4001:4000" # Different port to avoid conflict
+      - "127.0.0.1:4001:4000" # Different port to avoid conflict
     volumes:
       - ./litellm_config.yaml:/app/config.yaml
     environment:
@@ -210,7 +210,7 @@ services:
   litellm-test-arize:
     image: aowen14/litellm-oauth-fix:latest
     ports:
-      - "4100:4000"
+      - "127.0.0.1:4100:4000"
     volumes:
       - ./litellm_config_arize.yaml:/app/config.yaml
     environment:
@@ -244,7 +244,7 @@ services:
   litellm-test-phoenix:
     image: aowen14/litellm-oauth-fix:latest
     ports:
-      - "4101:4000"
+      - "127.0.0.1:4101:4000"
     volumes:
       # Use test-specific config that uses host.docker.internal
       - ./litellm_config_test_phoenix.yaml:/app/config.yaml
