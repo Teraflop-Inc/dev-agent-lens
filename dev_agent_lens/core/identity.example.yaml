@@ -31,6 +31,8 @@ people:
         evidence: os_user=personb (N spans, Nd)
         note: Second account, same human — inferred, not yet self-reported.
 
-# Accounts seen in the data that map to no person (e.g. sandbox VMs, which carry
-# no account_uuid). Keep them here so `is_complete` reflects reality.
+# Accounts seen in the data that map to no person. Keep them here so `is_complete`
+# reflects reality. NOTE: an absent account_uuid does NOT mean "a sandbox VM" — that
+# is backwards. Sandbox spans are 93.6% attributed; 98.5% of unattributed spans are
+# laptop traffic (measured 2026-08-12, ENG2-1509).
 unclaimed: []

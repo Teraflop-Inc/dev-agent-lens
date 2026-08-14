@@ -79,7 +79,7 @@ class IdentityMap:
         if person:
             return person.email
         if not account_uuid:
-            return "(sandbox/unattributed)"
+            return "(unattributed)"
         return f"(unclaimed:{account_uuid[:8]})"
 
     @property

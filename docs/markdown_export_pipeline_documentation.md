@@ -61,7 +61,11 @@ class PhoenixClient:
 - `context.trace_id` - Trace group identifier
 - `parent_id` - Parent span reference
 - `name` - Span name (e.g., "Claude_Code_Tool_Read")
-- `span_kind` - Type: LLM, TOOL, CHAIN, etc.
+- `span_kind` - Type: LLM, TOOL, CHAIN, etc. **In our corpus this is effectively
+  `LLM` or `UNKNOWN` only** — measured 2026-08-12: LLM 110,018 · UNKNOWN 18,249 · TOOL 1,080
+  (all TOOL rows dated 2026-08-12, i.e. brand new). **Do not filter on `span_kind='TOOL'`
+  to find tool activity** — the tool record lives in `<workspace_*>.sandbox_agent_events`.
+  See [query-cookbook.md Recipe 8](query-cookbook.md#8-what-tools-did-the-agent-actually-run).
 - `attributes` - Nested JSON with all metadata
 - `start_time`, `end_time` - Timestamps
 
@@ -389,7 +393,7 @@ class UnifiedSpan(TypedDict, total=False):
     trace_id: str
     parent_id: str | None
     name: str
-    span_kind: str | None        # LLM, TOOL, CHAIN
+    span_kind: str | None        # in practice: LLM or UNKNOWN (see §1.1 — not a tool index)
     start_time: str              # ISO-8601
     end_time: str | None         # ISO-8601
     status_code: str | None

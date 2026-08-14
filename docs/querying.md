@@ -8,8 +8,47 @@ Two ways to query the team's Claude Code trace data:
    heavy queries over a source you've pulled down.
 
 Start with (1). It needs nothing but the connection string. For copy-paste recipes that
-answer real questions (who's active, one person's sessions, learning-vs-building, blockers),
-see the [query cookbook](query-cookbook.md).
+answer real questions (who's active, one person's sessions, learning-vs-building, blockers,
+tool usage, autonomy ratio), see the [query cookbook](query-cookbook.md).
+
+---
+
+## The two surfaces
+
+**`phoenix.spans` is not the whole world.** It is one of two capture surfaces in the same
+Postgres, and picking the wrong one is the most expensive mistake you can make against this
+data — it looks like an empty result, not like an error.
+
+| Surface | Holds | Scale (2026-08-12) |
+|---|---|---|
+| `phoenix.spans` | what the **model** saw and said — one `litellm_request` span per model call, JSONB `attributes` | 129,347 spans, 2026-05-06 → present |
+| `<workspace_*>.sandbox_agent_events` | what the **agent did** — tool calls, statuses, prompts; `tool_name` / `tool_call_id` / `status` are first-class columns | 17 schemas (11 populated), 1,218 `tool_call` events |
+
+They join on `session_id` — but **not by the path you would guess.** `session_id` is **not** at `attributes->'metadata'->>'session_id'` — that path returns **0 rows**. It is nested inside the same field the account id lives in:
+
+```sql
+CASE WHEN attributes->'metadata'->>'user_api_key_end_user_id' LIKE '{%'
+     THEN ((attributes->'metadata'->>'user_api_key_end_user_id')::jsonb)->>'session_id' END
+```
+
+That resolves on 67,128 spans; 102 of the 117 `sandbox_agent_events` sessions (87%) match.
+
+That lets "what the model said" line up with "what the agent did" per sandbox run.
+
+**Rules of thumb.** Questions about people, tokens, cost, or prompt text → `phoenix.spans`.
+Questions about tools, agent actions, or anything in the 2026-08-03 → 08-12 redaction window
+→ `sandbox_agent_events`. `span_kind = 'TOOL'` only exists from 2026-08-12 onward (4,721
+spans by 08-14, growing) — usable for windows after that date, absent by construction before
+it, and synthesis is proxy/tool-dependent; see
+[Recipe 8](query-cookbook.md#8-what-tools-did-the-agent-actually-run) before you go looking
+for one.
+
+Two further surfaces exist outside this Postgres and are worth knowing about: the local
+session JSONLs in `~/.claude/projects/` (richest per-session record, pruned ~30 days,
+per-machine) and the parquet archive at `~/dal-archive/phoenix-2026-08-03` + S3 — that local
+path is per-machine and may not exist on yours; the S3 copy is the durable one — (full
+pre-cleanup span history). See
+[dal-db-learnings-oltp-olap.md](design/dal-db-learnings-oltp-olap.md) for the full inventory.
 
 ---
 
@@ -61,13 +100,13 @@ SELECT 1;"
 ### The one rule that matters: push work down with `postgres_query()`
 
 A plain `SELECT … FROM pg.phoenix.spans` streams every row to your machine and then
-filters — over 1.2M spans it crawls or times out. Wrap aggregates in `postgres_query()`
+filters. Wrap aggregates in `postgres_query()`
 so Postgres does the work and only the summary crosses the wire:
 
 ```sql
 -- who is active, last 14 days
 SELECT * FROM postgres_query('pg', $$
-  SELECT ((attributes->'metadata'->>'user_api_key_end_user_id')::jsonb)->>'account_uuid' AS account_uuid,
+  SELECT CASE WHEN attributes->'metadata'->>'user_api_key_end_user_id' LIKE '{%' THEN ((attributes->'metadata'->>'user_api_key_end_user_id')::jsonb)->>'account_uuid' END AS account_uuid,
          count(*) AS spans, max(start_time)::date AS last_seen
   FROM phoenix.spans
   WHERE start_time > now() - INTERVAL '14 days'
@@ -89,7 +128,9 @@ placeholder `oauth@claude-code.ai`. The `account_uuid → person` map lives in
 from dev_agent_lens.core.identity import label_account, resolve_account
 
 label_account("00000000-0000-0000-0000-000000000001")   # -> 'person-a@example.com'
-resolve_account("00000000-0000-0000-0000-000000000002").email   # -> 'person-b@example.com'
+resolve_account("00000000-0000-0000-0000-000000000002")          # -> Person | None
+# NB: these placeholder uuids are in no real map, so resolve_account() returns None and
+# chaining .email raises AttributeError. Guard it, or use label_account() which never raises.
 ```
 
 Unknown accounts resolve to `None` (never a guess). One person can own several accounts —
@@ -120,8 +161,9 @@ spans = con.execute("""
            coalesce(llm_token_count_prompt,0)+coalesce(llm_token_count_completion,0) AS tokens
     FROM phoenix.spans
     WHERE start_time > now() - INTERVAL '30 days'
-      AND ((attributes->'metadata'->>'user_api_key_end_user_id')::jsonb)->>'account_uuid'
-          = '<account-uuid>'   -- resolve a person's uuid(s) via core.identity
+      -- '<account-uuid>': resolve a person's uuid(s) via core.identity
+      AND CASE WHEN attributes->'metadata'->>'user_api_key_end_user_id' LIKE '{%' THEN ((attributes->'metadata'->>'user_api_key_end_user_id')::jsonb)->>'account_uuid' END
+          = '<account-uuid>'
   $q$)
 """).df()
 
@@ -129,9 +171,12 @@ for s in summarize(spans):          # ~46 real sessions, not 1 thread
     print(s.start.date(), f"{s.minutes:.0f}min", s.spans, "spans")
 ```
 
-`extract_human_turns()` matters just as much: ~46% of what parses as a user message is the
-agent talking to itself (`Perform a web search for the query: …`, statusline prompts, tool
-results). Any "what did they ask Claude?" analysis that skips it is roughly half wrong.
+`extract_human_turns()` matters just as much: a large share of what parses as a user message
+is the agent talking to itself (`Perform a web search for the query: …`, statusline prompts,
+tool results). Any "what did they ask Claude?" analysis that skips it is badly wrong. **The
+drop rate is corpus-dependent — 40.9% on `phoenix.spans` vs 72% on the local session JSONLs;
+don't carry one number across.** See
+[query-cookbook.md Recipe 3](query-cookbook.md#3-what-did-they-actually-type-human-turns-no-agent-noise).
 
 ### Known limits (you will hit these)
 
@@ -139,8 +184,10 @@ results). Any "what did they ask Claude?" analysis that skips it is roughly half
   concurrent clients**. Under load you'll see `FATAL: (EMAXCONNSESSION) max clients
   reached`. The transaction pooler (`:6543`) does *not* help — DuckDB needs the session
   pooler's `REPEATABLE READ`. Close DuckDB when idle.
-- **No index on `attributes`.** Aggregates over the JSON identity fields beyond ~30 days
-  hit Supabase's `statement_timeout`. Narrow the window, or narrow the account first.
+- **No index on `attributes`.** This used to mean aggregates beyond ~30 days hit Supabase's
+  `statement_timeout`. Post-debloat (129k spans, not 1.2M) full-corpus scans measured
+  6–18s on 2026-08-12 — narrow the window or the account only if you actually hit a
+  timeout, not pre-emptively.
 
 ---
 

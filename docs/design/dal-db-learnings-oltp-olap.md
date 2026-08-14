@@ -19,7 +19,7 @@ when that stops being true.
 | Store | What | Scale (2026-08-04) |
 |---|---|---|
 | `phoenix.spans` (shared Supabase) | LLM traces: litellm → Phoenix callback, one `litellm_request` span per model call, JSONB `attributes` | 81k spans, **584 MB** incl. 150 MB trgm index (was 31 GB on 07-28) |
-| `workspace_*.sandbox_agent_events` / `_sessions` | ACP rollout capture: what the sandboxed agent *did* (tool calls, status, prompts), joinable to spans by `session_id` | 13.6k events, 115 sessions, 16 schemas |
+| `workspace_*.sandbox_agent_events` / `_sessions` | ACP rollout capture: what the sandboxed agent *did* (tool calls, status, prompts), joinable to spans by `session_id` | 13.6k events, 115 sessions, 17 schemas (11 populated, 2026-08-12) |
 | Local session JSONLs (`~/.claude/projects/`) | Claude Code's own transcripts — richest per-session record, but pruned ~30 days and per-machine | 132 sessions (Jul 7 →) |
 | Parquet archive (`~/dal-archive/phoenix-2026-08-03` + S3) | Full pre-cleanup span history, twice-verified (exact id-set equality) | 27 GB, 1.31M spans, May 6 → Aug 3 |
 | `dal_catalog.sessions` (new, ENG2-1470) | Precomputed per-session lookup: person, category, summary, ticket mentions | 1,333 sessions, 19 categories |
@@ -138,7 +138,8 @@ ENG2-1462's build-vs-buy question with real evidence.
    construction.
 
 **Open questions:**
-- Rollout identity: 550 non-noise sessions have no account tag (sandbox VMs mint no
+- Rollout identity: 550 non-noise sessions have no account tag (NOT because they are
+  sandbox VMs — sandbox spans are 93.6% attributed; see ENG2-1509) (sandbox VMs mint no
   identity). Worth threading `account_uuid` through the rollout env so evals attribute?
 - Archive cadence: parquet sync is manual today; post-08-03 spans exist only in hot PG.
   Monthly cron?

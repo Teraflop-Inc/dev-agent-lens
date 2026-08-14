@@ -10,7 +10,7 @@ This document describes the unified schema used by `dev_agent_lens` to normalize
 | `trace_id` | `str` | Identifier for the trace this span belongs to |
 | `parent_id` | `str \| None` | ID of the parent span (None for root spans) |
 | `name` | `str` | Name/label of the span |
-| `span_kind` | `str \| None` | Type of span (LLM, TOOL, CHAIN, etc.) |
+| `span_kind` | `str \| None` | Type of span (LLM, TOOL, CHAIN, etc.). **In the shared corpus this is effectively `LLM` or `UNKNOWN` only** — do not filter `span_kind='TOOL'` to find tool activity; see [query-cookbook.md Recipe 8](docs/query-cookbook.md#8-what-tools-did-the-agent-actually-run) |
 | `start_time` | `str` | ISO-8601 timestamp when span started |
 | `end_time` | `str \| None` | ISO-8601 timestamp when span ended |
 | `status_code` | `str \| None` | Status of the span (OK, ERROR, etc.) |
