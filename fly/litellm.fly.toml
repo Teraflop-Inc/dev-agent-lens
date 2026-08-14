@@ -97,6 +97,13 @@ primary_region = "iad"
   guest_path = "/app/config.yaml"
   local_path = "fly/litellm_config_fly.yaml"
 
+# Thinking-summaries hook (ENG2-1487): forces display="summarized" on adaptive
+# requests so reasoning text lands in Phoenix. Rollback = drop the callback
+# entry in litellm_config_fly.yaml and redeploy.
+[[files]]
+  guest_path = "/app/thinking_display_hook.py"
+  local_path = "thinking_display_hook.py"
+
 [processes]
   # Mirrors the docker-compose command for litellm-proxy-phoenix.
   # --host :: makes uvicorn bind dual-stack instead of IPv4-only; without
