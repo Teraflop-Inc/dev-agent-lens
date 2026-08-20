@@ -99,7 +99,10 @@ services:
 
   # Phoenix observability server (use with --profile phoenix)
   phoenix:
-    image: arizephoenix/phoenix:latest
+    # PINNED (2026-08-20). Migrations run on every start and are forward-only.
+    # With PHOENIX_SQL_DATABASE_URL set this container migrates the SHARED
+    # Supabase schema -- a :latest pull here took sf-phoenix down for ~9h.
+    image: arizephoenix/phoenix@sha256:b966eeed832d319a779a89fc6aa642924a82c4eff00c8974b23a0d224e8c3bb4
     # arizephoenix/phoenix:latest's linux/arm64 build crashes on Apple Silicon
     # with SIGILL (exit 132) before producing any log output. The linux/amd64
     # build runs fine under Rosetta emulation. Pin platform until the upstream
