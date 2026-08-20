@@ -22,7 +22,12 @@ app = "sf-phoenix"
 primary_region = "iad"
 
 [build]
-  image = "arizephoenix/phoenix:latest"
+  # PINNED (2026-08-20). Phoenix runs alembic migrations on every start and they
+  # are forward-only. On 2026-08-20 a newer image migrated the SHARED Supabase
+  # schema to an unreleased revision (4aad9107d196) and sf-phoenix could not start
+  # for ~9h. Any Phoenix pointed at PHOENIX_SQL_DATABASE_URL can do this. Do not
+  # move this back to :latest -- bump the digest deliberately, together.
+  image = "arizephoenix/phoenix@sha256:b966eeed832d319a779a89fc6aa642924a82c4eff00c8974b23a0d224e8c3bb4"
 
 [env]
   PHOENIX_PORT = "6006"
