@@ -250,3 +250,125 @@ def session_file_to_atif(path: str | Path) -> tuple[dict[str, Any], Counter[str]
                     logger.debug("[atif] skipping unparseable line in %s", path)
 
     return session_to_atif(_lines())
+
+
+#: Prefix Claude Code gives a subagent's own transcript file.
+SUBAGENT_FILE_PREFIX = "agent-"
+
+
+def _task_call_map(path: Path) -> dict[str, str]:
+    """
+    Map ``agentId`` -> the Task ``tool_use_id`` that spawned it.
+
+    A subagent's transcript lands in a sibling ``agent-<agentId>.jsonl``. The
+    only thing tying it back to the parent is the ``toolUseResult.agentId`` on
+    the parent's Task result line, whose ``tool_result`` block carries the
+    originating call id.
+    """
+    calls: dict[str, str] = {}
+    with path.open(errors="replace") as handle:
+        for raw in handle:
+            try:
+                line = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            result = line.get("toolUseResult")
+            if not isinstance(result, dict) or not result.get("agentId"):
+                continue
+            content = (line.get("message") or {}).get("content")
+            if not isinstance(content, list):
+                continue
+            for part in content:
+                if isinstance(part, dict) and part.get("type") == "tool_result":
+                    calls[result["agentId"]] = part.get("tool_use_id")
+                    break
+    return calls
+
+
+def _attach_subagent_ref(trajectory: dict[str, Any], call_id: str, trajectory_id: str) -> bool:
+    """Point the observation for ``call_id`` at an embedded subagent trajectory."""
+    for step in trajectory.get("steps", []):
+        for result in (step.get("observation") or {}).get("results", []):
+            if result.get("source_call_id") == call_id:
+                result.setdefault("subagent_trajectory_ref", []).append(
+                    {"trajectory_id": trajectory_id}
+                )
+                return True
+    return False
+
+
+def session_tree_to_atif(
+    directory: str | Path,
+) -> tuple[list[dict[str, Any]], Counter[str]]:
+    """
+    Convert a directory of Claude Code session JSONL files to ATIF trajectories.
+
+    One trajectory per real session, with each ``agent-<agentId>.jsonl``
+    sidechain embedded in ``subagent_trajectories`` and referenced from the Task
+    observation that spawned it, so harbor-atif2otel nests the subagent spans
+    under their Task span.
+
+    Converting each file standalone instead is a trap worth naming: every
+    sidechain records the PARENT's ``sessionId``, and harbor-atif2otel seeds
+    trace ids from ``session_id`` and span ids from
+    ``{trace_id}:{trajectory_id}``. A directory of 57 files would collapse onto
+    2 trace ids with identical span seeds, and the collisions would silently
+    drop most of the spans. Giving every subagent a distinct ``trajectory_id``
+    is what keeps them apart.
+
+    Returns:
+        ``(trajectories, stats)``.
+    """
+    directory = Path(directory)
+    stats: Counter[str] = Counter()
+
+    files = sorted(directory.rglob("*.jsonl"))
+    subagents = {
+        f.name[len(SUBAGENT_FILE_PREFIX) : -len(".jsonl")]: f
+        for f in files
+        if f.name.startswith(SUBAGENT_FILE_PREFIX)
+    }
+    mains = [f for f in files if not f.name.startswith(SUBAGENT_FILE_PREFIX)]
+    logger.info(
+        "[atif] tree=%s sessions=%d subagent_files=%d",
+        directory, len(mains), len(subagents),
+    )
+
+    trajectories: list[dict[str, Any]] = []
+    for main in mains:
+        trajectory, session_stats = session_file_to_atif(main)
+        stats.update(session_stats)
+
+        embedded: list[dict[str, Any]] = []
+        for agent_id, call_id in _task_call_map(main).items():
+            sub_file = subagents.get(agent_id)
+            if sub_file is None:
+                # Task ran outside the exported window; its transcript is absent.
+                stats["subagent_transcript_missing"] += 1
+                continue
+            sub, _ = session_file_to_atif(sub_file)
+            trajectory_id = f"{SUBAGENT_FILE_PREFIX}{agent_id}"
+            # session_id stays the parent's (ATIF v1.7 allows sharing it);
+            # trajectory_id is what must be unique.
+            sub["trajectory_id"] = trajectory_id
+            embedded.append(sub)
+            if _attach_subagent_ref(trajectory, call_id, trajectory_id):
+                stats["subagent_linked"] += 1
+            else:
+                stats["subagent_unlinked"] += 1
+                logger.warning(
+                    "[atif] no observation for call_id=%s (agent=%s)", call_id, agent_id
+                )
+        if embedded:
+            trajectory["subagent_trajectories"] = embedded
+
+        logger.info(
+            "[atif] session=%s steps=%d subagents=%d",
+            trajectory.get("session_id"),
+            len(trajectory["steps"]),
+            len(embedded),
+        )
+        trajectories.append(trajectory)
+        stats["sessions"] += 1
+
+    return trajectories, stats
