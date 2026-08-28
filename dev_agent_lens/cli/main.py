@@ -4458,6 +4458,140 @@ def export_events(
     click.echo(f"Output: {result.output_path}")
 
 
+@main.command("export-atif")
+@click.argument("source", type=click.Path(exists=True))
+@click.option(
+    "--output",
+    "-o",
+    "output_path",
+    type=str,
+    required=True,
+    help="Output path for the ATIF JSON (a list of trajectories)",
+)
+def export_atif(source, output_path):
+    """Convert Claude Code session JSONL to ATIF trajectories.
+
+    SOURCE is a single .jsonl session file, or a directory of them. For a
+    directory, each `agent-<agentId>.jsonl` sidechain is embedded in its
+    parent's `subagent_trajectories` and referenced from the Task observation
+    that spawned it, so the subagent spans nest correctly downstream.
+
+    \b
+    Examples:
+        dal export-atif ~/.claude/projects/<encoded-repo> -o traj.json
+        dal export-atif session.jsonl -o traj.json
+    """
+    import json
+    from pathlib import Path
+
+    from dev_agent_lens.export.atif import session_file_to_atif, session_tree_to_atif
+
+    src = Path(source)
+    if src.is_dir():
+        trajectories, stats = session_tree_to_atif(src)
+    else:
+        trajectory, stats = session_file_to_atif(src)
+        trajectories = [trajectory]
+
+    out = Path(output_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(trajectories))
+
+    subagents = sum(len(t.get("subagent_trajectories", [])) for t in trajectories)
+    click.echo(f"Trajectories: {len(trajectories)}")
+    click.echo(f"Steps: {sum(len(t['steps']) for t in trajectories):,}")
+    click.echo(f"Tool calls: {stats['tool_calls']:,}")
+    if subagents:
+        click.echo(f"Subagents embedded: {subagents} (linked: {stats['subagent_linked']})")
+    if stats.get("subagent_transcript_missing"):
+        click.echo(
+            click.style(
+                f"Task calls with no transcript in SOURCE: "
+                f"{stats['subagent_transcript_missing']}",
+                fg="yellow",
+            )
+        )
+    if stats.get("orphan_tool_result"):
+        click.echo(
+            click.style(f"Orphan tool results: {stats['orphan_tool_result']}", fg="yellow")
+        )
+    click.echo(f"Output: {out}")
+
+
+@main.command("push-atif")
+@click.argument("trajectories_path", type=click.Path(exists=True))
+@click.option("--endpoint", required=True, help="OTLP HTTP base URL, e.g. http://127.0.0.1:6006")
+@click.option("--project", required=True, help="Destination project name")
+@click.option("--user", "user_id", default=None, help="Stamp user.id on every span")
+@click.option(
+    "--chunk-size",
+    type=int,
+    default=100,
+    help="Spans per request (default: 100). Large requests are dropped by a full queue.",
+)
+@click.option("--pause", type=float, default=1.0, help="Seconds between requests (default: 1.0)")
+@click.option("--dry-run", is_flag=True, help="Convert and validate without sending")
+def push_atif(trajectories_path, endpoint, project, user_id, chunk_size, pause, dry_run):
+    """Push ATIF trajectories to an OTLP backend (Phoenix).
+
+    Safe to re-run: trace and span ids are derived deterministically, so spans
+    that already landed are no-ops.
+
+    A finished push means every chunk was ACCEPTED, which is not the same as
+    stored -- the backend enqueues and answers before it writes. Confirm by
+    counting rows in the backing store.
+
+    \b
+    Example:
+        dal push-atif traj.json --endpoint http://127.0.0.1:6006 \\
+            --project claude-code-sessions --user alice
+    """
+    import json
+    from pathlib import Path
+
+    from dev_agent_lens.export.otlp import push_trajectories
+
+    trajectories = json.loads(Path(trajectories_path).read_text())
+    try:
+        result = push_trajectories(
+            endpoint=endpoint,
+            trajectories=trajectories,
+            project=project,
+            user_id=user_id,
+            chunk_size=chunk_size,
+            pause=pause,
+            dry_run=dry_run,
+        )
+    except (ImportError, ValueError) as exc:
+        click.echo(click.style(str(exc), fg="red"))
+        raise SystemExit(1)
+
+    click.echo(f"Spans: {result.spans_total:,}")
+    if result.clamped_spans:
+        click.echo(f"Clamped (end before start): {result.clamped_spans}")
+    if dry_run:
+        click.echo("Dry run: nothing sent")
+        return
+    click.echo(f"Accepted: {result.spans_sent:,} in {result.requests:,} requests")
+    if result.retries_503:
+        click.echo(f"Backoff waits (queue full): {result.retries_503}")
+    if not result.complete:
+        click.echo(
+            click.style(
+                f"INCOMPLETE: {result.failed_chunks} failed, "
+                f"{result.exhausted_chunks} gave up. Re-run to fill the gaps.",
+                fg="red",
+            )
+        )
+        raise SystemExit(1)
+    click.echo(
+        click.style(
+            "All chunks accepted. Verify persistence by counting rows in the backend.",
+            fg="green",
+        )
+    )
+
+
 @main.command("query-events")
 @click.option(
     "--source",

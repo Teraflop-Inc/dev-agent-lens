@@ -39,6 +39,14 @@ dev = [
     "pytest-cov>=4.0.0",
     "ruff>=0.1.0",
 ]
+# `dal push-atif` only. Kept optional so the core CLI has no OTel dependency.
+# harbor-atif2otel needs 3.12+ while this package supports 3.11, so it is
+# marker-gated; on 3.11 the import fails with an actionable message instead of
+# making the whole extra unresolvable.
+otlp = [
+    "harbor-atif2otel>=0.1.0; python_version >= '3.12'",
+    "opentelemetry-proto>=1.20.0",
+]
 
 [project.scripts]
 dal = "dev_agent_lens.cli.main:main"
