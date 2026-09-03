@@ -331,15 +331,40 @@ The `sf-workspaces` project label currently covers *both* laptop work and sandbo
 (ENG2-1375 — a static proxy config). Until that's fixed, tell them apart by sandbox
 provenance on the span rather than the project name:
 
+> **⚠ Corrected 2026-09-03. The previous version of this recipe substantially over-counted
+> sandboxes.** It tested `attributes::text LIKE '%sandbox_id%'`, which scans the *whole* span
+> blob — including the attribute that holds the conversation, which dominates a span's bytes.
+> Any span whose conversation merely *mentions* `sandbox_id` matched: a rollout transcript, a
+> ticket under discussion, this page. The great majority of matches were false positives.
+>
+> **The general rule: never pattern-match `attributes::text` for provenance.** This corpus
+> stores prose, so a substring test answers "was this discussed?" and not "where did this run?"
+> Match on the structured field that carries the fact.
+
+Sandbox provenance lives in the litellm metadata header, not anywhere in the payload:
+
 ```sql
 SELECT * FROM postgres_query('pg', $$
-  SELECT CASE WHEN attributes::text LIKE '%sandbox_id%' THEN 'sandbox' ELSE 'laptop' END AS kind,
+  SELECT CASE WHEN CASE WHEN (attributes->'metadata'->'requester_custom_headers'->>'x-litellm-metadata') LIKE '{%'
+                        THEN ((attributes->'metadata'->'requester_custom_headers'->>'x-litellm-metadata')::jsonb)->>'sandbox_id' END
+              IS NOT NULL THEN 'sandbox' ELSE 'laptop' END AS kind,
          count(*) AS spans
   FROM phoenix.spans
   WHERE start_time > now() - INTERVAL '7 days'
   GROUP BY 1
 $$);
 ```
+
+Guard the `::jsonb` cast as shown — the header is a JSON *string*, and an unguarded cast
+aborts the query on any row where it is absent or malformed. To get the sandbox ids
+themselves, select that same `CASE` expression instead of collapsing it to a label; it
+yields the sandbox identifier, which joins to `sandbox_agent_events`.
+
+**Scope, so the number is not over-read:** this detects sandboxes whose traffic routes
+through litellm *and* carries the header. A rollout that bypasses the proxy is invisible
+here, so treat the sandbox count as a floor. Note also that sandbox spans commonly carry
+`"session_id": null` in that same header.
+
 
 > **This splits spans by origin — it does not give you sandbox *detail*.** `phoenix.spans`
 > only ever holds what the model saw and said. What the sandboxed agent actually *did* —
@@ -372,10 +397,27 @@ $$);
 > The history matters, because the naive check flips depending on *when* you run it. Until
 > **2026-08-12** `span_kind` held only `LLM` and `UNKNOWN`; a `span_kind='TOOL'` filter
 > returned exactly nothing and read as proof the data was absent. Since the ENG2-1510 capture
-> fix landed, `TOOL` spans *do* exist — but there were only **1,080, all dated 2026-08-12**,
-> against **129,347 spans total**. So the filter now returns a thin, brand-new sliver and
-> still is not the tool record. **The authoritative tool surface has always been
-> `sandbox_agent_events`.**
+> fix landed, `TOOL` spans *do* exist.
+>
+> **⚠ Updated 2026-09-03 — the "thin sliver" caveat below is no longer true, and following it
+> now steers you away from a good surface.** When this was written, TOOL spans existed only
+> for a single day. Re-measured since: they are produced continuously, across dozens of
+> distinct tool kinds — Bash, Edit, Read, Write, WebFetch, MCP calls, subagent spawns — and
+> they carry the full call *and* its result:
+>
+> ```
+> input:  {"type":"tool_use","id":"toolu_…","name":"Bash","input":{"command":"…"}}
+> output: "=== CORPUS BOUNDS ===\n… Traceback (most recent call last): …"
+> claude_code_tool_name: Bash
+> ```
+>
+> Arguments and results including stderr — replayable, not merely countable.
+>
+> **So use whichever fits the question.** `phoenix.spans` TOOL spans cover *all* Claude Code
+> traffic that routes through the proxy, laptop included. `sandbox_agent_events` remains
+> authoritative for **sandbox rollouts specifically**, and is the only surface unaffected by
+> the litellm redaction window. For host-side tool behaviour, the span surface is now the
+> better starting point; for rollout behaviour, start here.
 
 **Step 1 — find the schemas.** One per workspace project, 17 of them, 11 with data:
 
