@@ -6551,5 +6551,109 @@ def run_cleanup(
         click.echo(click.style(f"Deleted {total_deleted} item(s)", fg="green"))
 
 
+@main.command()
+@click.option(
+    "--since",
+    default="yesterday",
+    help="Look back from now: 'yesterday', 'today', or N days (default: yesterday)",
+)
+def report(since: str):
+    """Daily-report: What happened in the past N days?
+
+    Generates a readable digest of team activity from dal_catalog.sessions.
+    Everything already has timestamps—this command just packages them.
+
+    Coverage note: The Phoenix project has been dark since 2026-06-06 (ENG2-1375),
+    and thinking-token capture is unexplained (ENG2-1487). This report reflects
+    only what's actively captured; gaps don't imply zero activity.
+
+    Examples:
+        dal report                  # Yesterday's activity
+        dal report --since today    # Just today
+        dal report --since 7        # Past 7 days
+    """
+    from datetime import datetime, timedelta
+
+    from dev_agent_lens.analysis.questions import (
+        get_active_roster,
+        get_repeated_patterns,
+        get_team_activity,
+        get_weekly_summary,
+    )
+
+    # Parse --since
+    if since == "today":
+        days = 1
+    elif since == "yesterday":
+        days = 1
+    else:
+        try:
+            days = int(since)
+        except ValueError:
+            click.echo(click.style(f"Invalid --since value: {since!r}", fg="red"))
+            raise SystemExit(1)
+
+    click.echo(click.style(f"Dev-Agent-Lens Report (past {days} day{'s' if days != 1 else ''})", bold=True))
+    click.echo()
+
+    # Team activity
+    try:
+        team_df = get_team_activity(days=days)
+        click.echo(click.style("Team Activity", bold=True, fg="cyan"))
+        for _, row in team_df.iterrows():
+            person = row["person"] or "(unclaimed)"
+            sessions = row["sessions"]
+            calls = row["llm_calls"]
+            tools = row["tool_calls"]
+            categories = row["categories"] or "none"
+            # Truncate categories for display
+            cat_display = (categories[:50] + "...") if len(categories) > 50 else categories
+            click.echo(f"  {person:20s}  {sessions:3} sessions  {calls:5} LLM  {tools:5} tools  {cat_display}")
+        click.echo()
+    except Exception as e:
+        click.echo(click.style(f"Error fetching team activity: {e}", fg="yellow"))
+        click.echo()
+
+    # Repeated patterns
+    try:
+        patterns_df = get_repeated_patterns(min_sessions=3)
+        if not patterns_df.empty:
+            click.echo(click.style("Session Categories (60-day patterns)", bold=True, fg="cyan"))
+            for _, row in patterns_df.iterrows():
+                cat = row["category"] or "uncategorized"
+                sessions = row["sessions"]
+                pct = row["pct_of_total"]
+                avg_calls = row["avg_llm_calls"]
+                avg_tools = row["avg_tool_calls"]
+                duration = row["avg_duration_minutes"]
+                click.echo(
+                    f"  {cat:25s}  {sessions:4} sessions ({pct:5.1f}%)  "
+                    f"avg {avg_calls:3} LLM, {avg_tools:3} tools  ~{duration:5} min"
+                )
+            click.echo()
+    except Exception as e:
+        click.echo(click.style(f"Error fetching patterns: {e}", fg="yellow"))
+        click.echo()
+
+    # Active roster
+    try:
+        roster_df = get_active_roster()
+        click.echo(click.style("Active Roster (this week vs last)", bold=True, fg="cyan"))
+        for _, row in roster_df.iterrows():
+            person = row["person"] or "(unclaimed)"
+            this_week = row["this_week_sessions"]
+            last_week = row["last_week_sessions"]
+            change = row["change"] or "—"
+            calls = row["this_week_calls"]
+            tools = row["this_week_tools"]
+            click.echo(f"  {person:20s}  {this_week:3} sessions  change: {change:12s}  {calls:5} calls, {tools:5} tools")
+        click.echo()
+    except Exception as e:
+        click.echo(click.style(f"Error fetching roster: {e}", fg="yellow"))
+        click.echo()
+
+    click.echo(click.style("End of Report", bold=True))
+
+
 if __name__ == "__main__":
     main()
