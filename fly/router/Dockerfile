@@ -9,6 +9,7 @@ FROM alpine:3.20
 RUN apk add --no-cache \
       tailscale \
       socat \
+      caddy \
       ca-certificates \
       iptables \
       ip6tables \
@@ -17,6 +18,7 @@ RUN apk add --no-cache \
 RUN mkdir -p /var/lib/tailscale /var/run/tailscale
 
 COPY fly/router/start.sh /usr/local/bin/start.sh
+COPY fly/router/Caddyfile /etc/caddy/Caddyfile
 RUN chmod +x /usr/local/bin/start.sh
 
 ENTRYPOINT ["/usr/local/bin/start.sh"]

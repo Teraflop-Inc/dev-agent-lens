@@ -34,6 +34,15 @@ primary_region = "iad"
 # new container generates a fresh node key, accumulating ghost nodes in
 # the admin console (sf-tailscale-router-1, -2, ...) and forcing a route
 # re-approval after every deploy.
+# Public HTTPS door for git-host webhooks (ENG2-1622): only POST /v1/events/* passes
+# (fly/router/Caddyfile); the DAL receiver behind it checks the hook signature.
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = false
+  auto_start_machines = false
+  min_machines_running = 1
+
 [[mounts]]
   source = "tailscale_state"
   destination = "/var/lib/tailscale"
