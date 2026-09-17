@@ -1,22 +1,45 @@
 # The public door for git-host webhooks (ENG2-1622). Fly terminates TLS and hands
-# HTTP to :8080. Only POST /v1/events/* goes through; everything else is 404, so the
-# receiver's OTLP route and health page never face the internet. The upstream is a
-# socat relay (start.sh) that reaches the DAL receiver on lambda1 over the tailnet
-# through tailscaled's SOCKS5 proxy. The receiver checks the hook signature.
+# HTTP to :8080. Only POST /v1/events/<producer> goes through; everything else is 404,
+# so the receiver's OTLP route and health page never face the internet. The upstream
+# is a socat relay (start.sh) that reaches the DAL receiver on lambda1 over the
+# tailnet through tailscaled's SOCKS5 proxy. The receiver checks the hook signature.
+#
+# Limits: GitHub caps a payload at 25 MB, so the body cap is that; a client that stalls
+# is cut after 30 s; a receiver that stalls is cut after 30 s. Without these a slow
+# sender holds a caddy connection, a socat child and a receiver thread open forever.
 {
 	auto_https off
 	admin off
+	servers {
+		timeouts {
+			read_header 10s
+			read_body 30s
+			idle 60s
+		}
+	}
 }
 
 :8080 {
 	@events {
 		method POST
-		path /v1/events/*
+		path_regexp ^/v1/events/[a-z0-9][a-z0-9_-]{0,31}$
 	}
 	# handle blocks, not bare directives: caddy orders `respond` before
 	# `reverse_proxy`, so a bare `respond 404` would answer every request.
 	handle @events {
-		reverse_proxy 127.0.0.1:4318
+		request_body {
+			max_size 25MB
+		}
+		reverse_proxy 127.0.0.1:4318 {
+			transport http {
+				dial_timeout 10s
+				response_header_timeout 30s
+			}
+		}
+	}
+	# Fly's health check; answered here, never proxied.
+	handle /healthz {
+		respond "ok" 200
 	}
 	handle {
 		respond 404
