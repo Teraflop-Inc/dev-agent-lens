@@ -43,6 +43,15 @@ primary_region = "iad"
   auto_start_machines = false
   min_machines_running = 1
 
+  # caddy answers /healthz itself; a dead caddy now shows as an unhealthy machine
+  # instead of a dark door on a "started" one.
+  [[http_service.checks]]
+    interval = "30s"
+    timeout = "5s"
+    grace_period = "20s"
+    method = "GET"
+    path = "/healthz"
+
 [[mounts]]
   source = "tailscale_state"
   destination = "/var/lib/tailscale"

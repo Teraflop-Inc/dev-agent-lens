@@ -124,7 +124,7 @@ done
 DAL_EVENTS_UPSTREAM="${DAL_EVENTS_UPSTREAM:-100.80.24.126:4318}"
 echo "[router] events relay 127.0.0.1:4318 -> socks5 localhost:1055 -> ${DAL_EVENTS_UPSTREAM}"
 socat --experimental \
-    "TCP4-LISTEN:4318,bind=127.0.0.1,reuseaddr,fork" \
+    "TCP4-LISTEN:4318,bind=127.0.0.1,reuseaddr,fork,max-children=32" \
     "SOCKS5-CONNECT:127.0.0.1:1055:${DAL_EVENTS_UPSTREAM%:*}:${DAL_EVENTS_UPSTREAM##*:}" \
     >>/var/log/socat.log 2>&1 &
 caddy run --config /etc/caddy/Caddyfile --adapter caddyfile >/var/log/caddy.log 2>&1 &
