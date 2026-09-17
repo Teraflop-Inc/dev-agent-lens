@@ -1,0 +1,18 @@
+# The public door for git-host webhooks (ENG2-1622). Fly terminates TLS and hands
+# HTTP to :8080. Only POST /v1/events/* goes through; everything else is 404, so the
+# receiver's OTLP route and health page never face the internet. The upstream is a
+# socat relay (start.sh) that reaches the DAL receiver on lambda1 over the tailnet
+# through tailscaled's SOCKS5 proxy. The receiver checks the hook signature.
+{
+	auto_https off
+	admin off
+}
+
+:8080 {
+	@events {
+		method POST
+		path /v1/events/*
+	}
+	reverse_proxy @events 127.0.0.1:4318
+	respond 404
+}
