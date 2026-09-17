@@ -115,6 +115,20 @@ echo "$TS_SERVE" | tr ';' '\n' | while IFS= read -r entry; do
     /usr/bin/tailscale --socket="$TS_SOCK" serve --bg --tcp="$port" "tcp://localhost:$port"
 done
 
+# Public webhook door (ENG2-1622). Fly's http_service sends HTTPS traffic to caddy
+# on :8080; caddy admits only POST /v1/events/* and proxies to 127.0.0.1:4318, where
+# socat carries each connection through tailscaled's SOCKS5 proxy to the DAL
+# receiver on the tailnet. Userspace tailscaled has no TUN, so this proxy hop is the
+# only way a container process reaches a tailnet peer. The receiver requires the
+# hook signature (DAL_EVENTS_SECRET), so the relay itself holds no secret.
+DAL_EVENTS_UPSTREAM="${DAL_EVENTS_UPSTREAM:-100.80.24.126:4318}"
+echo "[router] events relay 127.0.0.1:4318 -> socks5 localhost:1055 -> ${DAL_EVENTS_UPSTREAM}"
+socat \
+    "TCP4-LISTEN:4318,bind=127.0.0.1,reuseaddr,fork" \
+    "SOCKS5-CONNECT:127.0.0.1:1055:${DAL_EVENTS_UPSTREAM%:*}:${DAL_EVENTS_UPSTREAM##*:}" \
+    >>/var/log/socat.log 2>&1 &
+caddy run --config /etc/caddy/Caddyfile --adapter caddyfile >/var/log/caddy.log 2>&1 &
+
 echo "[router] up. Approve the subnet route in admin if not already:"
 echo "         https://login.tailscale.com/admin/machines"
 echo "[router] exposed:"
