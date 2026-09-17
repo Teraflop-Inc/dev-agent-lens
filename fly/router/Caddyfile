@@ -13,6 +13,12 @@
 		method POST
 		path /v1/events/*
 	}
-	reverse_proxy @events 127.0.0.1:4318
-	respond 404
+	# handle blocks, not bare directives: caddy orders `respond` before
+	# `reverse_proxy`, so a bare `respond 404` would answer every request.
+	handle @events {
+		reverse_proxy 127.0.0.1:4318
+	}
+	handle {
+		respond 404
+	}
 }
