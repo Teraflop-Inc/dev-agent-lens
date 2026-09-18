@@ -62,6 +62,28 @@ The wrapper script:
 - Configures Claude Code to route through LiteLLM
 - Passes OAuth tokens automatically
 
+### Headless and scripted runs (`-p`)
+
+Unrecognised arguments are passed straight through to Claude Code, so headless runs work as
+you'd expect and **are captured**:
+
+```bash
+./claude-lens -p "summarise this repo"
+```
+
+`claude -p` invoked directly is **not** captured. It never sees `ANTHROPIC_BASE_URL`, so it
+talks to the API host and produces no spans. This is easy to miss because nothing fails — the
+run succeeds, it just leaves no trace. The local transcript under `~/.claude/projects/` is
+still written either way, so the data isn't lost; only the telemetry is. If a script, cron
+job, CI step, or `Task`-style worker shells out to `claude`, point it at `claude-lens`.
+
+> **Don't "fix" this by putting `ANTHROPIC_BASE_URL` in `~/.claude/settings.json`.**
+> It looks like a one-line way to catch every invocation, but it makes *all* Claude Code usage
+> hard-depend on the proxy being reachable — when the container is down or you're off the
+> network that hosts it, Claude stops working entirely rather than merely going untraced.
+> The wrapper's health check exists precisely so that failure is explicit and scoped to runs
+> you asked to trace.
+
 ### Custom Proxy URL
 
 ```bash
