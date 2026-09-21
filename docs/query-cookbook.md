@@ -30,7 +30,7 @@ con.execute(f"ATTACH '{os.environ['PHOENIX_SQL_DATABASE_URL']}' AS pg (TYPE post
 
 Keep that `con` — the recipes below run in the **same `uv run python` session**: recipes #1
 and #2 each rebuild `con` so they stand alone, but #3–#4 reuse the `con` above, and the
-bare-```sql``` recipes (#5–#9) run by wrapping the SQL: `con.execute("""<sql>""").df()`.
+bare-```sql``` recipes (#5–#11) run by wrapping the SQL: `con.execute("""<sql>""").df()`.
 
 **There are two surfaces, not one.** `phoenix.spans` is what the *model* saw and said.
 `<workspace_*>.sandbox_agent_events` is what the *agent* did — tool calls, statuses,
@@ -648,6 +648,66 @@ and `usage_object.reasoning_tokens` is ~always 0 (65 non-zero of 28,578 field-ca
 "How many tokens went to reasoning?" is not answerable on this path — don't build a report on
 it. Cache accounting IS real: `usage_object.cache_read/creation_input_tokens` non-zero on ~90%
 of carrying spans.
+
+## 11. Main loop vs. subagents (who actually spent the tokens)
+
+Claude Code stamps two headers on every request it makes, and LiteLLM preserves them under
+`attributes->'metadata'->'requester_custom_headers'`:
+
+| header | meaning |
+|--------|---------|
+| `x-claude-code-session-id` | the conversation thread |
+| `x-claude-code-agent-id`   | **present only on subagent (Task tool) calls** |
+
+So the main loop is the *absence* of the agent header, and each subagent is one distinct id.
+No extra instrumentation is needed — this is stock Claude Code behaviour.
+
+```sql
+SELECT * FROM postgres_query('pg', $$
+  SELECT coalesce(attributes->'metadata'->'requester_custom_headers'->>'x-claude-code-agent-id',
+                  '(main loop)') AS agent_id,
+         count(*) AS calls,
+         sum(coalesce(llm_token_count_prompt,0))     AS prompt_tokens,
+         sum(coalesce(llm_token_count_completion,0)) AS completion_tokens
+  FROM phoenix.spans
+  WHERE name = 'litellm_request'
+    AND start_time > now() - INTERVAL '2 days'
+  GROUP BY 1 ORDER BY 2 DESC
+$$);
+```
+
+Swap the time filter for
+`… ->>'x-claude-code-session-id' = '<session-uuid>'` to break one session into its main loop
+plus each subagent it spawned. Subagent calls carry the parent session id too, so the join
+back to the parent is free.
+
+**⚠️ Only `litellm_request` carries these headers.** Measured over a 2-day window: 8,001
+`litellm_request` spans, 100% with a session id and ~51% with an agent id — and **zero** on
+all seven other span names (`raw_gen_ai_request`, `Claude_Code_Internal_Prompt_*`,
+`Claude_Code_Tool_*`, `Claude_Code_Final_Output_*`, `claude_code.UserPromptSubmit`). This is
+the same span-type artifact that bites `account_uuid` in [Recipe 1](#1-who-is-active-the-team-roster):
+group without `WHERE name = 'litellm_request'` and the bulk of your corpus lands under
+`(main loop)` by construction, making subagent work look like it never happened.
+
+Two more traps, both of which produced a wrong "DAL isn't capturing this" conclusion before
+this recipe was written:
+
+- **The `agent-` prefix is not on the wire.** Local sidecars are
+  `~/.claude/projects/<enc-cwd>/<session>/subagents/agent-<id>.jsonl`, but the header value is
+  the bare `<id>`. Grepping the filename against `attributes::text` returns 0 rows and reads
+  as absence.
+- **Don't bound by the session's first day.** A session resumed a week later spawns subagents
+  with timestamps far from its start. Filter on the session id, not a `BETWEEN` window around
+  it, or you will silently drop the later ones.
+
+**Agent *type* is not in the headers** — only the opaque id. `agentType` (`Explore`, `Plan`,
+`general-purpose`, …) exists solely in the local sidecar
+`subagents/agent-<id>.meta.json`, so "cost by agent kind" needs a sidecar join at sync time.
+Tracked in ENG2-1590.
+
+Finally, the "`session_id` is NOT a working session" caveat in [querying.md](querying.md)
+applies to `x-claude-code-session-id` as well: it is a conversation thread that survives
+`--continue`/`--resume`, **not** a working session. Don't `GROUP BY` it to count sessions.
 
 ---
 
