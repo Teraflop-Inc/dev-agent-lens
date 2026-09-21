@@ -1,5 +1,9 @@
 .env
 
+# Agent worktrees. These hold their own filled-in .env.example copies, which
+# .env alone does not cover.
+.conductor/
+
 # Node.js dependencies
 node_modules/
 examples/typescript/node_modules/
