@@ -119,3 +119,14 @@ general_settings:
   # for sk-ant-oat... bearers BEFORE this check, so OAuth pass-through
   # continues to work; anything else must match this key or get 401.
   master_key: os.environ/LITELLM_MASTER_KEY
+  # Codex signed in with ChatGPT (ENG2-402, path B). Point Codex's provider at
+  # http://<router>:4000/teraflop-codex; each call is proxied to chatgpt.com and
+  # logged like any other LLM call (fork: ChatGPTCodexPassthroughLoggingHandler).
+  # The ChatGPT JWT authenticates on this prefix only; chatgpt.com validates it.
+  # merge_query_params: Codex polls /models?client_version=..., which 400s without it.
+  pass_through_endpoints:
+    - path: "/teraflop-codex"
+      target: "https://chatgpt.com/backend-api/codex"
+      forward_headers: true
+      include_subpath: true
+      merge_query_params: true
