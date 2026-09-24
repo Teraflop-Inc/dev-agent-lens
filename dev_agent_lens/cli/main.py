@@ -2132,9 +2132,21 @@ def store_status() -> None:
     # the three the layouts write always print, so an empty store still shows its shape;
     # anything else (export-parquet output, a hand-loaded dataset) follows in name order
     fixed = ["spans_raw", "spans_typed", "blobs_typed"]
-    order = fixed + [d for d in found if d not in fixed]
+    from dev_agent_lens.storage.layouts.incremental import attach as attach_snapshot
+    from dev_agent_lens.storage.snapshots import SnapshotIO
+
+    manifest, _ = SnapshotIO(s).read_current()
+    if manifest:
+        attach_snapshot(con, manifest)
+        click.echo(f"  snapshot={manifest['snapshot']}")
+    order = fixed + [d for d in found if d not in fixed and not d.startswith("_typed/")]
     w = max(12, *(len(d) for d in order))
     for ds in order:
+        if manifest and ds in ("spans_typed", "blobs_typed"):
+            view = "spans" if ds == "spans_typed" else "blobs"
+            rows = con.execute(f"SELECT count(*) FROM {view}").fetchone()[0]
+            click.echo(f"  {ds:<{w}} {rows:>10,} rows  (published snapshot)")
+            continue
         size = s.size_bytes(ds)
         if size == 0:
             click.echo(f"  {ds:<{w}} empty")
@@ -2283,6 +2295,27 @@ def store_presets() -> None:
     click.echo("  uv run python scripts/verify_spanstore.py --from-parquet '<parquet glob>'")
     click.echo("Pick ONE start method per machine: the single files and all.yml are different")
     click.echo("compose projects with different volumes, so switching yields an empty store.")
+
+@store.command("rebuild")
+@click.option("--full", is_flag=True, help="Rebuild every day into a new snapshot.")
+def store_rebuild(full: bool) -> None:
+    """Update changed raw days and atomically publish the typed snapshot."""
+    import duckdb
+
+    from dev_agent_lens.storage.layouts import get_layout
+
+    target, _, _, level = _describe_store()
+    with duckdb.connect() as con:
+        try:
+            result = get_layout("typed").update(con, target, zstd_level=level, full=full)
+        except Exception as exc:
+            raise click.ClickException(str(exc)) from exc
+    click.echo(f"snapshot={result.detail['snapshot']} rows={result.rows:,} "
+               f"rebuilt_days={len(result.detail['rebuilt_days'])} "
+               f"elapsed={result.elapsed_ms / 1000:.1f}s")
+    if result.detail["rebuilt_days"]:
+        click.echo("days: " + ", ".join(result.detail["rebuilt_days"]))
+
 
 @store.command("verify")
 @click.option("--from-parquet", "source", help="Parquet glob to ingest and check round-trip; "

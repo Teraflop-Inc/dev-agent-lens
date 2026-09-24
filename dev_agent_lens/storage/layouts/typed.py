@@ -275,7 +275,10 @@ def _bound_memory(con: Any) -> None:
     tmp = os.environ.get("DAL_DUCKDB_TMP") or os.path.join(tempfile.gettempdir(), "dal-duckdb")
     os.makedirs(tmp, exist_ok=True)
     con.execute(f"SET memory_limit='{limit}'")
-    con.execute(f"SET temp_directory='{tmp}'")
+    # Incremental dependency scans may already have spilled on this connection.
+    # DuckDB cannot relocate an active spill directory; keep the configured one.
+    if con.execute("SELECT current_setting('temp_directory')").fetchone()[0] != tmp:
+        con.execute(f"SET temp_directory={quote_literal(tmp)}")
     con.execute("SET preserve_insertion_order=false")
     log.info("[layout:typed] duckdb memory_limit=%s temp=%s", limit, tmp)
 
@@ -345,29 +348,63 @@ def _load_people(path: str | None = None) -> list[tuple[str, str, str]]:
     return rows
 
 
+def _prepare_raw(con: Any, source_glob: str | list[str]) -> tuple[str, set[str]]:
+    """Shared producer parsing for typed identity and incremental dependency tracking."""
+    src = (
+        "[" + ",".join(quote_literal(p) for p in source_glob) + "]"
+        if isinstance(source_glob, list) else quote_literal(source_glob)
+    )
+    source_sql = f"read_parquet({src}, hive_partitioning=true, union_by_name=true)"
+    cols = {r[0] for r in con.execute(f"DESCRIBE SELECT * FROM {source_sql}").fetchall()}
+    day_expr = "" if "day" in cols else ", CAST(start_time AS DATE) AS day"
+    # The fixture (a phoenix.spans dump) carries the integer trace_rowid; the direct
+    # clients carry the string trace_id and no rowid. Identity is keyed on whichever
+    # exists, as text, so both shapes stamp the same way.
+    if {"trace_rowid", "trace_id"} <= cols:
+        trace_key = "COALESCE(CAST(trace_rowid AS VARCHAR), trace_id)"
+    elif "trace_rowid" in cols:
+        trace_key = "CAST(trace_rowid AS VARCHAR)"
+    elif "trace_id" in cols:
+        trace_key = "trace_id"
+    else:
+        raise ValueError("source has neither trace_rowid nor trace_id")
+    con.execute(f"""CREATE OR REPLACE TEMP VIEW _raw AS
+        SELECT *{day_expr}, {trace_key} AS trace_key,
+               json_extract_string(attributes,
+                                   '$.metadata.user_api_key_end_user_id') AS euid,
+               COALESCE(json_extract_string(attributes,'$.claude.session_id'),
+                        json_extract_string(attributes,'$.session.id')) AS session_alt,
+               json_extract_string(attributes,'$.user.id') AS account_alt,
+               CASE WHEN {_ROOTISH}
+                    THEN nullif(regexp_extract(attributes, '{_RX_ACCOUNT}', 1), '')
+               END AS account_rx,
+               CASE WHEN {_ROOTISH}
+                    THEN nullif(regexp_extract(attributes, '{_RX_DEVICE}', 1), '')
+               END AS device_rx,
+               CASE WHEN {_ROOTISH}
+                    THEN nullif(regexp_extract(attributes, '{_RX_SESSION}', 1), '')
+               END AS session_rx,
+               CASE WHEN {_ROOTISH} THEN {_TICKET_EXPR} END AS ticket_rx,
+               CASE WHEN parent_id IS NULL
+                    THEN json_extract_string(attributes, '$.agent.name')
+               END AS agent_rx
+        FROM {source_sql}""")
+    return source_sql, cols
+
+
 class TypedLayout(Layout):
     name = "typed"
 
     def build(
-        self, con: Any, source_glob: str, store: Any, *, zstd_level: int, deterministic: bool = True
+        self, con: Any, source_glob: str | list[str], store: Any, *,
+        zstd_level: int, deterministic: bool = True,
+        identity_files: list[str] | None = None,
     ) -> BuildResult:
+        from dev_agent_lens.storage.snapshots import SnapshotIO
+        if SnapshotIO(store).read_current()[0] is not None:
+            raise ValueError("published typed snapshot exists; use dal store rebuild --full")
         t0 = time.perf_counter()
         store.attach_duckdb(con)
-        src = quote_literal(source_glob)
-        source_sql = f"read_parquet({src}, hive_partitioning=true, union_by_name=true)"
-        cols = {r[0] for r in con.execute(f"DESCRIBE SELECT * FROM {source_sql}").fetchall()}
-        day_expr = "" if "day" in cols else ", CAST(start_time AS DATE) AS day"
-        # The fixture (a phoenix.spans dump) carries the integer trace_rowid; the direct
-        # clients carry the string trace_id and no rowid. Identity is keyed on whichever
-        # exists, as text, so both shapes stamp the same way.
-        if {"trace_rowid", "trace_id"} <= cols:
-            trace_key = "COALESCE(CAST(trace_rowid AS VARCHAR), trace_id)"
-        elif "trace_rowid" in cols:
-            trace_key = "CAST(trace_rowid AS VARCHAR)"
-        elif "trace_id" in cols:
-            trace_key = "trace_id"
-        else:
-            raise ValueError("source has neither trace_rowid nor trace_id")
         prior = None
         try:
             # DAL_BUILD_DETERMINISTIC=0 keeps every core busy at the cost of a
@@ -387,31 +424,13 @@ class TypedLayout(Layout):
             # would have been killed (2026-09-11). Each pass now streams from Parquet;
             # only the small identity columns are materialized, in `_keys`.
             ts = time.perf_counter()
-            con.execute(f"""CREATE OR REPLACE TEMP VIEW _raw AS
-                SELECT *{day_expr}, {trace_key} AS trace_key,
-                       json_extract_string(attributes,
-                                           '$.metadata.user_api_key_end_user_id') AS euid,
-                       COALESCE(json_extract_string(attributes,'$.claude.session_id'),
-                                json_extract_string(attributes,'$.session.id')) AS session_alt,
-                       json_extract_string(attributes,'$.user.id') AS account_alt,
-                       CASE WHEN {_ROOTISH}
-                            THEN nullif(regexp_extract(attributes, '{_RX_ACCOUNT}', 1), '')
-                       END AS account_rx,
-                       CASE WHEN {_ROOTISH}
-                            THEN nullif(regexp_extract(attributes, '{_RX_DEVICE}', 1), '')
-                       END AS device_rx,
-                       CASE WHEN {_ROOTISH}
-                            THEN nullif(regexp_extract(attributes, '{_RX_SESSION}', 1), '')
-                       END AS session_rx,
-                       CASE WHEN {_ROOTISH} THEN {_TICKET_EXPR} END AS ticket_rx,
-                       CASE WHEN parent_id IS NULL
-                            THEN json_extract_string(attributes, '$.agent.name')
-                       END AS agent_rx
-                FROM {source_sql}""")
-            con.execute("""CREATE OR REPLACE TEMP TABLE _keys AS
+            source_sql, cols = _prepare_raw(con, source_glob)
+            from .incremental import parquet_sql
+            identity_source = parquet_sql(identity_files) if identity_files else "_raw"
+            con.execute(f"""CREATE OR REPLACE TEMP TABLE _keys AS
                 SELECT trace_key, euid, session_alt, account_alt, account_rx, device_rx,
                        session_rx, ticket_rx, agent_rx
-                FROM _raw
+                FROM {identity_source}
                 WHERE euid IS NOT NULL OR session_alt IS NOT NULL OR account_alt IS NOT NULL
                    OR account_rx IS NOT NULL OR device_rx IS NOT NULL OR session_rx IS NOT NULL
                    OR ticket_rx IS NOT NULL OR agent_rx IS NOT NULL""")
@@ -566,6 +585,10 @@ class TypedLayout(Layout):
         )
         return r
 
+    def update(self, con: Any, store: Any, *, zstd_level: int, full: bool = False) -> BuildResult:
+        from .incremental import update
+        return update(self, con, store, zstd_level=zstd_level, full=full)
+
     def attach(self, con: Any, store: Any) -> None:
         from dev_agent_lens.linear_tickets import attach_tickets
 
@@ -575,6 +598,14 @@ class TypedLayout(Layout):
         # The tracker's tickets (dal linear-sync), joinable on spans.ticket; an empty
         # view with the same columns when nobody has synced them (ENG2-1540).
         attach_tickets(con, store)
+        from dev_agent_lens.storage.snapshots import SnapshotIO
+
+        from .incremental import attach
+
+        manifest, _ = SnapshotIO(store).read_current()
+        if manifest is not None:
+            attach(con, manifest)
+            return
         con.execute(f"""CREATE VIEW spans AS SELECT * FROM read_parquet(
             {quote_literal(store.read_glob("spans_typed"))},
             hive_partitioning=true, union_by_name=true)""")

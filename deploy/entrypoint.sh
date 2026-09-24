@@ -77,9 +77,16 @@ case "${1:-sync-loop}" in
         dal linear-sync 2>&1 | tail -1 || true
       fi
       if [ "${TYPED_REBUILD:-1}" = "1" ]; then
-        DAL_SPAN_LAYOUT=typed dal store verify --from-parquet "${DAL_RAW_GLOB:?set DAL_RAW_GLOB to the spans_raw glob of the store}" 2>&1 | tail -1
+        dal store rebuild
       fi
       sleep "${SYNC_INTERVAL:-900}"
+    done ;;
+  typed-loop)
+    # Writes derived generations only; safe alongside the single raw receiver.
+    # Run one updater. Failures keep the last published snapshot and retry next pass.
+    while true; do
+      dal store rebuild || echo "[entrypoint] typed update failed; previous snapshot retained" >&2
+      sleep "${TYPED_INTERVAL:-60}"
     done ;;
   oracle)
     configure
