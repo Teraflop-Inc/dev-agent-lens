@@ -5,6 +5,10 @@ DAL stores traces as Parquet and exposes them through DuckDB. Use a directory fo
 one developer, or an S3-compatible object store for a team. Phoenix is an optional
 source for existing history, not a requirement for new session capture.
 
+DAL is [MIT-licensed open source](LICENSE) for any developer or organization.
+Bring your own storage, credentials, and identity configuration. Fly.io and
+Cloudflare R2 are optional hosting choices; no Teraflop account is required.
+
 ## Start with local sessions
 
 Requires Python 3.12 and [uv](https://docs.astral.sh/uv/).
