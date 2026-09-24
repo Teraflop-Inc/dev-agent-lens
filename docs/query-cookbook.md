@@ -121,6 +121,208 @@ local map.
 
 ---
 
+## 0. Who is who: the `person` column (store only)
+
+The typed layout stamps `person` on every span from `identity.yaml` (the file
+`core/identity.py` reads; `DAL_IDENTITY` points elsewhere). Account ids come from each
+person's `~/.claude.json` (`oauthAccount.accountUuid`). Spans that carry a session but no
+account (the hooks producer) take the account of the same session's other traces.
+
+```sql
+-- the roster, by name
+SELECT person, count(*) AS spans, max(start_time)::DATE AS last_seen
+FROM spans WHERE start_time > now() - INTERVAL 14 DAY GROUP BY 1 ORDER BY 2 DESC;
+
+-- who is missing from identity.yaml (add them, rebuild, the NULLs go away)
+SELECT account_uuid, device_id, source, count(*) AS spans
+FROM spans WHERE person IS NULL GROUP BY 1, 2, 3 ORDER BY 4 DESC;
+```
+
+Measured 2026-09-15 on one day of `sf-workspaces`: 6,466 of 6,476 spans named with one
+person in the file; the 10 left are calls that carried no identity at all (a driver that is
+not Claude Code), which the build log lists as `unnamed account=None`.
+
+## 0b. What did a ticket cost? (store only)
+
+`ticket` is stamped per session from the branch name, the `Current branch:` line Claude
+Code puts in its context, or the first ticket id in the opening of the conversation. Tokens
+are the honest unit: `usage_object` is truth and the cost tables lie (see querying.md).
+
+```sql
+SELECT ticket, count(DISTINCT session_id) AS sessions, count(*) AS calls,
+       sum(tokens_prompt) AS prompt, sum(tokens_completion) AS completion,
+       sum(tokens_cache_read) AS cache_read, sum(tokens_cache_write) AS cache_write
+FROM spans
+WHERE name IN ('litellm_request', 'raw_gen_ai_request') AND ticket IS NOT NULL
+GROUP BY 1 ORDER BY 3 DESC;
+```
+
+Checked 2026-09-15 against Phoenix for one rollout session (ENG2-1416, 15:00 to 15:12 UTC):
+same 60,853,630 prompt and 248,141 completion tokens both sides. Sessions with no ticket in
+their opening (a two-arm eval task, a Haiku side call) stay NULL and show up under
+`ticket IS NULL`.
+
+## 0b2. What kind of work was it? (store only, needs `dal linear-sync`)
+
+`dal linear-sync` (LINEAR_API_KEY; the compose sync loop runs it every pass when the key
+is set) writes the tracker's tickets as a `tickets` table: `kind` is the first of Bug,
+Feature, Improvement, Research among the labels, `project`, `parent`, `state`, dates.
+The join is `spans.ticket = tickets.ticket`.
+
+```sql
+SELECT coalesce(t.kind, 'untyped') AS kind,
+       count(DISTINCT s.ticket) AS tickets, count(DISTINCT s.session_id) AS sessions,
+       sum(s.tokens_prompt) AS prompt, sum(s.tokens_completion) AS completion
+FROM spans s LEFT JOIN tickets t USING (ticket)
+WHERE s.name IN ('litellm_request', 'raw_gen_ai_request') AND s.ticket IS NOT NULL
+GROUP BY 1 ORDER BY 4 DESC;
+
+-- by project or by parent ticket, which need no labels at all
+SELECT coalesce(t.project, '(none)') AS project, sum(s.tokens_prompt) AS prompt
+FROM spans s LEFT JOIN tickets t USING (ticket)
+WHERE s.name IN ('litellm_request', 'raw_gen_ai_request') AND s.ticket IS NOT NULL
+GROUP BY 1 ORDER BY 2 DESC;
+```
+
+## 0c. What git did: pushes, PRs, reviews (store only)
+
+A configured Forgejo host posts its events to the receiver at
+`/v1/events/forgejo`; each lands as one span under `source = 'forgejo'`, named
+`forgejo.<event>[.<action>]`, with the parts a query wants under `git.*` in
+`attributes_rest` and the actor under `person` via `identity.yaml` (`users: [<login>]`).
+A pull request and everything on it (reviews, comments) share one trace; a push has its own.
+
+```sql
+-- the PR queue: opened, first review, merged, per PR
+SELECT json_extract_string(attributes_rest, '$.git.pr.number') AS pr,
+       min(start_time) FILTER (WHERE name = 'forgejo.pull_request.opened') AS opened,
+       min(start_time) FILTER (WHERE name LIKE 'forgejo.pull_request_review%') AS first_review,
+       min(start_time) FILTER (WHERE name = 'forgejo.pull_request.closed'
+                              AND json_extract_string(attributes_rest, '$.git.pr.merged') = 'true') AS merged,
+       any_value(person) FILTER (WHERE name = 'forgejo.pull_request.opened') AS author
+FROM spans WHERE source = 'forgejo' AND json_extract_string(attributes_rest, '$.git.pr.number') IS NOT NULL
+GROUP BY 1 ORDER BY 2 DESC;
+
+-- who pushed what, today
+SELECT person, json_extract_string(attributes_rest, '$.git.ref') AS ref,
+       sum(CAST(json_extract_string(attributes_rest, '$.git.commits') AS INTEGER)) AS commits
+FROM spans WHERE source = 'forgejo' AND name = 'forgejo.push' AND start_time > now() - INTERVAL 1 DAY
+GROUP BY 1, 2 ORDER BY 3 DESC;
+```
+
+## 0d. Is anyone reviewing? Review depth per PR (ENG2-1538, store only)
+
+GitHub's hooks land every PR, review and inline comment as spans under `source =
+'github'` (docs/webhook-events.md); `dal github-backfill` replayed the history before the
+hooks existed, so the six repos go back to 2025-06. A PR and everything on it share one
+trace. Diff size is on the PR (`git.pr.additions`, `deletions`, `changed_files`); a
+Claude-written PR carries the session link its body ends with (`git.pr.agent_session`),
+which is how agent-authored is told from human-authored. Reviews by an app carry
+`[bot]` in the reviewer.
+
+```sql
+WITH ev AS (
+  SELECT trace_id, name, start_time,
+         json_extract_string(attributes_rest,'$.git.repo') AS repo,
+         json_extract_string(attributes_rest,'$.git.pr.agent_session') IS NOT NULL AS agent,
+         CAST(json_extract_string(attributes_rest,'$.git.pr.additions') AS INTEGER)
+       + CAST(json_extract_string(attributes_rest,'$.git.pr.deletions') AS INTEGER) AS diff_lines,
+         json_extract_string(attributes_rest,'$.git.pr.merged') = 'true' AS merged,
+         json_extract_string(attributes_rest,'$.git.review.type') AS review_type,
+         json_extract_string(attributes_rest,'$.git.review.author') AS reviewer,
+         length(coalesce(json_extract_string(attributes_rest,'$.git.review.content'),'')) AS review_chars
+  FROM spans WHERE source = 'github'
+),
+prs AS (
+  SELECT trace_id, any_value(repo) AS repo, bool_or(agent) AS agent, max(diff_lines) AS diff_lines,
+         min(start_time) FILTER (WHERE name = 'github.pull_request.opened') AS opened,
+         min(start_time) FILTER (WHERE name = 'github.pull_request.closed' AND merged) AS merged_at,
+         min(start_time) FILTER (WHERE name = 'github.pull_request_review.submitted'
+                                   AND review_type = 'approved' AND reviewer NOT LIKE '%[bot]') AS approved_at,
+         count(*) FILTER (WHERE name = 'github.pull_request_review.submitted' AND reviewer NOT LIKE '%[bot]') AS human_reviews,
+         count(*) FILTER (WHERE name = 'github.pull_request_review.submitted' AND reviewer LIKE '%[bot]') AS bot_reviews,
+         count(*) FILTER (WHERE name = 'github.pull_request_review_comment.created') AS inline_comments,
+         sum(review_chars) FILTER (WHERE name = 'github.pull_request_review.submitted' AND reviewer NOT LIKE '%[bot]') AS human_review_chars
+  FROM ev GROUP BY 1
+)
+SELECT CASE WHEN agent THEN 'agent' ELSE 'human' END AS authored,
+       count(*) AS prs, count(*) FILTER (WHERE merged_at IS NOT NULL) AS merged,
+       count(*) FILTER (WHERE merged_at IS NOT NULL AND human_reviews = 0) AS merged_unreviewed,
+       count(*) FILTER (WHERE approved_at IS NOT NULL) AS approved,
+       count(*) FILTER (WHERE approved_at IS NOT NULL AND human_review_chars = 0 AND inline_comments = 0) AS approved_no_words,
+       round(median(date_diff('minute', opened, approved_at)) FILTER (WHERE approved_at IS NOT NULL), 0) AS min_to_approve_p50,
+       round(median(diff_lines), 0) AS diff_lines_p50,
+       round(median(date_diff('minute', opened, merged_at)) FILTER (WHERE merged_at IS NOT NULL), 0) AS min_to_merge_p50
+FROM prs WHERE opened IS NOT NULL
+GROUP BY 1 ORDER BY 1;
+```
+
+Measured 2026-09-18, six repos, 1,190 PRs since 2025-06:
+
+| authored | prs | merged | merged with no human review | human approvals | approvals with no words | diff lines p50 | minutes to merge p50 |
+|---|---|---|---|---|---|---|---|
+| agent | 145 | 142 | 141 | 0 | 0 | 164 | 6 |
+| human | 1,045 | 965 | 932 | 11 | 6 | 324 | 16 |
+
+Reviews in the last 90 days: 118, of which 110 by the Greptile app, 7 by Alex, 1 by Adam.
+Per repo (`GROUP BY repo` on the same `prs`): Solutions-Fabric merged 617 PRs, 18 with a
+human review, 182 with only the bot's, 417 with none. So the review-depth question has a
+short answer here: the diff is not being reviewed by a person, agent-written or not, and
+merge follows open by minutes. `agent_session` only marks PRs whose body ends with the
+session link (from 2026-06-29 on); older Claude-written PRs count as human.
+
+Not in the store: whether the approver had touched the file before. That needs per-file
+history from the git host, not the hook.
+
+## 0e. Is the queue draining, and who carries it? (ENG2-1539, store only)
+
+```sql
+WITH ev AS (
+  SELECT trace_id, name, start_time,
+         json_extract_string(attributes_rest,'$.git.pr.agent_session') IS NOT NULL AS agent
+  FROM spans WHERE source = 'github'
+),
+prs AS (
+  SELECT trace_id, bool_or(agent) AS agent,
+         min(start_time) FILTER (WHERE name = 'github.pull_request.opened') AS opened,
+         min(start_time) FILTER (WHERE name = 'github.pull_request.closed') AS closed
+  FROM ev GROUP BY 1
+),
+weeks AS (SELECT unnest(generate_series(DATE '2026-06-01', DATE '2026-09-14', INTERVAL 7 DAY)) AS wk)
+SELECT CAST(wk AS DATE) AS week_start,
+       count(*) FILTER (WHERE p.opened >= wk AND p.opened < wk + INTERVAL 7 DAY) AS opened,
+       count(*) FILTER (WHERE p.opened >= wk AND p.opened < wk + INTERVAL 7 DAY AND p.agent) AS opened_by_agent,
+       count(*) FILTER (WHERE p.opened >= wk AND p.opened < wk + INTERVAL 7 DAY
+                          AND (p.closed IS NULL OR p.closed >= wk + INTERVAL 7 DAY)) AS still_open_at_week_end,
+       count(*) FILTER (WHERE p.opened < wk AND (p.closed IS NULL OR p.closed >= wk + INTERVAL 7 DAY)) AS stale_open,
+       round(median(date_diff('hour', p.opened, p.closed))
+             FILTER (WHERE p.closed >= wk AND p.closed < wk + INTERVAL 7 DAY), 1) AS hours_open_p50
+FROM weeks LEFT JOIN prs p ON p.opened IS NOT NULL AND p.opened < wk + INTERVAL 7 DAY
+GROUP BY 1 ORDER BY 1;
+
+-- reviewer concentration, last 90 days
+SELECT json_extract_string(attributes_rest,'$.git.review.author') AS reviewer, count(*) AS reviews,
+       round(100.0 * count(*) / sum(count(*)) OVER (), 1) AS pct
+FROM spans WHERE source = 'github' AND name = 'github.pull_request_review.submitted'
+  AND start_time > now() - INTERVAL 90 DAY
+GROUP BY 1 ORDER BY 2 DESC;
+```
+
+Measured 2026-09-18, the last four weeks:
+
+| week | opened | by agent | still open at week end | stale open (older) | hours open p50 |
+|---|---|---|---|---|---|
+| 08-24 | 9 | 3 | 2 | 24 | 13.0 |
+| 08-31 | 21 | 0 | 6 | 16 | 21.0 |
+| 09-07 | 32 | 13 | 1 | 14 | 1.0 |
+| 09-14 | 44 | 39 | 0 | 15 | 0.0 |
+
+The queue is not backing up: a PR is open for about an hour, the week's PRs are closed by
+week end, and the 14 to 24 "stale" ones are a standing set of never-closed PRs, not a
+backlog that grows with agent volume (39 of 44 PRs in the latest week were agent-written
+and none were left open). Reviewer share: 93% Greptile, 6% Alex, 1% Adam; the load is on
+the bot and on the author merging their own work.
+
 ## 1. Who is active? (the team roster)
 
 Self-contained — paste the whole block into `uv run python` (after the preflight above):

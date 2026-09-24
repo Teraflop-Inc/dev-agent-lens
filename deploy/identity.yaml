@@ -1,0 +1,11 @@
+# Who is who. The store stamps a `person` on every span from this file.
+# Claude Code sends an account id with every call; find yours in ~/.claude.json under
+# oauthAccount.accountUuid. One person can own several accounts (a laptop login and a
+# token used in a sandbox). The build log lists ids it saw that are not named here.
+people: []
+#  - name: Ada Lovelace
+#    email: ada@example.com
+#    accounts:
+#      - {uuid: 00000000-0000-0000-0000-000000000001, verified: true}
+#    devices: []       # the 64-character device hash, if a span has that and no account
+#    users: []         # names given to `ingest-sessions --user`

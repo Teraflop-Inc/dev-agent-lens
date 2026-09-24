@@ -1,0 +1,13 @@
+# LOCAL DEV ONLY. Both S3 servers at once, for the cross-backend parity run.
+#
+#   docker compose -f docker/spanstore/all.yml up -d
+#   uv run python scripts/verify_spanstore.py --from-parquet '<glob>'
+#
+# Pick ONE start method per machine. This file and the single files are different compose
+# projects with different volumes (dal-spanstore_* vs dal-minio_*), and the fixed
+# container_names collide, so switching between them yields an empty store or a name clash.
+# doltgres.yml is deliberately not included: it is a Forge decision, not a DAL store.
+name: dal-spanstore
+include:
+  - minio.yml
+  - seaweedfs.yml
