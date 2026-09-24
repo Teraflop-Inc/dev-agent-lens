@@ -22,6 +22,9 @@ tests/e2e/testbed/runs/
 # Real person↔account_uuid↔email mapping — PII, never commit (public repo). Shared out-of-band.
 dev_agent_lens/core/identity.yaml
 
+# session exports from dal claude-session-logs-to-markdown
+exports/
+
 # never commit: local MCP config carries tokens; trace dumps are data
 .mcp.json
 scripts/meeting_traces.json

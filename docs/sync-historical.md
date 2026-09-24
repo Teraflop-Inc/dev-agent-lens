@@ -334,3 +334,70 @@ docker compose ps
 **Parquet export fails:**
 - Ensure raw data exists in `~/.dal/data/raw/`
 - Check disk space for output
+
+---
+
+## Backfilling Claude Code sessions into Phoenix
+
+`dal sync` pulls spans *out of* a tracing backend. The commands below go the
+other way: they take Claude Code's own session transcripts from
+`~/.claude/projects` and push them *into* one, so history recorded before
+tracing was wired up still shows up in Phoenix with its original timestamps.
+
+The path is `session JSONL → ATIF → OTel spans`. It needs the optional extra,
+which requires Python 3.12 or newer:
+
+```bash
+uv sync --extra otlp
+```
+
+### One folder, one command
+
+```bash
+# Always look first. --dry-run needs no endpoint and converts nothing.
+dal ingest-sessions --include '*your-org*' --dry-run
+
+# Then publish.
+dal ingest-sessions --include '*your-org*' --since 2026-07-01 \
+    --endpoint http://127.0.0.1:6006 --project claude-code-sessions
+```
+
+**`--include` is a safety control, not a convenience flag.** `~/.claude/projects`
+is one flat directory holding work, personal, and other clients' sessions
+side by side — on one measured laptop, 88 project dirs and 455 sessions, of
+which only 23 dirs were work. So the flag is required, `--include '*'` is
+refused, and a real ingest prompts for confirmation (`--yes` to skip).
+
+Two details worth knowing:
+
+- Patterns are **whole-string globs matched case-sensitively against the `cwd`
+  each session recorded** — `'*acme*'`, not `'acme'`. The directory name is not
+  used, because Claude Code flattens the cwd into it by replacing `/`, `.`, `_`
+  and `-` all with `-`, so it cannot be decoded back. A session that recorded no
+  cwd falls back to the directory name and is flagged in the listing.
+- `--since` filters on **last activity** (file mtime), not session start, and a
+  bare date means local midnight.
+
+### Re-running is safe
+
+Trace and span ids are derived from trajectory content, so re-ingesting an
+unchanged session produces the same ids and the backend's insert dedup drops
+them. There is no cursor file and no sync state to keep. Verified: a second run
+of an 11-session scope sent the same 64 spans and the stored count stayed at 64.
+
+A finished push means every chunk was **accepted**, which is not the same as
+stored — the backend enqueues and answers before it writes. Confirm by counting
+rows in the backing store.
+
+### The two-step form
+
+`ingest-sessions` composes these; reach for them to inspect the intermediate
+ATIF, or to push a trajectory set you built some other way.
+
+```bash
+dal export-atif ~/.claude/projects/<encoded-repo> -o traj.json
+dal push-atif traj.json --endpoint http://127.0.0.1:6006 --project my-project
+```
+
+Note `push-atif --dry-run` genuinely converts and validates, while
+`ingest-sessions --dry-run` only estimates from file size.

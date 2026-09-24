@@ -449,3 +449,98 @@ class TestParquetExporterAppend:
             # Verify final count
             sessions_table = pq.read_table(output_dir / "test_sessions.parquet")
             assert len(sessions_table) == 3
+
+
+SESSION = {
+    "tA": "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa",
+    "tB": "bbbbbbbb-1111-4111-8111-bbbbbbbbbbbb",
+    "tU": "uuuuuuuu-1111-4111-8111-uuuuuuuuuuuu",
+}
+
+
+class TestExportStoreToPartitioned:
+    """`dal export-parquet --from-store`: the span store's native rows go through the
+    same unifier and flattener as a raw sync file."""
+
+    @staticmethod
+    def _frame(ids, day, trace, *, with_identity=True):
+        import json
+
+        import pandas as pd
+
+        n = len(ids)
+        # Claude Code identity: the export groups by a UUID-shaped session id only
+        euid = json.dumps({"account_uuid": "acct-1", "session_id": SESSION[trace]})
+        first = {"llm": {"model_name": "claude-opus-5",
+                         "token_count": {"prompt": 10, "completion": 2}},
+                 "input": {"value": "hi"}}
+        if with_identity:
+            first["metadata"] = {"user_api_key_end_user_id": euid}
+        return pd.DataFrame({
+            "context.span_id": ids, "context.trace_id": [trace] * n,
+            "parent_id": [None] + ids[:-1],
+            "name": ["litellm_request"] + ["Claude_Code_Tool_Bash"] * (n - 1),
+            "span_kind": ["LLM"] + ["TOOL"] * (n - 1),
+            "start_time": pd.to_datetime([f"{day}T10:00:{i:02d}Z" for i in range(n)]),
+            "end_time": pd.to_datetime([f"{day}T10:00:{i + 1:02d}Z" for i in range(n)]),
+            "status_code": ["OK"] * n, "status_message": [""] * n,
+            "attributes": [json.dumps(first)] + ["{}"] * (n - 1),
+            "events": ["[]"] * n,
+            "llm_token_count_prompt": [10] + [0] * (n - 1),
+            "llm_token_count_completion": [2] + [0] * (n - 1),
+        })
+
+    @pytest.fixture
+    def store(self, tmp_path):
+        import duckdb
+
+        from dev_agent_lens.storage.spanstore import open_store
+
+        s = open_store(f"file://{tmp_path}/store")
+        s.ensure()
+        con = duckdb.connect()
+        con.execute("SET TimeZone='UTC'")
+        s.append_frame(con, self._frame(["a1", "a2"], "2026-09-01", "tA"), "spans_raw",
+                       source="srcA")
+        s.append_frame(con, self._frame(["b1"], "2026-09-01", "tB"), "spans_raw", source="srcB")
+        s.append_frame(con, self._frame(["u1", "u2"], "2026-09-02", "tU", with_identity=False),
+                       "spans_raw")   # landed before sync stamped a source
+        return s
+
+    def test_exports_the_source_plus_untagged_rows_in_the_raw_file_shape(self, store, tmp_path):
+        import pyarrow.parquet as pq
+
+        out = tmp_path / "parquet"
+        stats = ParquetExporter().export_store_to_partitioned("srcA", store, out)
+        assert (stats["spans"], stats["sessions"], stats["untagged_rows"]) == (4, 2, 2)
+        rows = pq.read_table(out / "spans" / "source=srcA").to_pylist()
+        assert sorted(r["span_id"] for r in rows) == ["a1", "a2", "u1", "u2"]   # b1 is srcB
+        a1 = next(r for r in rows if r["span_id"] == "a1")
+        # the packed `attributes` were read the way a direct Postgres sync reads them
+        assert a1["llm_model_name"] == "claude-opus-5" and a1["input_value"] == "hi"
+        assert a1["llm_token_count_prompt"] == 10 and a1["session_id"] == SESSION["tA"]
+        a2 = next(r for r in rows if r["span_id"] == "a2")
+        assert a2["session_id"] == SESSION["tA"]      # propagated from its sibling
+        assert a1["start_time"].isoformat().startswith("2026-09-01T10:00:00")
+        sessions = pq.read_table(out / "sessions" / "source=srcA.parquet").to_pylist()
+        assert {s["session_id"] for s in sessions} == {SESSION["tA"], "tU"}   # tU: no identity
+
+    def test_second_run_dedups_against_the_first(self, store, tmp_path):
+        out = tmp_path / "parquet"
+        exp = ParquetExporter()
+        exp.export_store_to_partitioned("srcA", store, out)
+        again = exp.export_store_to_partitioned("srcA", store, out)
+        assert (again["spans"], again["spans_skipped"]) == (0, 4)
+
+    def test_progress_is_one_call_per_day(self, store, tmp_path):
+        seen = []
+        ParquetExporter().export_store_to_partitioned(
+            "srcA", store, tmp_path / "p", progress_callback=lambda n, t: seen.append((n, t)))
+        assert seen == [(1, 2), (2, 2)]
+
+    def test_empty_store_is_a_file_not_found(self, tmp_path):
+        from dev_agent_lens.storage.spanstore import open_store
+
+        with pytest.raises(FileNotFoundError, match="holds no spans_raw"):
+            ParquetExporter().export_store_to_partitioned(
+                "x", open_store(f"file://{tmp_path}/e"), tmp_path)

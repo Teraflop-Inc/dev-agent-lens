@@ -87,6 +87,9 @@ def session_to_atif(
     steps: list[dict[str, Any]] = []
     session_id: str | None = None
     version: str | None = None
+    # The branch the session worked on. Claude Code writes it on every line; "HEAD" means
+    # no branch (a bare directory), which is no information.
+    git_branch: str | None = None
     model: str | None = None
 
     # Tool results arrive on later `user` lines; hold them until we can attach
@@ -99,6 +102,8 @@ def session_to_atif(
         stats[f"line:{line_type}"] += 1
         session_id = session_id or line.get("sessionId") or line.get("session_id")
         version = version or line.get("version")
+        if not git_branch and line.get("gitBranch") not in (None, "", "HEAD"):
+            git_branch = str(line["gitBranch"])
 
         if line_type not in CONVERSATION_TYPES:
             stats["dropped_non_conversation"] += 1
@@ -141,6 +146,7 @@ def session_to_atif(
         "schema_version": ATIF_SCHEMA_VERSION,
         "session_id": session_id,
         "trajectory_id": session_id,
+        **({"git_branch": git_branch} if git_branch else {}),
         "agent": {
             "name": AGENT_NAME,
             "version": version or "unknown",
@@ -297,24 +303,86 @@ def _attach_subagent_ref(trajectory: dict[str, Any], call_id: str, trajectory_id
     return False
 
 
+def index_subagent_files(files: Iterable[Path]) -> dict[str, Path]:
+    """Map ``agentId`` -> its sidechain transcript, over a list of session files."""
+    return {
+        f.name[len(SUBAGENT_FILE_PREFIX) : -len(".jsonl")]: f
+        for f in files
+        if f.name.startswith(SUBAGENT_FILE_PREFIX)
+    }
+
+
+def session_with_subagents_to_atif(
+    main: str | Path,
+    subagents: dict[str, Path] | None = None,
+) -> tuple[dict[str, Any], Counter[str]]:
+    """
+    Convert one main session, embedding the sidechains it spawned.
+
+    `subagents` maps ``agentId`` -> sidechain file, as built by
+    :func:`index_subagent_files` over the sibling files. Each spawned subagent
+    is embedded in ``subagent_trajectories`` and referenced from the Task
+    observation that spawned it, so harbor-atif2otel nests the subagent spans
+    under their Task span.
+
+    Converting a sidechain standalone instead is a trap worth naming: every
+    sidechain records the PARENT's ``sessionId``, and harbor-atif2otel seeds
+    trace ids from ``session_id`` and span ids from
+    ``{trace_id}:{trajectory_id}``. Converted on its own it collapses onto the
+    parent's trace id with identical span seeds, and the collisions silently
+    drop most of the spans. The distinct ``trajectory_id`` set here is what
+    keeps them apart.
+    """
+    main = Path(main)
+    subagents = subagents or {}
+
+    trajectory, stats = session_file_to_atif(main)
+
+    embedded: list[dict[str, Any]] = []
+    for agent_id, call_id in _task_call_map(main).items():
+        sub_file = subagents.get(agent_id)
+        if sub_file is None:
+            # Task ran outside the exported window; its transcript is absent.
+            stats["subagent_transcript_missing"] += 1
+            continue
+        sub, _ = session_file_to_atif(sub_file)
+        trajectory_id = f"{SUBAGENT_FILE_PREFIX}{agent_id}"
+        # session_id stays the parent's (ATIF v1.7 allows sharing it);
+        # trajectory_id is what must be unique.
+        sub["trajectory_id"] = trajectory_id
+        embedded.append(sub)
+        if _attach_subagent_ref(trajectory, call_id, trajectory_id):
+            stats["subagent_linked"] += 1
+        else:
+            stats["subagent_unlinked"] += 1
+            logger.warning("[atif] no observation for call_id=%s (agent=%s)", call_id, agent_id)
+    if embedded:
+        trajectory["subagent_trajectories"] = embedded
+
+    logger.info(
+        "[atif] session=%s steps=%d subagents=%d",
+        trajectory.get("session_id"),
+        len(trajectory["steps"]),
+        len(embedded),
+    )
+    stats["sessions"] += 1
+    return trajectory, stats
+
+
 def session_tree_to_atif(
     directory: str | Path,
 ) -> tuple[list[dict[str, Any]], Counter[str]]:
     """
     Convert a directory of Claude Code session JSONL files to ATIF trajectories.
 
-    One trajectory per real session, with each ``agent-<agentId>.jsonl``
-    sidechain embedded in ``subagent_trajectories`` and referenced from the Task
-    observation that spawned it, so harbor-atif2otel nests the subagent spans
-    under their Task span.
+    One trajectory per real session, each with its subagent sidechains embedded
+    -- see :func:`session_with_subagents_to_atif` for why that nesting is not
+    optional.
 
-    Converting each file standalone instead is a trap worth naming: every
-    sidechain records the PARENT's ``sessionId``, and harbor-atif2otel seeds
-    trace ids from ``session_id`` and span ids from
-    ``{trace_id}:{trajectory_id}``. A directory of 57 files would collapse onto
-    2 trace ids with identical span seeds, and the collisions would silently
-    drop most of the spans. Giving every subagent a distinct ``trajectory_id``
-    is what keeps them apart.
+    Holds every trajectory in the directory in memory at once. For a large tree
+    (one measured laptop had a 256 MB project dir), drive
+    :func:`session_with_subagents_to_atif` per session instead, as
+    ``dal ingest-sessions`` does.
 
     Returns:
         ``(trajectories, stats)``.
@@ -323,52 +391,19 @@ def session_tree_to_atif(
     stats: Counter[str] = Counter()
 
     files = sorted(directory.rglob("*.jsonl"))
-    subagents = {
-        f.name[len(SUBAGENT_FILE_PREFIX) : -len(".jsonl")]: f
-        for f in files
-        if f.name.startswith(SUBAGENT_FILE_PREFIX)
-    }
+    subagents = index_subagent_files(files)
     mains = [f for f in files if not f.name.startswith(SUBAGENT_FILE_PREFIX)]
     logger.info(
         "[atif] tree=%s sessions=%d subagent_files=%d",
-        directory, len(mains), len(subagents),
+        directory,
+        len(mains),
+        len(subagents),
     )
 
     trajectories: list[dict[str, Any]] = []
     for main in mains:
-        trajectory, session_stats = session_file_to_atif(main)
+        trajectory, session_stats = session_with_subagents_to_atif(main, subagents)
         stats.update(session_stats)
-
-        embedded: list[dict[str, Any]] = []
-        for agent_id, call_id in _task_call_map(main).items():
-            sub_file = subagents.get(agent_id)
-            if sub_file is None:
-                # Task ran outside the exported window; its transcript is absent.
-                stats["subagent_transcript_missing"] += 1
-                continue
-            sub, _ = session_file_to_atif(sub_file)
-            trajectory_id = f"{SUBAGENT_FILE_PREFIX}{agent_id}"
-            # session_id stays the parent's (ATIF v1.7 allows sharing it);
-            # trajectory_id is what must be unique.
-            sub["trajectory_id"] = trajectory_id
-            embedded.append(sub)
-            if _attach_subagent_ref(trajectory, call_id, trajectory_id):
-                stats["subagent_linked"] += 1
-            else:
-                stats["subagent_unlinked"] += 1
-                logger.warning(
-                    "[atif] no observation for call_id=%s (agent=%s)", call_id, agent_id
-                )
-        if embedded:
-            trajectory["subagent_trajectories"] = embedded
-
-        logger.info(
-            "[atif] session=%s steps=%d subagents=%d",
-            trajectory.get("session_id"),
-            len(trajectory["steps"]),
-            len(embedded),
-        )
         trajectories.append(trajectory)
-        stats["sessions"] += 1
 
     return trajectories, stats

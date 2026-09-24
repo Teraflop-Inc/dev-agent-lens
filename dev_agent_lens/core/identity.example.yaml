@@ -30,6 +30,9 @@ people:
         verified: false
         evidence: os_user=personb (N spans, Nd)
         note: Second account, same human — inferred, not yet self-reported.
+    # Optional, read by the typed layout to stamp `person` on spans that carry no account:
+    devices: []   # the 64-hex device hash Claude Code sends (device_id on the span)
+    users: []     # names given to `dal ingest-sessions --user`
 
 # Accounts seen in the data that map to no person. Keep them here so `is_complete`
 # reflects reality. NOTE: an absent account_uuid does NOT mean "a sandbox VM" — that

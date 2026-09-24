@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Codex session capture to the DAL receiver every minute (ENG2-402). Install with
+       scripts/install_codex_capture.sh
+     Run now: launchctl kickstart -k gui/$(id -u)/com.teraflop.dal-codex-capture
+     Log: ~/.dal/codex-capture.log. launchd never overlaps runs; a run is ~6 s. -->
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.teraflop.dal-codex-capture</string>
+  <key>ProgramArguments</key><array>
+    <string>/bin/bash</string><string>__REPO__/scripts/codex_capture.sh</string>
+  </array>
+  <key>WorkingDirectory</key><string>__REPO__</string>
+  <key>EnvironmentVariables</key><dict>
+    <key>PATH</key><string>__HOME__/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    <key>HOME</key><string>__HOME__</string>
+  </dict>
+  <key>StartInterval</key><integer>60</integer>
+  <key>RunAtLoad</key><true/>
+  <key>StandardOutPath</key><string>__HOME__/.dal/codex-capture.log</string>
+  <key>StandardErrorPath</key><string>__HOME__/.dal/codex-capture.log</string>
+</dict></plist>

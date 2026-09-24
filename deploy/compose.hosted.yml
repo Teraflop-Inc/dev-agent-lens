@@ -1,0 +1,49 @@
+# External object storage. No local MinIO and no dependency on a previous deployment.
+# docker compose --env-file deploy/.env.hosted -f deploy/compose.hosted.yml up -d
+# Keep one raw writer. Stop dal-otlp before running maintenance imports/rebuilds.
+name: dal-hosted
+x-dal-env: &dal-env
+  DAL_SPAN_STORE: ${DAL_SPAN_STORE:?set the S3 or R2 store URI}
+  DAL_RAW_GLOB: ${DAL_RAW_GLOB:?set the matching spans_raw Parquet glob}
+  AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:?set object storage credentials}
+  AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:?set object storage credentials}
+  AWS_SESSION_TOKEN: ${AWS_SESSION_TOKEN:-}
+  AWS_REGION: ${AWS_REGION:-auto}
+  DAL_CONFIG_PATH: /data/dal
+  DAL_IDENTITY: /data/identity.yaml
+  DAL_EVENTS_SECRET: ${DAL_EVENTS_SECRET:-}
+  DAL_DUCKDB_MEMORY: ${DAL_DUCKDB_MEMORY:-2GB}
+  DAL_DUCKDB_TMP: /data/duckdb-tmp
+  DAL_BUILD_DETERMINISTIC: '1'
+  DAL_BUILD_CHUNK_DAYS: ${DAL_BUILD_CHUNK_DAYS:-1}
+  PHOENIX_SQL_DATABASE_URL: ${PHOENIX_SQL_DATABASE_URL:-}
+  PHOENIX_SQL_DATABASE_SCHEMA: ${PHOENIX_SQL_DATABASE_SCHEMA:-phoenix}
+  DAL_SOURCES: ${DAL_SOURCES:-}
+  SYNC_DAYS: ${SYNC_DAYS:-2}
+  TYPED_REBUILD: ${TYPED_REBUILD:-0}
+services:
+  dal-otlp:
+    build: { context: .., dockerfile: deploy/Dockerfile }
+    image: ${DAL_IMAGE:-dal:local}
+    environment: *dal-env
+    volumes: [ 'dal-data:/data', './identity.yaml:/data/identity.yaml:ro' ]
+    command: ['dal', 'otlp-receive', '--host', '0.0.0.0', '--port', '4318']
+    # No unauthenticated public ingest. Put an authenticated TLS gateway in front.
+    ports: [ '127.0.0.1:${DAL_OTLP_PORT:-4318}:4318' ]
+    restart: unless-stopped
+  dal-sync:
+    image: ${DAL_IMAGE:-dal:local}
+    environment: *dal-env
+    volumes: [ 'dal-data:/data', './identity.yaml:/data/identity.yaml:ro' ]
+    # Never start a second writer with `up`. Operators run a bounded import
+    # with `run --rm dal-sync dal sync ...` while dal-otlp is stopped.
+    profiles: [maintenance]
+    command: ['dal', 'store', 'status']
+  dal-oracle:
+    image: ${DAL_IMAGE:-dal:local}
+    environment: *dal-env
+    volumes: [ 'dal-data:/data', './identity.yaml:/data/identity.yaml:ro' ]
+    profiles: [maintenance]
+    command: ['oracle']
+volumes:
+  dal-data: {}

@@ -1,0 +1,37 @@
+# LOCAL DEV ONLY. Default credentials, loopback-bound. Never deploy this file.
+# SeaweedFS — a SECOND, independent S3 implementation.
+#
+# It is here so "S3-compatible" gets tested rather than assumed. Running MinIO twice
+# would prove DAL works with MinIO; agreement between two separate codebases with
+# different storage models is evidence about the protocol.
+#
+#   docker compose -f docker/spanstore/seaweedfs.yml up -d
+#   dal store use 's3://dal/spans?endpoint=127.0.0.1:8333&tls=0'
+name: dal-seaweedfs
+services:
+  seaweedfs:
+    image: chrislusf/seaweedfs:latest
+    container_name: dal-seaweedfs
+    # -s3.config: without it SeaweedFS serves anonymous read/write/delete. Same dev
+    # credentials as MinIO so one environment drives both.
+    command: "server -dir=/data -s3 -s3.port=8333 -s3.config=/etc/seaweedfs/s3.json -master.volumeSizeLimitMB=1024"
+    ports:
+      # Loopback only. No S3 auth is configured and the parity harness puts real span
+      # data in here; published on 0.0.0.0 this was an anonymous read/write/delete store
+      # on the LAN. Found by the 2026-09-04 security review.
+      - "127.0.0.1:${DAL_SEAWEED_PORT:-8333}:8333"
+      - "127.0.0.1:${DAL_SEAWEED_MASTER_PORT:-9333}:9333"
+    volumes:
+      - seaweed_data:/data
+      - ./seaweedfs-s3.json:/etc/seaweedfs/s3.json:ro
+    healthcheck:
+      # 127.0.0.1, not localhost: in this Alpine image localhost resolves to ::1 first and
+      # weed listens on IPv4 only, so the check was "Connection refused" forever while the
+      # service answered fine from outside. Found 2026-09-04 via `docker ps` showing
+      # (unhealthy) on a server that had just passed a byte-identical parity run.
+      test: ["CMD-SHELL", "wget -q -O- -T 3 http://127.0.0.1:9333/cluster/status || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+volumes:
+  seaweed_data:

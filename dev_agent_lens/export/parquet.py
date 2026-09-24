@@ -17,10 +17,12 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from collections import defaultdict
+from collections.abc import Iterable, Iterator
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 from dev_agent_lens.export.dedupe import clean_session
 
@@ -231,6 +233,7 @@ class ParquetExporter:
         dedupe: bool = True,
         strip_nulls: bool = True,
         use_dictionary: bool = True,
+        compression_level: int | None = None,
     ) -> None:
         """Initialize the exporter.
 
@@ -244,11 +247,25 @@ class ParquetExporter:
                 with high value duplication. This can provide 50-70% additional
                 size reduction for agent trace data where tool outputs,
                 system messages, and errors repeat frequently.
+            compression_level: ZSTD level. Defaults to the configured store level
+                (get_zstd_level, currently 9) rather than to pyarrow's, which is 1.
+                Leaving it to pyarrow is what made every file under
+                ~/.dal/data/parquet/ level 1 while the store copy was level 9:
+                2112.6 MB against 204.8 MB on the same whole-fixture measurement,
+                and level 9 also queries faster. Only ZSTD and GZIP take a level;
+                for any other codec it is None and pyarrow ignores it.
         """
         self.compression = compression if compression != "none" else None
         self.dedupe = dedupe
         self.strip_nulls = strip_nulls
         self.use_dictionary = use_dictionary
+        if compression_level is None and self.compression in ("zstd", "gzip"):
+            from dev_agent_lens.config import get_zstd_level
+
+            compression_level = get_zstd_level()
+        self.compression_level = (
+            compression_level if self.compression in ("zstd", "gzip") else None
+        )
 
     def export_source(
         self,
@@ -328,6 +345,7 @@ class ParquetExporter:
                 sessions_table,
                 sessions_path,
                 compression=self.compression,
+                compression_level=self.compression_level,
             )
             stats["sessions_parquet_bytes"] = sessions_path.stat().st_size
 
@@ -348,6 +366,7 @@ class ParquetExporter:
                 spans_table,
                 spans_path,
                 compression=self.compression,
+                compression_level=self.compression_level,
                 use_dictionary=dict_columns,
             )
             stats["spans_parquet_bytes"] = spans_path.stat().st_size
@@ -462,6 +481,7 @@ class ParquetExporter:
                 combined_sessions,
                 existing_sessions_path,
                 compression=self.compression,
+                compression_level=self.compression_level,
             )
 
         if new_span_rows:
@@ -481,6 +501,7 @@ class ParquetExporter:
                 combined_spans,
                 existing_spans_path,
                 compression=self.compression,
+                compression_level=self.compression_level,
                 use_dictionary=dict_columns,
             )
 
@@ -606,6 +627,7 @@ class ParquetExporter:
                 new_sessions_table,
                 sessions_path,
                 compression=self.compression,
+                compression_level=self.compression_level,
             )
             stats["sessions_parquet_bytes"] = sessions_path.stat().st_size
 
@@ -708,6 +730,7 @@ class ParquetExporter:
                     chunk,
                     part_path,
                     compression=self.compression,
+                    compression_level=self.compression_level,
                     use_dictionary=dict_columns,
                 )
 
@@ -743,6 +766,21 @@ class ParquetExporter:
         return stats
 
 
+    @staticmethod
+    def _iter_raw_chunks(raw_files: list[Path], chunk_size: int) -> Iterator[list[dict[str, Any]]]:
+        """Yield the spans of `chunk_size` raw sync files at a time."""
+        for chunk_idx in range(0, len(raw_files), chunk_size):
+            chunk_spans: list[dict[str, Any]] = []
+            for raw_file in raw_files[chunk_idx:chunk_idx + chunk_size]:
+                with open(raw_file) as f:
+                    for line in f:
+                        if line.strip():
+                            try:
+                                chunk_spans.append(json.loads(line))
+                            except json.JSONDecodeError:
+                                continue
+            yield chunk_spans
+
     def export_raw_to_partitioned(
         self,
         source: str,
@@ -767,6 +805,116 @@ class ParquetExporter:
         Returns:
             Dictionary with export statistics.
         """
+        raw_dir = Path(raw_dir)
+        raw_files = sorted(raw_dir.glob("sync_*.jsonl")) + sorted(raw_dir.glob("sync_gap_*.jsonl"))
+        if not raw_files:
+            return {"sessions": 0, "spans": 0, "spans_skipped": 0, "part_files": 0, "weeks": 0}
+        total_chunks = (len(raw_files) + chunk_size - 1) // chunk_size
+        input_bytes = sum(f.stat().st_size for f in raw_files)
+        logger.info("[export:raw] source=%s files=%d chunks=%d bytes=%d",
+                    source, len(raw_files), total_chunks, input_bytes)
+        return self.export_chunks_to_partitioned(
+            source,
+            self._iter_raw_chunks(raw_files, chunk_size),
+            output_dir,
+            total_chunks=total_chunks,
+            input_bytes=input_bytes,
+            progress_callback=progress_callback,
+        )
+
+    def export_store_to_partitioned(
+        self,
+        source: str,
+        store: Any,
+        output_dir: str | Path,
+        progress_callback: callable | None = None,
+    ) -> dict[str, Any]:
+        """Export the span store's `spans_raw` for `source` to partitioned Parquet.
+
+        Reads one day partition at a time so memory is bounded by a day, not the store.
+        Each day's rows go through `normalize_phoenix`, the same unifier a direct
+        Postgres/SQLite sync uses, so a span exported from the store is flattened exactly
+        as it would have been from a raw sync file; the only difference is where the
+        bytes were read from.
+
+        Rows are selected by the `source` column `dal sync` stamps. Rows landed before
+        that stamp existed have none; they are included and counted in `untagged_rows`
+        so the caller can say so.
+        """
+        import duckdb
+
+        from dev_agent_lens.core.schema import normalize_phoenix
+        from dev_agent_lens.storage.spanstore.base import quote_literal
+
+        input_bytes = store.size_bytes("spans_raw")
+        if input_bytes == 0:
+            raise FileNotFoundError(f"the store at {store.uri} holds no spans_raw data yet")
+        con = duckdb.connect()
+        con.execute("SET TimeZone='UTC'")
+        store.attach_duckdb(con)
+        src = (f"read_parquet({quote_literal(store.read_glob('spans_raw'))}, "
+               "hive_partitioning=true, union_by_name=true)")
+        cols = {r[0] for r in con.execute(f"DESCRIBE SELECT * FROM {src}").fetchall()}
+        if "source" in cols:
+            where, params = " WHERE (source = ? OR source IS NULL)", [source]
+            untagged = con.execute(
+                f"SELECT count(*) FROM {src} WHERE source IS NULL").fetchone()[0]
+        else:
+            where, params, untagged = "", [], con.execute(
+                f"SELECT count(*) FROM {src}").fetchone()[0]
+        days = [r[0] for r in con.execute(
+            f"SELECT DISTINCT day FROM {src}{where} ORDER BY 1", params).fetchall()]
+        logger.info("[export:store] source=%s store=%s days=%d untagged=%d bytes=%d",
+                    source, store.uri, len(days), untagged, input_bytes)
+
+        def chunks() -> Iterator[list[dict[str, Any]]]:
+            for day in days:
+                t0 = time.perf_counter()
+                cond = " AND day = ?" if where else " WHERE day = ?"
+                df = con.execute(
+                    f"SELECT * EXCLUDE (day) FROM {src}{where}{cond}", params + [day]).df()
+                df = df.rename(
+                    columns={"span_id": "context.span_id", "trace_id": "context.trace_id"})
+                # The store keeps `attributes` / `events` as JSON text; a direct Postgres
+                # sync hands the unifier dicts (psycopg decodes jsonb). The session-id
+                # extractor only descends into a dict, so without this every trace fell
+                # back to its trace_id (verified live: not one real session survived).
+                for col in ("attributes", "events"):
+                    if col in df.columns:
+                        df[col] = df[col].map(
+                            lambda v: json.loads(v) if isinstance(v, str) else v)
+                # the same JSON round trip a raw sync file went through, so timestamps and
+                # numpy scalars arrive as the plain strings/ints the flattener expects
+                rows = json.loads(json.dumps(
+                    normalize_phoenix(df).to_dict(orient="records"), default=str))
+                logger.debug("[export:store] day=%s rows=%d in %.1fms",
+                             day, len(rows), (time.perf_counter() - t0) * 1000)
+                yield rows
+
+        stats = self.export_chunks_to_partitioned(
+            source, chunks(), output_dir,
+            total_chunks=len(days), input_bytes=input_bytes,
+            progress_callback=progress_callback,
+        )
+        stats["untagged_rows"] = untagged
+        return stats
+
+    def export_chunks_to_partitioned(
+        self,
+        source: str,
+        chunks: Iterable[list[dict[str, Any]]],
+        output_dir: str | Path,
+        *,
+        total_chunks: int,
+        input_bytes: int,
+        progress_callback: callable | None = None,
+    ) -> dict[str, Any]:
+        """The shared core: unified span dicts in, partitioned Parquet out.
+
+        `chunks` yields lists of unified spans (the raw sync-file shape). Each chunk is
+        grouped by session, flattened, de-duplicated by span_id against what is already
+        on disk, and written by ISO week. Fed by raw files or by the span store.
+        """
         try:
             import pyarrow as pa
             import pyarrow.parquet as pq
@@ -776,16 +924,8 @@ class ParquetExporter:
                 "Install with: uv add pyarrow"
             )
 
-        raw_dir = Path(raw_dir)
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
-
-        raw_files = sorted(raw_dir.glob("sync_*.jsonl")) + sorted(raw_dir.glob("sync_gap_*.jsonl"))
-        if not raw_files:
-            return {"sessions": 0, "spans": 0, "spans_skipped": 0, "part_files": 0, "weeks": 0}
-
-        total_chunks = (len(raw_files) + chunk_size - 1) // chunk_size
-        input_bytes = sum(f.stat().st_size for f in raw_files)
 
         # Load existing span_ids from parquet once (for dedup)
         spans_base = output_dir / "spans" / f"source={source}"
@@ -811,7 +951,6 @@ class ParquetExporter:
         }
 
         # Per-week writers that persist across chunks
-        week_writers: dict[str, tuple[pq.ParquetWriter, Path, int]] = {}
         week_part_idx: dict[str, int] = {}
 
         # Initialize part indices from existing files
@@ -829,24 +968,9 @@ class ParquetExporter:
                     else:
                         week_part_idx[week_key] = last_idx + 1
 
-        for chunk_idx in range(0, len(raw_files), chunk_size):
-            chunk_files = raw_files[chunk_idx:chunk_idx + chunk_size]
-            chunk_num = chunk_idx // chunk_size + 1
-
+        for chunk_num, chunk_spans in enumerate(chunks, 1):
             if progress_callback:
                 progress_callback(chunk_num, total_chunks)
-
-            # Read raw spans from this chunk
-            chunk_spans = []
-            for raw_file in chunk_files:
-                with open(raw_file) as f:
-                    for line in f:
-                        if line.strip():
-                            try:
-                                chunk_spans.append(json.loads(line))
-                            except json.JSONDecodeError:
-                                continue
-
             if not chunk_spans:
                 continue
 
@@ -926,7 +1050,8 @@ class ParquetExporter:
                                     idx = tbl.schema.get_field_index(col_name)
                                     col = tbl.column(col_name).cast(pa.timestamp("us"))
                                     if tbl_ref == "existing_table":
-                                        existing_table = existing_table.set_column(idx, col_name, col)
+                                        existing_table = existing_table.set_column(
+                                            idx, col_name, col)
                                     else:
                                         table = table.set_column(idx, col_name, col)
                     table = pa.concat_tables(
@@ -936,6 +1061,7 @@ class ParquetExporter:
                 pq.write_table(
                     table, part_path,
                     compression=self.compression,
+                    compression_level=self.compression_level,
                     use_dictionary=dict_columns,
                 )
 
@@ -966,7 +1092,12 @@ class ParquetExporter:
                     )
                 else:
                     new_sessions_table = existing_sessions
-            pq.write_table(new_sessions_table, sessions_path, compression=self.compression)
+            pq.write_table(
+                new_sessions_table,
+                sessions_path,
+                compression=self.compression,
+                compression_level=self.compression_level,
+            )
 
         # Compute output size
         total_span_bytes = sum(
@@ -977,7 +1108,10 @@ class ParquetExporter:
         stats["output_bytes"] = total_span_bytes + sessions_bytes
         stats["sessions_parquet_bytes"] = sessions_bytes
         stats["spans_parquet_bytes"] = total_span_bytes
-        stats["part_files"] = sum(1 for _ in (output_dir / "spans").rglob("*.parquet")) if (output_dir / "spans").exists() else 0
+        stats["part_files"] = (
+            sum(1 for _ in (output_dir / "spans").rglob("*.parquet"))
+            if (output_dir / "spans").exists() else 0
+        )
         stats["weeks"] = len(set(
             d.name for d in (output_dir / "spans" / f"source={source}").iterdir()
         )) if (output_dir / "spans" / f"source={source}").exists() else 0

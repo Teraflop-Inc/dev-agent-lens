@@ -109,8 +109,9 @@ def test_other_http_errors_fail_the_chunk_immediately():
 def test_push_refuses_to_send_colliding_span_ids():
     spans = [(None, _Span(1, 2, b"trace", b"a")), (None, _Span(1, 2, b"trace", b"a"))]
 
-    with patch.object(otlp, "_import_otel", return_value=(None,) * 6), patch.object(
-        otlp, "build_spans", return_value=(object(), spans, 0)
+    with (
+        patch.object(otlp, "_import_otel", return_value=(None,) * 6),
+        patch.object(otlp, "build_spans", return_value=(object(), spans, 0)),
     ):
         with pytest.raises(ValueError, match="trace_id, span_id"):
             otlp.push_trajectories("http://x", [{}], project="p")
@@ -119,12 +120,43 @@ def test_push_refuses_to_send_colliding_span_ids():
 def test_dry_run_sends_nothing():
     spans = [(None, _Span(1, 2, b"trace", b"a"))]
 
-    with patch.object(otlp, "_import_otel", return_value=(None,) * 6), patch.object(
-        otlp, "build_spans", return_value=(object(), spans, 3)
-    ), patch.object(otlp.urllib.request, "urlopen") as urlopen:
+    with (
+        patch.object(otlp, "_import_otel", return_value=(None,) * 6),
+        patch.object(otlp, "build_spans", return_value=(object(), spans, 3)),
+        patch.object(otlp.urllib.request, "urlopen") as urlopen,
+    ):
         result = otlp.push_trajectories("http://x", [{}], project="p", dry_run=True)
 
     urlopen.assert_not_called()
     assert result.spans_total == 1
     assert result.clamped_spans == 3
     assert result.spans_sent == 0
+
+
+def test_branch_lands_on_every_span_as_git_branch():
+    """The typed layout reads the ticket out of git.branch (ENG2-1540)."""
+    from dev_agent_lens.export.otlp import BRANCH_ATTRIBUTE, build_spans
+
+    traj = {
+        "schema_version": "ATIF-v1.6",
+        "session_id": "s-branch",
+        "trajectory_id": "s-branch",
+        "git_branch": "adam/eng2-1572-person",
+        "agent": {"name": "claude-code", "version": "2.1.0"},
+        "steps": [
+            {"step_id": 1, "source": "user", "message": "hi", "timestamp": "2026-08-04T09:59:00Z"},
+            {
+                "step_id": 2,
+                "source": "agent",
+                "message": "hello",
+                "timestamp": "2026-08-04T10:00:00Z",
+            },
+        ],
+    }
+    _, spans, _ = build_spans([traj], project="p", user_id=None)
+    assert spans
+    for _, span in spans:
+        assert any(
+            kv.key == BRANCH_ATTRIBUTE and kv.value.string_value == "adam/eng2-1572-person"
+            for kv in span.attributes
+        )
