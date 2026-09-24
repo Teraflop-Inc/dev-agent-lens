@@ -233,6 +233,27 @@ def test_cli_rebuild_publishes_and_full_option_rebuilds_unchanged_days(tmp_path,
     assert "spans_typed  empty" not in status.output
 
 
+@pytest.mark.parametrize("layout_args", [[], ["--layout", "typed"]])
+def test_cli_queries_published_snapshot(tmp_path, monkeypatch, layout_args):
+    from click.testing import CliRunner
+
+    from dev_agent_lens.cli.main import main
+
+    store = open_store(str(tmp_path / "store"))
+    store.ensure()
+    monkeypatch.setenv("DAL_SPAN_STORE", store.uri)
+    monkeypatch.setenv("DAL_CONFIG_PATH", str(tmp_path / "config"))
+    monkeypatch.delenv("DAL_SPAN_LAYOUT", raising=False)
+    append(store, duckdb.connect(), "2026-09-01", "a")
+    runner = CliRunner()
+    built = runner.invoke(main, ["store", "rebuild"])
+    assert built.exit_code == 0, built.output
+    result = runner.invoke(main, ["store", "query", *layout_args, "--format", "json",
+                                 "SELECT tokens_prompt FROM spans"])
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output) == [{"tokens_prompt": 1}]
+
+
 def test_legacy_rebuild_cannot_silently_leave_snapshot_readers_stale(tmp_path):
     store = open_store(str(tmp_path / "store"))
     store.ensure()
