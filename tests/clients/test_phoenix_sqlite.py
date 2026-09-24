@@ -24,7 +24,6 @@ import pytest
 from dev_agent_lens.clients.phoenix_sqlite import (
     PhoenixSQLiteClient,
     PhoenixSQLiteConnectionError,
-    PhoenixSQLiteError,
     PhoenixSQLiteQueryError,
 )
 
@@ -218,8 +217,7 @@ class TestPhoenixSQLiteClientInit:
     def test_docker_path_init(self):
         """Given Docker path, client parses it correctly."""
         client = PhoenixSQLiteClient(
-            "docker://phoenix-container:/root/.phoenix/phoenix.db",
-            project="test-project"
+            "docker://phoenix-container:/root/.phoenix/phoenix.db", project="test-project"
         )
         assert client._is_docker is True
         assert client._container_name == "phoenix-container"
@@ -303,9 +301,7 @@ class TestPhoenixSQLiteClientConnection:
 
     def test_docker_connection_no_docker_installed(self):
         """Given Docker mode but no docker command, raises error."""
-        client = PhoenixSQLiteClient(
-            "docker://container:/path/phoenix.db"
-        )
+        client = PhoenixSQLiteClient("docker://container:/path/phoenix.db")
         with patch("subprocess.run", side_effect=FileNotFoundError("docker not found")):
             assert client.test_connection() is False
 
@@ -441,9 +437,7 @@ class TestPhoenixSQLiteClientFetchAnnotations:
         client = PhoenixSQLiteClient(temp_db)
         spans_df = client.get_spans_dataframe()
 
-        annotations_df = client.get_span_annotations_dataframe(
-            spans_dataframe=spans_df
-        )
+        annotations_df = client.get_span_annotations_dataframe(spans_dataframe=spans_df)
 
         assert isinstance(annotations_df, pd.DataFrame)
         assert len(annotations_df) == 2
@@ -455,9 +449,7 @@ class TestPhoenixSQLiteClientFetchAnnotations:
         """Given list of span IDs, fetches annotations."""
         client = PhoenixSQLiteClient(temp_db)
 
-        annotations_df = client.get_span_annotations_dataframe(
-            span_ids=["span-001", "span-003"]
-        )
+        annotations_df = client.get_span_annotations_dataframe(span_ids=["span-001", "span-003"])
 
         assert len(annotations_df) == 2
         assert set(annotations_df["span_id"]) == {"span-001", "span-003"}
@@ -466,9 +458,7 @@ class TestPhoenixSQLiteClientFetchAnnotations:
         """Given single span ID, fetches its annotations."""
         client = PhoenixSQLiteClient(temp_db)
 
-        annotations_df = client.get_span_annotations_dataframe(
-            span_ids=["span-001"]
-        )
+        annotations_df = client.get_span_annotations_dataframe(span_ids=["span-001"])
 
         assert len(annotations_df) == 1
         assert annotations_df.iloc[0]["span_id"] == "span-001"
@@ -478,9 +468,7 @@ class TestPhoenixSQLiteClientFetchAnnotations:
         """Given span ID with no annotations, returns empty DataFrame."""
         client = PhoenixSQLiteClient(temp_db)
 
-        annotations_df = client.get_span_annotations_dataframe(
-            span_ids=["span-002"]
-        )
+        annotations_df = client.get_span_annotations_dataframe(span_ids=["span-002"])
 
         assert isinstance(annotations_df, pd.DataFrame)
         assert len(annotations_df) == 0
@@ -496,9 +484,7 @@ class TestPhoenixSQLiteClientFetchAnnotations:
         """Given JSON metadata, parses as dict."""
         client = PhoenixSQLiteClient(temp_db)
 
-        annotations_df = client.get_span_annotations_dataframe(
-            span_ids=["span-001"]
-        )
+        annotations_df = client.get_span_annotations_dataframe(span_ids=["span-001"])
 
         metadata = annotations_df.iloc[0]["metadata"]
         assert isinstance(metadata, dict)
@@ -507,9 +493,7 @@ class TestPhoenixSQLiteClientFetchAnnotations:
         """Given timestamp strings, converts to datetime."""
         client = PhoenixSQLiteClient(temp_db)
 
-        annotations_df = client.get_span_annotations_dataframe(
-            span_ids=["span-001"]
-        )
+        annotations_df = client.get_span_annotations_dataframe(span_ids=["span-001"])
 
         assert pd.api.types.is_datetime64_any_dtype(annotations_df["created_at"])
         assert pd.api.types.is_datetime64_any_dtype(annotations_df["updated_at"])
@@ -565,18 +549,13 @@ class TestPhoenixSQLiteClientDockerMode:
     def test_docker_mode_execute_query(self):
         """Given Docker mode, executes query via docker exec."""
         client = PhoenixSQLiteClient(
-            "docker://test-container:/root/phoenix.db",
-            project="test-project"
+            "docker://test-container:/root/phoenix.db", project="test-project"
         )
 
         mock_stdout = '[{"count": 42}]'
 
         with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(
-                returncode=0,
-                stdout=mock_stdout,
-                stderr=""
-            )
+            mock_run.return_value = MagicMock(returncode=0, stdout=mock_stdout, stderr="")
 
             rows = client._execute_query("SELECT COUNT(*) as count FROM projects")
 
@@ -585,25 +564,17 @@ class TestPhoenixSQLiteClientDockerMode:
 
     def test_docker_mode_execution_failure(self):
         """Given Docker exec failure, raises PhoenixSQLiteQueryError."""
-        client = PhoenixSQLiteClient(
-            "docker://test-container:/root/phoenix.db"
-        )
+        client = PhoenixSQLiteClient("docker://test-container:/root/phoenix.db")
 
         with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(
-                returncode=1,
-                stdout="",
-                stderr="Container not found"
-            )
+            mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="Container not found")
 
             with pytest.raises(PhoenixSQLiteQueryError, match="Docker exec failed"):
                 client._execute_query("SELECT 1")
 
     def test_docker_mode_timeout(self):
         """Given Docker exec timeout, raises PhoenixSQLiteQueryError."""
-        client = PhoenixSQLiteClient(
-            "docker://test-container:/root/phoenix.db"
-        )
+        client = PhoenixSQLiteClient("docker://test-container:/root/phoenix.db")
 
         with patch("subprocess.run", side_effect=subprocess.TimeoutExpired("cmd", 300)):
             with pytest.raises(PhoenixSQLiteQueryError, match="timed out"):
@@ -611,16 +582,10 @@ class TestPhoenixSQLiteClientDockerMode:
 
     def test_docker_mode_invalid_json_response(self):
         """Given invalid JSON from Docker, raises PhoenixSQLiteQueryError."""
-        client = PhoenixSQLiteClient(
-            "docker://test-container:/root/phoenix.db"
-        )
+        client = PhoenixSQLiteClient("docker://test-container:/root/phoenix.db")
 
         with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(
-                returncode=0,
-                stdout="not valid json",
-                stderr=""
-            )
+            mock_run.return_value = MagicMock(returncode=0, stdout="not valid json", stderr="")
 
             with pytest.raises(PhoenixSQLiteQueryError, match="Failed to parse"):
                 client._execute_query("SELECT 1")
@@ -638,9 +603,7 @@ class TestPhoenixSQLiteClientErrorHandling:
 
     def test_docker_mode_get_connection_raises_error(self):
         """Given Docker mode, _get_connection() raises error."""
-        client = PhoenixSQLiteClient(
-            "docker://test-container:/root/phoenix.db"
-        )
+        client = PhoenixSQLiteClient("docker://test-container:/root/phoenix.db")
 
         with pytest.raises(PhoenixSQLiteConnectionError, match="Docker mode"):
             client._get_connection()
@@ -659,10 +622,78 @@ class TestPhoenixSQLiteClientRepr:
 
     def test_repr_docker(self):
         """Given Docker client, repr shows Docker path and project."""
-        client = PhoenixSQLiteClient(
-            "docker://container:/path/db", project="test-project"
-        )
+        client = PhoenixSQLiteClient("docker://container:/path/db", project="test-project")
         result = repr(client)
 
         assert "docker://container:/path/db" in result
         assert "test-project" in result
+
+
+class TestTimeFilterIsFormatIndependent:
+    """The time filter must not depend on how Phoenix happened to serialise timestamps.
+
+    The original filter compared raw text and relied on a space separator. That is an
+    SQLAlchemy implementation detail; the fixture above writes ISO 'T', and any other shape
+    (a '+00:00' suffix, microseconds) makes the comparison lexical and returns the whole
+    table. Both shapes must filter identically.
+    """
+
+    @pytest.fixture(params=["space", "iso-T", "iso-T-microseconds", "space-tz"])
+    def db_with_format(self, request, tmp_path):
+        fmt = {
+            "space": ("2025-01-01 10:00:00", "2025-01-01 11:00:00"),
+            "iso-T": ("2025-01-01T10:00:00", "2025-01-01T11:00:00"),
+            "iso-T-microseconds": ("2025-01-01T10:00:00.123456", "2025-01-01T11:00:00.654321"),
+            "space-tz": ("2025-01-01 10:00:00+00:00", "2025-01-01 11:00:00+00:00"),
+        }[request.param]
+        db = tmp_path / f"{request.param}.db"
+        conn = sqlite3.connect(db)
+        conn.executescript("""
+            CREATE TABLE projects (id INTEGER PRIMARY KEY, name TEXT);
+            CREATE TABLE traces (id INTEGER PRIMARY KEY, project_rowid INTEGER, trace_id TEXT,
+                                 start_time TIMESTAMP, end_time TIMESTAMP);
+            CREATE TABLE spans (id INTEGER PRIMARY KEY, trace_rowid INTEGER, span_id TEXT,
+                                parent_id TEXT, name TEXT, span_kind TEXT,
+                                start_time TIMESTAMP, end_time TIMESTAMP,
+                                attributes TEXT, events TEXT, status_code TEXT,
+                                status_message TEXT, cumulative_error_count INTEGER,
+                                cumulative_llm_token_count_prompt INTEGER,
+                                cumulative_llm_token_count_completion INTEGER,
+                                llm_token_count_prompt INTEGER,
+                                llm_token_count_completion INTEGER);
+            INSERT INTO projects VALUES (1, 'dev-agent-lens');  -- the client's default project
+            INSERT INTO traces VALUES (1, 1, 'trace-early', NULL, NULL);
+            INSERT INTO traces VALUES (2, 1, 'trace-late',  NULL, NULL);
+        """)
+        early, late = fmt
+        for i, (trace, ts, sid) in enumerate([(1, early, "early"), (2, late, "late")], 1):
+            conn.execute(
+                "INSERT INTO spans VALUES (?,?,?,NULL,'x','LLM',?,?,'{}','[]','OK','',0,0,0,0,0)",
+                (i, trace, sid, ts, ts),
+            )
+        conn.commit()
+        conn.close()
+        return db, request.param
+
+    def test_start_time_selects_only_later_rows(self, db_with_format):
+        db, fmt = db_with_format
+        df = PhoenixSQLiteClient(db).get_spans_dataframe(start_time=datetime(2025, 1, 1, 10, 30))
+        assert list(df["context.span_id"]) == ["late"], f"format={fmt}"
+
+    def test_end_time_selects_only_earlier_rows(self, db_with_format):
+        db, fmt = db_with_format
+        df = PhoenixSQLiteClient(db).get_spans_dataframe(end_time=datetime(2025, 1, 1, 10, 30))
+        assert list(df["context.span_id"]) == ["early"], f"format={fmt}"
+
+    def test_window_selects_exactly_one_row(self, db_with_format):
+        """A window around the first row returns it and only it.
+
+        (An earlier version asserted an empty window between the rows returned zero, which
+        the broken lexical compare ALSO satisfied: >= passed everything and < passed
+        nothing, so the intersection was empty either way. This one discriminates.)
+        """
+        db, fmt = db_with_format
+        df = PhoenixSQLiteClient(db).get_spans_dataframe(
+            start_time=datetime(2025, 1, 1, 9, 30), end_time=datetime(2025, 1, 1, 10, 30)
+        )
+        assert list(df["context.span_id"]) == ["early"], f"format={fmt}"

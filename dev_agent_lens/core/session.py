@@ -11,6 +11,7 @@ Session ID Patterns:
 
 from __future__ import annotations
 
+import ast
 import json
 import re
 from typing import Any
@@ -28,15 +29,32 @@ ACCOUNT_PATTERN = re.compile(r"account_([a-f0-9-]{36})")
 _IDENTITY_KEYS = ("device_id", "account_uuid", "session_id")
 
 
+_MAX_LITERAL_LEN = 65_536
+
+
 def _maybe_json_obj(value: Any) -> dict | None:
-    """Return ``value`` as a dict if it is one (or a JSON-object string), else None."""
+    """Return ``value`` as a dict if it is one, a JSON-object string, or a Python dict
+    repr; else None.
+
+    The third form is real: ``raw_gen_ai_request`` spans carry the identity at
+    ``attributes.llm.anthropic.metadata`` as ``"{'user_id': '{\"device_id\": ...}'}"``,
+    a ``str(dict)`` with single quotes that ``json.loads`` rejects. Left to the regex
+    fallback, that string yields the literal session ``"id"`` (the same bug the JSON form
+    had, by a new door; verified on live data 2026-09-04, on a large share of the spans).
+    ``ast.literal_eval`` evaluates literals only, so it is safe on untrusted text.
+    """
     if isinstance(value, dict):
         return value
     if isinstance(value, str) and value.lstrip().startswith("{"):
         try:
             parsed = json.loads(value)
         except (json.JSONDecodeError, TypeError):
-            return None
+            parsed = None
+            if len(value) <= _MAX_LITERAL_LEN:
+                try:
+                    parsed = ast.literal_eval(value)
+                except (ValueError, SyntaxError, TypeError, MemoryError, RecursionError):
+                    parsed = None
         return parsed if isinstance(parsed, dict) else None
     return None
 
@@ -76,7 +94,10 @@ def _parse_identity(value: Any) -> dict[str, str | None]:
     session_match = SESSION_PATTERN.search(text)
     out["device_id"] = user_match.group(1) if user_match else None
     out["account_id"] = account_match.group(1) if account_match else None
-    out["session_id"] = session_match.group(1) if session_match else None
+    # `session_id` as a KEY inside any un-decodable object text matches this regex and
+    # would attribute the span to a session literally named "id"; no real id is "id"
+    session_id = session_match.group(1) if session_match else None
+    out["session_id"] = None if session_id in (None, "id") else session_id
     return out
 
 
@@ -99,15 +120,11 @@ def extract_session_id(metadata: Any) -> str | None:
     if metadata is None or (isinstance(metadata, float) and pd.isna(metadata)):
         return None
 
-    # Handle string metadata (may be raw string or JSON)
+    # Handle string metadata (JSON object, Python dict repr, or a legacy string)
     if isinstance(metadata, str):
-        # Try to parse as JSON first
-        try:
-            parsed = json.loads(metadata)
-            if isinstance(parsed, dict):
-                return _extract_from_dict(parsed)
-        except (json.JSONDecodeError, TypeError):
-            pass
+        parsed = _maybe_json_obj(metadata)
+        if parsed is not None:
+            return _extract_from_dict(parsed)
 
         # Try to extract from string pattern
         return _extract_from_string(metadata)

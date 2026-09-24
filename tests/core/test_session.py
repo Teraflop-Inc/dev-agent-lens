@@ -405,3 +405,49 @@ class TestJsonObjectIdentity:
         obj = '{"account_uuid":"00000000-0000-0000-0000-0000000000a1"}'
         assert extract_account_id(obj) == "00000000-0000-0000-0000-0000000000a1"
         assert extract_user_id(obj) is None
+
+
+class TestPythonReprIdentity:
+    """`raw_gen_ai_request` spans carry the identity as a str(dict), single quotes and
+    all, at attributes.llm.anthropic.metadata. Verified live 2026-09-04: a large share of a
+    day's spans came out with session "id" through the regex fallback."""
+
+    UUID = "0f0f0f0f-1111-4222-8333-444444444444"
+    INNER = ('{"device_id":"d3v1c3","account_uuid":"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",'
+             f'"session_id":"{UUID}"}}')
+    REPR = "{'user_id': '" + INNER + "'}"
+
+    def test_repr_string_yields_the_session_uuid(self):
+        from dev_agent_lens.core.session import extract_session_id
+
+        assert extract_session_id(self.REPR) == self.UUID
+
+    def test_regex_fallback_never_returns_the_key_name(self):
+        from dev_agent_lens.core.session import _parse_identity
+
+        # not JSON, not a Python literal: only the regex path is left, and it must not
+        # attribute the text to a session called "id"
+        broken = 'user_id: {"session_id":"' + self.UUID + '"} trailing junk'
+        assert _parse_identity(broken)["session_id"] is None
+
+    def test_legacy_underscore_string_still_parses(self):
+        from dev_agent_lens.core.session import _parse_identity
+
+        legacy = f"user_abc123_account_aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee_session_{self.UUID}"
+        assert _parse_identity(legacy)["session_id"] == self.UUID
+
+    def test_span_with_only_the_repr_identity_resolves(self):
+        from dev_agent_lens.core.session import extract_session_id_from_span
+
+        span = {
+            "trace_id": "014adb0976378470a426dc254783c8f5",
+            "raw_attributes": {"attributes": {"llm": {"anthropic": {"metadata": self.REPR}}}},
+        }
+        assert extract_session_id_from_span(span) == self.UUID
+
+    def test_literal_eval_is_bounded(self):
+        from dev_agent_lens.core.session import _MAX_LITERAL_LEN, _maybe_json_obj
+
+        assert _maybe_json_obj("{'a': 1}") == {"a": 1}
+        assert _maybe_json_obj("{'a': " + "1" * (_MAX_LITERAL_LEN + 10) + "}") is None
+        assert _maybe_json_obj("{'a': __import__('os')}") is None   # not a literal

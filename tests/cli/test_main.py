@@ -7,6 +7,7 @@ These tests use Click's test runner to verify CLI functionality.
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -135,178 +136,256 @@ class TestDefaultBackend:
 
 
 class TestSyncCommand:
-    """Tests for sync command."""
+    """Tests for the sync command.
+
+    Rewritten 2026-09-04. The originals predated the move to named sources: they set
+    DAL_PHOENIX_URL and expected `--backend` and `--push`, none of which the command has
+    any more, so 8 of 10 failed with "No sources configured" or "No such option". Every
+    assertion below is against strings the command prints today, captured by running it.
+    """
+
+    @pytest.fixture
+    def phoenix_source(self, runner, monkeypatch, tmp_path):
+        """A configured Phoenix source in an isolated config + data dir."""
+        monkeypatch.setenv("DAL_DATA_PATH", str(tmp_path))
+        monkeypatch.setenv("DAL_CONFIG_PATH", str(tmp_path / "config"))
+        r = runner.invoke(
+            main,
+            ["config", "add-source", "test-phoenix", "--type", "phoenix", "--url", "localhost:6006"],
+        )
+        assert r.exit_code == 0, r.output
+        return "test-phoenix"
+
+    @staticmethod
+    def _spans(n: int = 2) -> pd.DataFrame:
+        return pd.DataFrame({
+            "span_id": [f"span{i}" for i in range(n)],
+            "name": [f"test{i}" for i in range(n)],
+            "context.span_id": [f"span{i}" for i in range(n)],
+            "context.trace_id": ["trace1"] * n,
+            "start_time": [f"2025-01-01T12:0{i}:00" for i in range(n)],
+        })
+
+    @staticmethod
+    def _state(tmp_path):
+        f = tmp_path / "state" / "sync_state.json"
+        return json.load(open(f)) if f.exists() else None
 
     def test_sync_help(self, runner):
-        """Sync command shows help."""
+        """Sync command shows its current options."""
         result = runner.invoke(main, ["sync", "--help"])
 
         assert result.exit_code == 0
-        assert "--full" in result.output
-        assert "--backend" in result.output
-        assert "--push" in result.output
+        for opt in ("--source", "--all-sources", "--full", "--days"):
+            assert opt in result.output, opt
+        # removed when sources became named; a regression would resurrect them
+        assert "--backend" not in result.output
+        assert "--push" not in result.output
 
-    def test_sync_no_backends_configured(self, runner, monkeypatch, tmp_path):
-        """Given no backends or sources, sync fails with error."""
-        monkeypatch.delenv("DAL_PHOENIX_URL", raising=False)
-        monkeypatch.delenv("ARIZE_API_KEY", raising=False)
+    def test_sync_no_sources_configured(self, runner, monkeypatch, tmp_path):
+        """Given no sources, sync fails with an actionable error."""
         monkeypatch.setenv("DAL_CONFIG_PATH", str(tmp_path / "config"))
 
         result = runner.invoke(main, ["sync"])
 
         assert result.exit_code == 1
-        assert "No sources or backends configured" in result.output
+        assert "No sources configured" in result.output
+        assert "dal config add-source" in result.output
 
-    def test_sync_backend_not_configured(self, runner, monkeypatch):
-        """Given unconfigured backend, sync fails."""
-        monkeypatch.delenv("ARIZE_API_KEY", raising=False)
+    def test_sync_unknown_source(self, runner, monkeypatch, tmp_path):
+        """Given a source name that does not exist, sync fails and names it."""
+        monkeypatch.setenv("DAL_CONFIG_PATH", str(tmp_path / "config"))
 
-        result = runner.invoke(main, ["sync", "--backend", "arize-cloud"])
+        result = runner.invoke(main, ["sync", "--source", "nope"])
 
         assert result.exit_code == 1
-        assert "not configured" in result.output
+        assert "Source 'nope' not found" in result.output
 
-    def test_sync_incremental_mode_shown(self, runner, monkeypatch, tmp_path):
-        """Sync shows incremental mode by default."""
-        monkeypatch.setenv("DAL_PHOENIX_URL", "http://localhost:6006")
-        monkeypatch.setenv("DAL_DATA_PATH", str(tmp_path))
-        monkeypatch.setenv("DAL_CONFIG_PATH", str(tmp_path / "config"))
-
-        # Mock the client to return empty DataFrame
+    def test_sync_one_day_is_lightweight(self, runner, phoenix_source):
+        """A one-day sync runs in lightweight mode. (The earlier version asserted
+        'robust OR lightweight', which the command always prints: a tautology.)"""
         with patch("dev_agent_lens.cli.main.PhoenixClient") as mock_client:
-            mock_instance = MagicMock()
-            mock_instance.get_spans_dataframe.return_value = pd.DataFrame()
-            mock_client.return_value = mock_instance
+            mock_client.return_value.get_spans_dataframe.return_value = pd.DataFrame()
+            result = runner.invoke(main, ["sync", "--source", phoenix_source, "--days", "1"])
 
-            result = runner.invoke(main, ["sync"])
+        assert result.exit_code == 0, result.output
+        assert "Mode: lightweight" in result.output
+        assert "Mode: robust" not in result.output
 
-        assert "Mode: incremental" in result.output
-
-    def test_sync_full_mode_shown(self, runner, monkeypatch, tmp_path):
-        """Sync --full shows full mode."""
-        monkeypatch.setenv("DAL_PHOENIX_URL", "http://localhost:6006")
-        monkeypatch.setenv("DAL_DATA_PATH", str(tmp_path))
-        monkeypatch.setenv("DAL_CONFIG_PATH", str(tmp_path / "config"))
+    def test_sync_multi_day_is_robust_and_batches(self, runner, phoenix_source, tmp_path):
+        """A multi-day window takes the checkpointing path: robust mode, several batches,
+        state advanced, checkpoint file cleaned up. --delay 0 keeps it fast."""
+        with patch("dev_agent_lens.cli.main.PhoenixClient") as mock_client:
+            mock_client.return_value.get_spans_dataframe.return_value = pd.DataFrame()
+            result = runner.invoke(main, ["sync", "--source", phoenix_source, "--days", "7",
+                                          "--delay", "0", "--batch-days", "7"])
+        assert result.exit_code == 0, result.output
+        assert "Mode: robust" in result.output
+        assert phoenix_source in self._state(tmp_path)["backends"]
 
         with patch("dev_agent_lens.cli.main.PhoenixClient") as mock_client:
-            mock_instance = MagicMock()
-            mock_instance.get_spans_dataframe.return_value = pd.DataFrame()
-            mock_client.return_value = mock_instance
+            mock_client.return_value.get_spans_dataframe.return_value = pd.DataFrame()
+            result = runner.invoke(main, ["sync", "--source", phoenix_source, "--full",
+                                          "--days", "1", "--batch-hours", "12", "--delay", "0"])
+        assert result.exit_code == 0, result.output
+        assert "Processing 2 batches" in result.output
+        assert mock_client.return_value.get_spans_dataframe.call_count == 2
 
-            result = runner.invoke(main, ["sync", "--full"])
+    def test_sync_full_ignores_last_sync(self, runner, phoenix_source):
+        """--full re-syncs the default window instead of resuming from last_sync.
 
-        assert "Mode: full" in result.output
+        (The earlier version passed --full together with --days 1, and --days takes
+        priority, so --full was never exercised.)
+        """
+        with patch("dev_agent_lens.cli.main.PhoenixClient") as mock_client:
+            mock_client.return_value.get_spans_dataframe.return_value = pd.DataFrame()
+            runner.invoke(main, ["sync", "--source", phoenix_source, "--days", "1"])   # seeds last_sync
+            incremental = runner.invoke(main, ["sync", "--source", phoenix_source,
+                                               "--delay", "0", "--batch-days", "30"])
+            full = runner.invoke(main, ["sync", "--source", phoenix_source, "--full",
+                                        "--delay", "0", "--batch-days", "30"])
+        assert "incremental from last_sync" in incremental.output, incremental.output
+        assert "default 30 days" in full.output, full.output
 
-    def test_sync_fetches_spans(self, runner, monkeypatch, tmp_path):
-        """Sync fetches and stores spans."""
-        monkeypatch.setenv("DAL_PHOENIX_URL", "http://localhost:6006")
-        monkeypatch.setenv("DAL_DATA_PATH", str(tmp_path))
-        monkeypatch.setenv("DAL_CONFIG_PATH", str(tmp_path / "config"))
+    def test_sync_fetches_spans(self, runner, phoenix_source):
+        """Sync fetches spans from the source and completes."""
+        with patch("dev_agent_lens.cli.main.PhoenixClient") as mock_client:
+            mock_client.return_value.get_spans_dataframe.return_value = self._spans(2)
+            result = runner.invoke(main, ["sync", "--source", phoenix_source, "--days", "1"])
 
-        mock_spans = pd.DataFrame({
-            "span_id": ["span1", "span2"],
-            "name": ["test1", "test2"],
-            "context.span_id": ["span1", "span2"],
-            "context.trace_id": ["trace1", "trace1"],
-            "start_time": ["2025-01-01T12:00:00", "2025-01-01T12:01:00"],
-            "metadata": [{"user_id": "session_abc"}, {"user_id": "session_abc"}],
+        assert result.exit_code == 0, result.output
+        assert "2 spans" in result.output
+        assert "Sync complete" in result.output
+
+    def test_sync_updates_state(self, runner, phoenix_source, tmp_path):
+        """After a successful sync, state records the source by NAME."""
+        with patch("dev_agent_lens.cli.main.PhoenixClient") as mock_client:
+            mock_client.return_value.get_spans_dataframe.return_value = self._spans(1)
+            result = runner.invoke(main, ["sync", "--source", phoenix_source, "--days", "1"])
+
+        assert result.exit_code == 0, result.output
+        state = self._state(tmp_path)
+        assert state is not None
+        assert phoenix_source in state["backends"]
+        assert state["backends"][phoenix_source]["last_sync"] is not None
+
+    def test_sync_no_spans_still_updates_state(self, runner, phoenix_source, tmp_path):
+        """An empty but successful sync is still a successful sync: state advances."""
+        with patch("dev_agent_lens.cli.main.PhoenixClient") as mock_client:
+            mock_client.return_value.get_spans_dataframe.return_value = pd.DataFrame()
+            result = runner.invoke(main, ["sync", "--source", phoenix_source, "--days", "1"])
+
+        assert result.exit_code == 0, result.output
+        assert "Total: 0 spans" in result.output
+        assert f"Updated sync state for '{phoenix_source}'" in result.output
+        assert phoenix_source in self._state(tmp_path)["backends"]
+
+    def test_sync_does_not_mutate_process_environment(self, runner, phoenix_source):
+        """sync must not write the source's url/project into os.environ.
+
+        It used to, so that a bare PhoenixClient() downstream would pick them up. The cost
+        was that source B silently inherited source A's URL under --all-sources whenever
+        B had none, and one test's source leaked into the next test's client default.
+        """
+        assert "DAL_PHOENIX_URL" not in os.environ          # conftest guarantees this
+        with patch("dev_agent_lens.cli.main.PhoenixClient") as mock_client:
+            mock_client.return_value.get_spans_dataframe.return_value = pd.DataFrame()
+            result = runner.invoke(main, ["sync", "--source", phoenix_source, "--days", "1"])
+            assert result.exit_code == 0, result.output
+            # and the client received the source explicitly rather than via the environment
+            _, kwargs = mock_client.call_args
+            assert kwargs.get("base_url") == "localhost:6006"
+
+        assert "DAL_PHOENIX_URL" not in os.environ
+        assert "DAL_PHOENIX_PROJECT" not in os.environ
+
+    def test_sync_lands_batches_in_the_span_store_when_one_is_chosen(self, runner, phoenix_source, tmp_path):
+        """With `dal store use` done, every synced batch is appended to spans_raw."""
+        r = runner.invoke(main, ["store", "use", f"file://{tmp_path}/store"])
+        assert r.exit_code == 0, r.output
+        frame = pd.DataFrame({
+            "context.span_id": ["s1", "s2"], "context.trace_id": ["t1", "t1"],
+            "parent_id": [None, "s1"], "name": ["litellm_request", "Bash"], "span_kind": ["LLM", "TOOL"],
+            "start_time": pd.to_datetime(["2025-01-01T12:00:00Z", "2025-01-01T12:00:01Z"]),
+            "end_time": pd.to_datetime(["2025-01-01T12:00:01Z", "2025-01-01T12:00:02Z"]),
+            "status_code": ["OK", "OK"], "status_message": ["", ""],
+            "attributes": ['{"llm":{"model_name":"m"}}', '{}'], "events": ["[]", "[]"],
+            "cumulative_error_count": [0, 0], "cumulative_llm_token_count_prompt": [1, 0],
+            "cumulative_llm_token_count_completion": [1, 0],
+            "llm_token_count_prompt": [1, 0], "llm_token_count_completion": [1, 0],
         })
-
-        # Mock the internal Phoenix client to bypass import check
-        with patch("dev_agent_lens.clients.phoenix._PhoenixClient", MagicMock()):
-            with patch.object(
-                __import__("dev_agent_lens.clients.phoenix", fromlist=["PhoenixClient"]).PhoenixClient,
-                "get_spans_dataframe",
-                return_value=mock_spans,
-            ):
-                result = runner.invoke(main, ["sync"])
-
-        assert "Fetched 2 spans" in result.output
-        assert "Sync complete!" in result.output
-
-    def test_sync_updates_state(self, runner, monkeypatch, tmp_path):
-        """After successful sync, state is updated."""
-        monkeypatch.setenv("DAL_PHOENIX_URL", "http://localhost:6006")
-        monkeypatch.setenv("DAL_DATA_PATH", str(tmp_path))
-        monkeypatch.setenv("DAL_CONFIG_PATH", str(tmp_path / "config"))
-
-        mock_spans = pd.DataFrame({
-            "span_id": ["span1"],
-            "name": ["test"],
-            "context.span_id": ["span1"],
-            "context.trace_id": ["trace1"],
-        })
-
-        # Mock the internal Phoenix client to bypass import check
-        with patch("dev_agent_lens.clients.phoenix._PhoenixClient", MagicMock()):
-            with patch.object(
-                __import__("dev_agent_lens.clients.phoenix", fromlist=["PhoenixClient"]).PhoenixClient,
-                "get_spans_dataframe",
-                return_value=mock_spans,
-            ):
-                runner.invoke(main, ["sync"])
-
-        # Check state file was created
-        state_file = tmp_path / "state" / "sync_state.json"
-        assert state_file.exists()
-
-        with open(state_file) as f:
-            state_data = json.load(f)
-
-        assert "phoenix-local" in state_data.get("backends", {})
-
-    def test_sync_no_spans_found(self, runner, monkeypatch, tmp_path):
-        """When no spans, shows warning."""
-        monkeypatch.setenv("DAL_PHOENIX_URL", "http://localhost:6006")
-        monkeypatch.setenv("DAL_DATA_PATH", str(tmp_path))
-        monkeypatch.setenv("DAL_CONFIG_PATH", str(tmp_path / "config"))
-
-        # Mock the internal Phoenix client to bypass import check
-        with patch("dev_agent_lens.clients.phoenix._PhoenixClient", MagicMock()):
-            with patch.object(
-                __import__("dev_agent_lens.clients.phoenix", fromlist=["PhoenixClient"]).PhoenixClient,
-                "get_spans_dataframe",
-                return_value=pd.DataFrame(),
-            ):
-                result = runner.invoke(main, ["sync"])
-
-        assert "No new spans found" in result.output
-
-    def test_sync_push_no_oxen(self, runner, monkeypatch, tmp_path):
-        """Sync --push without Oxen shows warning."""
-        monkeypatch.setenv("DAL_PHOENIX_URL", "http://localhost:6006")
-        monkeypatch.setenv("DAL_DATA_PATH", str(tmp_path))
-        monkeypatch.setenv("DAL_CONFIG_PATH", str(tmp_path / "config"))
-        monkeypatch.delenv("OXEN_REMOTE_URL", raising=False)
-
         with patch("dev_agent_lens.cli.main.PhoenixClient") as mock_client:
-            mock_instance = MagicMock()
-            mock_instance.get_spans_dataframe.return_value = pd.DataFrame()
-            mock_client.return_value = mock_instance
+            mock_client.return_value.get_spans_dataframe.return_value = frame
+            result = runner.invoke(main, ["sync", "--source", phoenix_source, "--days", "1"])
+        assert result.exit_code == 0, result.output
+        assert "-> span store: +2 rows" in result.output
+        assert "Span store: +2 rows, 0 failed" in result.output
+        files = list((tmp_path / "store" / "spans_raw").rglob("*.parquet"))
+        assert len(files) == 1 and "day=2025-01-01" in str(files[0])
+        import pyarrow.parquet as pq
+        landed = pq.read_table(files[0]).to_pylist()
+        assert {r["source"] for r in landed} == {phoenix_source}   # stamped per batch
 
-            result = runner.invoke(main, ["sync", "--push"])
+    def test_sync_leaves_the_store_alone_when_none_is_chosen(self, runner, phoenix_source, tmp_path):
+        """No `dal store use`, no store writes: upgrading must not start a second copy."""
+        with patch("dev_agent_lens.cli.main.PhoenixClient") as mock_client:
+            mock_client.return_value.get_spans_dataframe.return_value = pd.DataFrame()
+            result = runner.invoke(main, ["sync", "--source", phoenix_source, "--days", "1"])
+        assert result.exit_code == 0, result.output
+        assert "span store" not in result.output.lower()
+        assert not (tmp_path / "spans").exists()
 
-        assert "OXEN_REMOTE_URL not set" in result.output
-
-    def test_sync_error_no_state_update(self, runner, monkeypatch, tmp_path):
-        """If sync fails, state is not updated."""
-        monkeypatch.setenv("DAL_PHOENIX_URL", "http://localhost:6006")
+    def test_sync_warns_when_the_project_does_not_exist(self, runner, monkeypatch, tmp_path):
+        """A project name absent from the database filters every span out. That must not
+        read as an ordinary empty sync: the first live run against Supabase landed nothing
+        because the client's default project does not exist there."""
         monkeypatch.setenv("DAL_DATA_PATH", str(tmp_path))
         monkeypatch.setenv("DAL_CONFIG_PATH", str(tmp_path / "config"))
+        r = runner.invoke(main, ["config", "add-source", "pg", "--type", "phoenix-postgres",
+                                 "--connection-url", "postgresql://u:p@db.example/phoenix",
+                                 "--project", "dev-agent-lens"])
+        assert r.exit_code == 0, r.output
+        with patch("dev_agent_lens.cli.main.PhoenixPostgresClient") as mock_cls:
+            inst = mock_cls.return_value
+            inst.project = "dev-agent-lens"
+            inst.list_projects.return_value = ["claude-code-surfaces", "sf-workspaces"]
+            inst.test_connection.return_value = True
+            inst.get_spans_dataframe.return_value = pd.DataFrame()
+            result = runner.invoke(main, ["sync", "--source", "pg", "--days", "1"])
+        assert "project 'dev-agent-lens' does not exist" in result.output, result.output
+        assert "sf-workspaces" in result.output
 
+    def test_sync_arize_does_not_mutate_process_environment(self, runner, monkeypatch, tmp_path):
+        """The Arize branch had the same leak and was missed by the first fix."""
+        monkeypatch.setenv("DAL_DATA_PATH", str(tmp_path))
+        monkeypatch.setenv("DAL_CONFIG_PATH", str(tmp_path / "config"))
+        monkeypatch.setenv("ARIZE_API_KEY", "test-key")
+        r = runner.invoke(main, ["config", "add-source", "test-arize", "--type", "arize",
+                                 "--space-key", "sk-1", "--model-id", "m-1"])
+        assert r.exit_code == 0, r.output
+        with patch("dev_agent_lens.cli.main.ArizeClient") as mock_client:
+            mock_client.return_value.get_spans_dataframe.return_value = pd.DataFrame()
+            result = runner.invoke(main, ["sync", "--source", "test-arize", "--days", "1"])
+            assert result.exit_code == 0, result.output
+            _, kwargs = mock_client.call_args
+            assert kwargs.get("space_key") == "sk-1" and kwargs.get("model_id") == "m-1"
+        assert "ARIZE_SPACE_KEY" not in os.environ
+        assert "ARIZE_MODEL_ID" not in os.environ
+
+    def test_sync_error_no_state_update(self, runner, phoenix_source, tmp_path):
+        """If the source fails: the batch is reported failed, state is NOT advanced, and
+        the exit code is non-zero. (It used to exit 0 with 0 of 1 batches completed.)
+        --retries 1 avoids 6 s of real backoff sleep."""
         with patch("dev_agent_lens.cli.main.PhoenixClient") as mock_client:
-            mock_instance = MagicMock()
-            mock_instance.get_spans_dataframe.side_effect = Exception("Connection failed")
-            mock_client.return_value = mock_instance
+            mock_client.return_value.get_spans_dataframe.side_effect = Exception("Connection failed")
+            result = runner.invoke(main, ["sync", "--source", phoenix_source, "--days", "1",
+                                          "--retries", "1"])
 
-            result = runner.invoke(main, ["sync"])
-
-        # State file should not have phoenix-local entry (or file shouldn't exist)
-        state_file = tmp_path / "state" / "sync_state.json"
-        if state_file.exists():
-            with open(state_file) as f:
-                state_data = json.load(f)
-            assert "phoenix-local" not in state_data.get("backends", {})
+        assert "FAILED: Connection failed" in result.output
+        assert "Batches failed: 1" in result.output
+        assert result.exit_code != 0
+        state = self._state(tmp_path)
+        assert state is None or phoenix_source not in state.get("backends", {})
 
 
 class TestConfigCommand:
@@ -526,125 +605,3 @@ class TestStatusCommand:
 
         assert "phoenix-local" in result.output
         assert "2025-01-01" in result.output
-
-
-class TestSyncHistoricalCommand:
-    """Tests for sync-historical command."""
-
-    def test_sync_historical_help(self, runner):
-        """sync-historical command shows help."""
-        result = runner.invoke(main, ["sync-historical", "--help"])
-
-        assert result.exit_code == 0
-        assert "--days" in result.output
-        assert "--batch-size" in result.output
-        assert "--source" in result.output
-
-    def test_sync_historical_updates_state_on_success(self, runner, monkeypatch, tmp_path):
-        """After successful sync-historical, state is updated."""
-        monkeypatch.setenv("DAL_PHOENIX_URL", "http://localhost:6006")
-        monkeypatch.setenv("DAL_DATA_PATH", str(tmp_path))
-        monkeypatch.setenv("DAL_CONFIG_PATH", str(tmp_path / "config"))
-
-        mock_spans = pd.DataFrame({
-            "span_id": ["span1", "span2"],
-            "name": ["test1", "test2"],
-            "context.span_id": ["span1", "span2"],
-            "context.trace_id": ["trace1", "trace1"],
-            "start_time": ["2025-01-01T12:00:00", "2025-01-01T12:01:00"],
-        })
-
-        # Mock the internal Phoenix client to bypass import check
-        with patch("dev_agent_lens.clients.phoenix._PhoenixClient", MagicMock()):
-            with patch.object(
-                __import__("dev_agent_lens.clients.phoenix", fromlist=["PhoenixClient"]).PhoenixClient,
-                "get_spans_dataframe",
-                return_value=mock_spans,
-            ):
-                result = runner.invoke(main, ["sync-historical", "--days", "1", "--batch-size", "1"])
-
-        assert result.exit_code == 0, f"Expected exit code 0 but got {result.exit_code}. Output: {result.output}"
-        assert "Updated sync state" in result.output
-
-        # Check state file was updated
-        state_file = tmp_path / "state" / "sync_state.json"
-        assert state_file.exists()
-
-        with open(state_file) as f:
-            state_data = json.load(f)
-
-        assert "phoenix-local" in state_data.get("backends", {})
-        assert state_data["backends"]["phoenix-local"].get("last_sync") is not None
-
-    def test_sync_historical_no_state_update_on_failure(self, runner, monkeypatch, tmp_path):
-        """If sync-historical fails, state is NOT updated."""
-        monkeypatch.setenv("DAL_PHOENIX_URL", "http://localhost:6006")
-        monkeypatch.setenv("DAL_DATA_PATH", str(tmp_path))
-        monkeypatch.setenv("DAL_CONFIG_PATH", str(tmp_path / "config"))
-
-        # Mock the internal Phoenix client to bypass import check
-        with patch("dev_agent_lens.clients.phoenix._PhoenixClient", MagicMock()):
-            with patch.object(
-                __import__("dev_agent_lens.clients.phoenix", fromlist=["PhoenixClient"]).PhoenixClient,
-                "get_spans_dataframe",
-                side_effect=Exception("Connection failed"),
-            ):
-                result = runner.invoke(main, ["sync-historical", "--days", "1", "--batch-size", "1"])
-
-        # Check state file was NOT updated with phoenix-local
-        state_file = tmp_path / "state" / "sync_state.json"
-        if state_file.exists():
-            with open(state_file) as f:
-                state_data = json.load(f)
-            assert "phoenix-local" not in state_data.get("backends", {})
-
-    def test_sync_historical_state_update_when_no_spans(self, runner, monkeypatch, tmp_path):
-        """If no spans fetched but batch completes successfully, state IS still updated."""
-        monkeypatch.setenv("DAL_PHOENIX_URL", "http://localhost:6006")
-        monkeypatch.setenv("DAL_DATA_PATH", str(tmp_path))
-        monkeypatch.setenv("DAL_CONFIG_PATH", str(tmp_path / "config"))
-
-        # Mock the internal Phoenix client to bypass import check
-        with patch("dev_agent_lens.clients.phoenix._PhoenixClient", MagicMock()):
-            with patch.object(
-                __import__("dev_agent_lens.clients.phoenix", fromlist=["PhoenixClient"]).PhoenixClient,
-                "get_spans_dataframe",
-                return_value=pd.DataFrame(),  # Empty but successful
-            ):
-                result = runner.invoke(main, ["sync-historical", "--days", "1", "--batch-size", "1"])
-
-        assert result.exit_code == 0
-        # State IS updated because the batch completed successfully (no errors)
-        # Empty response is still a successful batch
-        assert "Updated sync state" in result.output
-
-    def test_sync_historical_with_source(self, runner, monkeypatch, tmp_path):
-        """sync-historical works with named sources."""
-        monkeypatch.setenv("DAL_DATA_PATH", str(tmp_path))
-        monkeypatch.setenv("DAL_CONFIG_PATH", str(tmp_path / "config"))
-
-        # Create a source first
-        runner.invoke(
-            main,
-            ["config", "add-source", "test-phoenix", "--type", "phoenix", "--url", "localhost:6006"],
-        )
-
-        mock_spans = pd.DataFrame({
-            "span_id": ["span1"],
-            "name": ["test"],
-            "context.span_id": ["span1"],
-            "context.trace_id": ["trace1"],
-            "start_time": ["2025-01-01T12:00:00"],
-        })
-
-        # Mock the internal Phoenix client to bypass import check
-        with patch("dev_agent_lens.clients.phoenix._PhoenixClient", MagicMock()):
-            with patch.object(
-                __import__("dev_agent_lens.clients.phoenix", fromlist=["PhoenixClient"]).PhoenixClient,
-                "get_spans_dataframe",
-                return_value=mock_spans,
-            ):
-                result = runner.invoke(main, ["sync-historical", "--source", "test-phoenix", "--days", "1"])
-
-        assert result.exit_code == 0, f"Expected exit code 0 but got {result.exit_code}. Output: {result.output}"
-        assert "Updated sync state for 'test-phoenix'" in result.output

@@ -1,0 +1,24 @@
+# The capture proxy that ships with the self-host install (compose profile `capture`).
+# Claude Code points ANTHROPIC_BASE_URL at this; the proxy forwards the request to
+# Anthropic unchanged, with the caller's own login token, and writes a span for every
+# call to the store's OTLP receiver. No Anthropic API key lives here.
+model_list:
+  - model_name: "anthropic/*"
+    litellm_params:
+      model: "anthropic/*"
+  - model_name: "claude-*"
+    litellm_params:
+      model: "claude-*"
+      custom_llm_provider: "anthropic"
+
+litellm_settings:
+  callbacks: ["arize_phoenix"]
+  drop_params: false
+  pass_through_params: true
+
+general_settings:
+  # Forward the caller's Authorization header to Anthropic: a Claude Code login
+  # (sk-ant-oat...) goes straight through, so people use their own subscription.
+  forward_client_headers_to_llm_api: true
+  # Anything that is not a Claude login must present this key.
+  master_key: os.environ/LITELLM_MASTER_KEY

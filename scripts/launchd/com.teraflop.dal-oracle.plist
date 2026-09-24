@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Daily storage-migration oracle (ENG2-1609). Install:
+       cp scripts/launchd/com.teraflop.dal-oracle.plist ~/Library/LaunchAgents/
+       sed -i '' "s|__REPO__|$(pwd)|; s|__HOME__|$HOME|" ~/Library/LaunchAgents/com.teraflop.dal-oracle.plist
+       launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.teraflop.dal-oracle.plist
+     Run now: launchctl kickstart -k gui/$(id -u)/com.teraflop.dal-oracle
+     06:23 local, off the hour on purpose. -->
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.teraflop.dal-oracle</string>
+  <key>ProgramArguments</key><array>
+    <string>/bin/bash</string><string>__REPO__/scripts/oracle_daily.sh</string>
+  </array>
+  <key>WorkingDirectory</key><string>__REPO__</string>
+  <key>EnvironmentVariables</key><dict>
+    <key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    <key>HOME</key><string>__HOME__</string>
+  </dict>
+  <key>StartCalendarInterval</key><dict><key>Hour</key><integer>6</integer><key>Minute</key><integer>23</integer></dict>
+  <key>StandardOutPath</key><string>__HOME__/.dal/oracle/launchd.out.log</string>
+  <key>StandardErrorPath</key><string>__HOME__/.dal/oracle/launchd.err.log</string>
+</dict></plist>

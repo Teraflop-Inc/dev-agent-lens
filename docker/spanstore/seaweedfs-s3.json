@@ -1,0 +1,9 @@
+{
+  "identities": [
+    {
+      "name": "dal",
+      "credentials": [{"accessKey": "dalminio", "secretKey": "dalminio123"}],
+      "actions": ["Admin", "Read", "Write", "List", "Tagging"]
+    }
+  ]
+}

@@ -1,0 +1,24 @@
+# LOCAL DEV ONLY. Default credentials, loopback-bound. Never deploy this file.
+# DoltGres — Postgres-flavored Dolt, for FORGE dataset versioning. NOT a DAL span store.
+#
+# Version control is out of scope for DAL; this file exists so the Forge decision can be
+# tested next to the DAL stores. It is not included by all.yml and nothing in DAL reads it.
+# 1.0 since 2026-08-06 with the on-disk format frozen for all of 1.x.
+#
+#   docker compose -f docker/spanstore/doltgres.yml up -d
+#   psql postgres://postgres:password@127.0.0.1:5434/doltgres
+name: dal-doltgres
+services:
+  doltgres:
+    image: dolthub/doltgresql:latest
+    container_name: dal-doltgres
+    environment:
+      DOLTGRES_USER: ${DAL_DOLTGRES_USER:-postgres}
+      DOLTGRES_PASSWORD: ${DAL_DOLTGRES_PASSWORD:-password}
+    ports:
+      # 5433 collides with a stock second Postgres on a normal dev machine
+      - "127.0.0.1:${DAL_DOLTGRES_PORT:-5434}:5432"
+    volumes:
+      - doltgres_data:/var/lib/doltgres
+volumes:
+  doltgres_data:

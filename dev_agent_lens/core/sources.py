@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Any
@@ -187,7 +187,10 @@ def get_default_config_path() -> Path:
     """Get the default config path for DAL."""
     env_path = os.getenv("DAL_CONFIG_PATH")
     if env_path:
-        return Path(env_path).expanduser()
+        p = Path(env_path).expanduser()
+        # config.py reads the same variable as a FILE (config.json). If it already is one,
+        # the sources directory is its parent; see config.get_config_path for the mirror.
+        return p.parent if p.is_file() else p
     return Path.home() / ".dal" / "config"
 
 
@@ -232,7 +235,7 @@ class SourceManager:
             }
             self._loaded = True
 
-        except (json.JSONDecodeError, IOError) as e:
+        except (json.JSONDecodeError, IOError):
             # Log warning but don't fail - start with empty sources
             self._sources = {}
             self._loaded = True

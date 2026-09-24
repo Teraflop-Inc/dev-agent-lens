@@ -1,0 +1,16 @@
+.venv
+.git
+exports
+archive
+tests
+docs
+fly
+docker
+*.parquet
+.pytest_cache
+__pycache__
+
+.env
+.env.*
+**/.env
+**/.env.*

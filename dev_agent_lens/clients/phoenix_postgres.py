@@ -356,6 +356,17 @@ class PhoenixPostgresClient:
         rows = self._execute_query(query, tuple(params))
         return pd.DataFrame(rows)
 
+    def list_projects(self) -> list[str]:
+        """Names of the projects this database holds. Used to catch a misconfigured
+        --project before it silently filters every span out."""
+        import psycopg
+        from psycopg import sql
+
+        schema = getattr(self, "schema", None) or "phoenix"
+        with psycopg.connect(self.connection_url, connect_timeout=15) as c, c.cursor() as cur:
+            cur.execute(sql.SQL("SELECT name FROM {}.projects ORDER BY 1").format(sql.Identifier(schema)))  # noqa: E501
+            return [r[0] for r in cur.fetchall()]
+
     def test_connection(self) -> bool:
         """Confirm we can reach Postgres and the project exists."""
         try:

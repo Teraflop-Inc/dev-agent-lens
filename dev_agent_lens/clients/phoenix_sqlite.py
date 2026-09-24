@@ -93,7 +93,7 @@ class PhoenixSQLiteClient:
             return
 
         # Format: docker://container-name:/path/to/db
-        path_part = self.db_path[len("docker://"):]
+        path_part = self.db_path[len("docker://") :]
 
         if ":" not in path_part:
             raise PhoenixSQLiteConnectionError(
@@ -179,9 +179,7 @@ class PhoenixSQLiteClient:
             return result.stdout
 
         except subprocess.TimeoutExpired as e:
-            raise PhoenixSQLiteQueryError(
-                f"Docker exec timed out after {timeout} seconds"
-            ) from e
+            raise PhoenixSQLiteQueryError(f"Docker exec timed out after {timeout} seconds") from e
         except FileNotFoundError as e:
             raise PhoenixSQLiteConnectionError(
                 "Docker command not found. Is Docker installed and in PATH?"
@@ -234,9 +232,7 @@ class PhoenixSQLiteClient:
 
         except subprocess.TimeoutExpired as e:
             process.kill()
-            raise PhoenixSQLiteQueryError(
-                f"Docker exec timed out after {timeout} seconds"
-            ) from e
+            raise PhoenixSQLiteQueryError(f"Docker exec timed out after {timeout} seconds") from e
         except FileNotFoundError as e:
             raise PhoenixSQLiteConnectionError(
                 "Docker command not found. Is Docker installed and in PATH?"
@@ -291,7 +287,7 @@ class PhoenixSQLiteClient:
     ) -> list[dict[str, Any]]:
         """Execute query via Docker container."""
         # Build Python code to execute query
-        python_code = f'''
+        python_code = f"""
 import sqlite3
 import json
 
@@ -304,7 +300,7 @@ rows = [dict(zip(columns, row)) for row in cursor.fetchall()]
 
 print(json.dumps(rows))
 conn.close()
-'''
+"""
 
         stdout = self._execute_in_docker(
             self._container_name,  # type: ignore
@@ -380,15 +376,27 @@ conn.close()
 
         params: list[Any] = [self.project]
 
-        # Add time filters
-        # SQLite stores dates with space separator (2026-01-27 00:00:00), not ISO format with T
+        # Time filters compare through SQLite's datetime(), which normalises both sides.
+        #
+        # The previous version compared raw text and relied on Phoenix writing a space
+        # separator ('2026-01-27 00:00:00'). That is an SQLAlchemy implementation detail,
+        # and any other shape -- ISO 'T', a '+00:00' suffix, microseconds -- turns the
+        # comparison lexical: 'T' (0x54) sorts after ' ' (0x20), so every row passed `>=`
+        # and none passed `<`. The filter silently returned the whole table. Measured
+        # 2026-09-04: 3 of 3 rows returned for a window that should hold 1.
+        # Each filter is a pair: a raw day-granular pre-filter the start_time index can use
+        # (a 10-char date sorts before both the ' ' and 'T' extensions of itself, whatever
+        # the producer wrote), then the exact normalised comparison. datetime() alone
+        # turned an index SEARCH into a full SCAN of spans on every sync batch.
         if start_time is not None:
-            query += " AND s.start_time >= ?"
-            params.append(start_time.strftime("%Y-%m-%d %H:%M:%S"))
+            query += " AND s.start_time >= date(?) AND datetime(s.start_time) >= datetime(?)"
+            params += [start_time.strftime("%Y-%m-%d"), start_time.strftime("%Y-%m-%d %H:%M:%S")]
 
         if end_time is not None:
-            query += " AND s.start_time < ?"
-            params.append(end_time.strftime("%Y-%m-%d %H:%M:%S"))
+            query += (
+                " AND s.start_time < date(?, '+1 day') AND datetime(s.start_time) < datetime(?)"
+            )
+            params += [end_time.strftime("%Y-%m-%d"), end_time.strftime("%Y-%m-%d %H:%M:%S")]
 
         # Add ordering
         query += " ORDER BY s.start_time ASC"
@@ -491,19 +499,21 @@ conn.close()
 
         params: list[Any] = [self.project]
 
-        # SQLite stores dates with space separator (2026-01-27 00:00:00), not ISO format with T
+        # Same sargable pre-filter + exact comparison as get_spans_dataframe; see there.
         if start_time is not None:
-            query += " AND s.start_time >= ?"
-            params.append(start_time.strftime("%Y-%m-%d %H:%M:%S"))
+            query += " AND s.start_time >= date(?) AND datetime(s.start_time) >= datetime(?)"
+            params += [start_time.strftime("%Y-%m-%d"), start_time.strftime("%Y-%m-%d %H:%M:%S")]
 
         if end_time is not None:
-            query += " AND s.start_time < ?"
-            params.append(end_time.strftime("%Y-%m-%d %H:%M:%S"))
+            query += (
+                " AND s.start_time < date(?, '+1 day') AND datetime(s.start_time) < datetime(?)"
+            )
+            params += [end_time.strftime("%Y-%m-%d"), end_time.strftime("%Y-%m-%d %H:%M:%S")]
 
         query += " ORDER BY s.start_time ASC"
 
         # Build Python code that streams NDJSON (one JSON object per line)
-        python_code = f'''
+        python_code = f"""
 import sqlite3
 import json
 import sys
@@ -521,7 +531,7 @@ for row in cursor:
     sys.stdout.flush()
 
 conn.close()
-'''
+"""
 
         # Collect rows in chunks and yield DataFrames
         chunk: list[dict[str, Any]] = []
@@ -602,9 +612,7 @@ conn.close()
             elif "span_id" in spans_dataframe.columns:  # type: ignore
                 span_ids = spans_dataframe["span_id"].tolist()  # type: ignore
             else:
-                raise ValueError(
-                    "spans_dataframe must have 'context.span_id' or 'span_id' column"
-                )
+                raise ValueError("spans_dataframe must have 'context.span_id' or 'span_id' column")
 
         if not span_ids:
             return pd.DataFrame()
@@ -738,7 +746,9 @@ conn.close()
                 logger.warning(f"Project '{self.project}' not found in database")
                 return False
 
-            logger.info(f"Successfully connected to Phoenix SQLite database (project: {self.project})")
+            logger.info(
+                f"Successfully connected to Phoenix SQLite database (project: {self.project})"
+            )
             return True
 
         except (PhoenixSQLiteError, Exception) as e:

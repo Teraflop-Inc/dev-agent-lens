@@ -32,7 +32,7 @@ from scripts.validate_export import validate_session
 # Configuration
 PHOENIX_URL = os.getenv("PHOENIX_URL", "http://localhost:6006")
 PROXY_URL = os.getenv("CLAUDE_LENS_PROXY_URL", "http://localhost:4000")
-CLAUDE_LENS_SCRIPT = Path.home() / "Company" / "dev3" / "private-dev-agent-lens" / "claude-lens"
+CLAUDE_LENS_SCRIPT = Path(__file__).resolve().parents[2] / "claude-lens"
 
 
 def check_phoenix_running() -> tuple[bool, str]:
@@ -222,8 +222,8 @@ class TestProxySmokeTest:
             [
                 "uv", "run", "dal", "sync",
                 "--source", "phoenix-local-test",
-                "--start", (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d"),
-                "--end", datetime.now().strftime("%Y-%m-%d"),
+                "--start-date", (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d"),
+                "--end-date", datetime.now().strftime("%Y-%m-%d"),
                 "--limit", "10",  # Small limit for smoke test
             ],
             capture_output=True,
@@ -247,7 +247,7 @@ def print_manual_test_instructions():
     print("="*70)
     print("\nTo run a full end-to-end test:")
     print("\n1. Start Phoenix (if not already running):")
-    print("   cd ~/Company/dev3/private-dev-agent-lens")
+    print("   cd /path/to/dev-agent-lens")
     print("   docker compose --profile phoenix up -d")
     print()
     print("2. Verify proxy is running:")
