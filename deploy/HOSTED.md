@@ -56,11 +56,14 @@ Before cutover:
 
 ## Typed layout limits
 
-The current typed builder rebuilds the whole derived layout and clears its output
-first. It is not safe to serve that directory throughout a rebuild. A large history
-also cannot be sized from a small fresh-store test. Build in a separate destination,
-verify it, then switch readers; retain the prior version for rollback. Incremental
-partition publication and a continuously available authenticated query endpoint
-remain prerequisites for an always-on cloud service.
+Use `dal store rebuild` for [incremental typed snapshots](../docs/incremental-store.md).
+It rebuilds changed days and their affected trace/session context, then conditionally
+publishes a complete manifest. Existing readers retain their previous files. The
+legacy `store verify --from-parquet` typed builder still clears its legacy output;
+do not serve that directory during a rebuild.
+
+Bootstrap and schema upgrades still need a full build. A large history cannot be
+sized from a small fresh-store test. Measure updater memory and provide the supported
+private query path before cloud cutover.
 
 Do not put private migration inventories or production settings in this public repo.

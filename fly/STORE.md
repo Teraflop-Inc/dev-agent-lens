@@ -67,9 +67,10 @@ before copying private history. Use the inventories and comparison procedure in
 
 ## Before production cutover
 
-* Implement and measure incremental typed builds and atomic snapshot publication.
-  The existing full rebuild clears derived data and can need tens of GB of RAM.
-  Do not run `sync-loop` or full typed builds on this ingest Machine.
+* Bootstrap the historical typed snapshot on the migration host using `dal store
+  rebuild`, then measure incremental updates before starting `typed-loop` on a
+  suitably sized updater. See `docs/incremental-store.md`. Full builds can still
+  need tens of GB of RAM; do not run them on this ingest Machine.
 * Establish the supported private query path and measure its memory/concurrency.
 * Add durable ingest/retry guarantees appropriate to the required loss tolerance;
   today's in-memory buffer may lose accepted spans on a crash.
