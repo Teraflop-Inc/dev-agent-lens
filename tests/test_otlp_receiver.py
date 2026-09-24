@@ -6,6 +6,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 
 import duckdb
 import pytest
@@ -114,6 +115,55 @@ def test_an_exporter_retry_lands_nothing_twice(receiver):
     time.sleep(0.3)
     assert _count(con, store, "proj-b") == 3
     assert r.buffer.received == 6 and r.buffer.written == 3
+
+
+def test_concurrent_requests_respect_the_single_writer_store(tmp_path, monkeypatch):
+    store = open_store(str(tmp_path / "store"))
+    store.ensure()
+    con = duckdb.connect()
+    append = store.append_frame
+    writing = threading.Lock()
+    entered = threading.Event()
+    release = threading.Event()
+
+    def guarded_append(*args, **kwargs):
+        # A real store with a deliberately slow first write. The shared DuckDB
+        # connection requires one caller at a time; reject overlap before it can
+        # corrupt a query or another writer's registered DataFrame.
+        if not writing.acquire(blocking=False):
+            raise RuntimeError("concurrent use of the single-writer store")
+        try:
+            if not entered.is_set():
+                entered.set()
+                assert release.wait(5)
+            return append(*args, **kwargs)
+        finally:
+            writing.release()
+
+    monkeypatch.setattr(store, "append_frame", guarded_append)
+    receiver = Receiver(store, con, host="127.0.0.1", port=0,
+                        flush_rows=1, flush_seconds=999)
+    server = threading.Thread(target=receiver.serve_forever, daemon=True)
+    server.start()
+    url = f"http://127.0.0.1:{receiver.port}/v1/traces"
+    try:
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            futures = [pool.submit(_post, url, _request("concurrent", [b"\x01" * 8]))]
+            assert entered.wait(5)
+            futures += [pool.submit(_post, url, _request("concurrent", [bytes([i]) * 8]))
+                        for i in range(2, 9)]
+            time.sleep(0.2)
+            release.set()
+            assert [f.result(timeout=5) for f in futures] == [200] * 8
+        health = f"http://127.0.0.1:{receiver.port}/healthz"
+        with urllib.request.urlopen(health, timeout=5) as response:
+            assert "failed=0" in response.read().decode()
+        assert _count(con, store, "concurrent") == 8
+    finally:
+        release.set()
+        receiver.stop()
+        server.join(timeout=5)
+        con.close()
 
 
 def test_shutdown_flushes_what_the_timer_had_not(tmp_path):

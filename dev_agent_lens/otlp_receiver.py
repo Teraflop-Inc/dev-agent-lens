@@ -86,6 +86,7 @@ class SpanBuffer:
         self.flush_rows, self.flush_seconds = flush_rows, flush_seconds
         self._rows: dict[str, list[dict[str, Any]]] = {}
         self._lock = threading.Lock()
+        self._flush_lock = threading.Lock()
         self._last_flush = time.monotonic()
         self.received = 0
         self.written = 0
@@ -124,6 +125,12 @@ class SpanBuffer:
         )
 
     def flush(self, reason: str = "timer") -> int:
+        # Requests and the timer share one DuckDB connection and raw writer.
+        # Keep intake independent, but serialize the entire append operation.
+        with self._flush_lock:
+            return self._flush_locked(reason)
+
+    def _flush_locked(self, reason: str) -> int:
         import pandas as pd
 
         with self._lock:
