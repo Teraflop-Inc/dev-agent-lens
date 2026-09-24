@@ -44,6 +44,9 @@ PROJECT_ATTRIBUTE = "openinference.project.name"
 
 #: OpenInference's user attribution attribute.
 USER_ATTRIBUTE = "user.id"
+#: The branch a session worked on, from the session file. The typed layout reads the
+#: ticket id out of it (ENG2-1540).
+BRANCH_ATTRIBUTE = "git.branch"
 
 DEFAULT_CHUNK_SIZE = 100
 DEFAULT_PAUSE_SECONDS = 1.0
@@ -84,9 +87,18 @@ def _import_otel():
         from opentelemetry.proto.common.v1.common_pb2 import AnyValue, KeyValue
         from opentelemetry.proto.trace.v1.trace_pb2 import ResourceSpans, ScopeSpans
     except ImportError as exc:  # pragma: no cover - depends on optional extras
+        import sys
+
+        version = f"{sys.version_info.major}.{sys.version_info.minor}"
+        hint = (
+            f" harbor-atif2otel requires Python >= 3.12 and this interpreter is "
+            f"{version}, so the extra installs without it."
+            if sys.version_info < (3, 12)
+            else ""
+        )
         raise ImportError(
             "OTLP export needs harbor-atif2otel and opentelemetry-proto. "
-            "Install with: uv pip install 'dev_agent_lens[otlp]'"
+            f"Install with: uv pip install 'dev_agent_lens[otlp]'.{hint}"
         ) from exc
     return (
         convert_trajectory,
@@ -118,7 +130,7 @@ def build_spans(
     trajectories: list[dict[str, Any]],
     project: str,
     user_id: str | None = None,
-    service_name: str = "claude-code",
+    service_name: str | None = None,
 ) -> tuple[Any, list[tuple[Any, Any]], int]:
     """
     Convert trajectories to OTel spans, tagged and clamped.
@@ -136,7 +148,10 @@ def build_spans(
     spans: list[tuple[Any, Any]] = []
     for trajectory in trajectories:
         started = time.perf_counter()
-        resource_spans = convert_trajectory(trajectory, service_name=service_name)
+        # The harness that wrote the session names the service, so Codex and Claude Code
+        # spans stay distinguishable in one store (ENG2-402). An explicit name still wins.
+        name = service_name or (trajectory.get("agent") or {}).get("name") or "claude-code"
+        resource_spans = convert_trajectory(trajectory, service_name=name)
         if resource is None:
             resource = ResourceSpans()
             resource.resource.CopyFrom(resource_spans.resource)
@@ -149,6 +164,8 @@ def build_spans(
                     # passthrough for ATIF's root `extra`, so attribution is
                     # stamped here. Moving it upstream is the durable fix.
                     span.attributes.append(kv(USER_ATTRIBUTE, user_id))
+                if trajectory.get("git_branch"):
+                    span.attributes.append(kv(BRANCH_ATTRIBUTE, trajectory["git_branch"]))
                 spans.append((scope_span.scope, span))
         logger.info(
             "[otlp] converted session=%s spans=%d in %.0fms",
@@ -171,7 +188,7 @@ def push_trajectories(
     chunk_size: int = DEFAULT_CHUNK_SIZE,
     pause: float = DEFAULT_PAUSE_SECONDS,
     max_retries: int = DEFAULT_MAX_RETRIES,
-    service_name: str = "claude-code",
+    service_name: str | None = None,
     dry_run: bool = False,
 ) -> PushResult:
     """
@@ -263,16 +280,18 @@ def _push_chunk(
             result.spans_sent += len(batch)
             logger.info(
                 "[otlp] %d/%d bytes=%d in %.0fms retries=%d",
-                start + len(batch), total, len(body), elapsed, attempt,
+                start + len(batch),
+                total,
+                len(body),
+                elapsed,
+                attempt,
             )
             return
         if status == 503:
             # Bounded ingest queue. Wait for it to drain rather than lose spans.
             result.retries_503 += 1
             delay = min(delay * BACKOFF_FACTOR, MAX_BACKOFF_SECONDS)
-            logger.info(
-                "[otlp] %d/%d at capacity, waiting %.1fs", start + len(batch), total, delay
-            )
+            logger.info("[otlp] %d/%d at capacity, waiting %.1fs", start + len(batch), total, delay)
             time.sleep(delay)
             continue
         result.failed_chunks += 1

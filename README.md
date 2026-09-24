@@ -1,283 +1,81 @@
 # Dev-Agent-Lens
 
-A transparent proxy and analysis toolkit for AI coding agents. Capture traces from Claude Code (or any LLM), store them efficiently, and query your agent's behavior.
+Capture and query the work of Claude Code, Codex, and the people reviewing it.
+DAL stores traces as Parquet and exposes them through DuckDB. Use a directory for
+one developer, or an S3-compatible object store for a team. Phoenix is an optional
+source for existing history, not a requirement for new session capture.
 
-## Installation
+## Start with local sessions
 
-```bash
-git clone <repo-url>
+Requires Python 3.12 and [uv](https://docs.astral.sh/uv/).
+
+```sh
+git clone https://github.com/Teraflop-Inc/dev-agent-lens.git
 cd dev-agent-lens
-uv sync
+uv sync --extra otlp
+uv run dal store use "$HOME/.dal/spans"
+uv run dal ingest-sessions --agent codex --include '*my-work-repo*' \
+  --project codex-sessions --to-store --yes
+uv run dal store query --layout raw --format json \
+  "SELECT source, count(*) AS spans FROM spans GROUP BY source"
 ```
 
-## Quickstart: Analyze Your Claude Sessions
+Choose the repository scope before importing. Session logs contain prompts,
+source code, and tool results. For Claude sessions, use `--agent claude-code` and a
+separate project name. [Capture setup](docs/codex-capture.md) covers both agents,
+identity, scheduled uploads, and persistence checks.
 
-Export your Claude Code sessions to readable markdown for analysis. No proxy setup required—works with existing `~/.claude` sessions.
+## Typed queries
 
-**Using Claude Code?** Just run `/analyze-session` to find and analyze sessions automatically.
+The raw layout preserves producer data. The typed layout extracts frequently
+queried fields such as model, tokens, person, session, agent, ticket, and tool
+kind, while retaining other attributes. Build it explicitly:
 
-### 1. Find Your Session
-
-**If you already know which session:** Sessions live in `~/.claude/projects/`. Locate the file and skip to step 2.
-
-```bash
-# List recent sessions
-ls -lt ~/.claude/projects/-Users-*/*.jsonl | grep -v agent- | head -10
-
-# Search by keyword
-grep -l "authentication" ~/.claude/projects/*/*.jsonl | grep -v agent-
+```sh
+DAL_SPAN_LAYOUT=typed uv run dal store verify \
+  --from-parquet "$HOME/.dal/spans/spans_raw/**/*.parquet"
+uv run dal store query --layout typed --format json \
+  "SELECT agent, model_name, count(*) AS spans, sum(tokens_prompt) AS prompt_tokens FROM spans GROUP BY agent, model_name"
 ```
 
-**If you need to discover it:** Export to Parquet and query with DuckDB to find sessions by patterns, metrics, or outliers.
+A rebuild is a maintenance operation: it replaces the derived layout. Coordinate
+writers and readers before rebuilding a shared store. It is not an incremental
+streaming index. [Storage formats](docs/span-store-formats.md) explains the raw,
+typed, and blob datasets; the [cookbook](docs/query-cookbook-store.md) supplies
+queries you can run against them.
 
-```bash
-dal export-events --output ~/claude-sessions.parquet
+## Run for a team
+
+- [Self-hosted deployment](deploy/README.md): Docker Compose, local MinIO, receiver,
+  source sync, identity mapping, and verification.
+- [External S3 or Cloudflare R2](deploy/HOSTED.md): separate object storage,
+  credentials, migration gates, and hosting requirements.
+- [Historical import](docs/sync-historical.md): Phoenix/Arize sources and resumable
+  sync. The Oxen import script is provided for migration of existing archives.
+- [Git events](docs/webhook-events.md): signed GitHub and Forgejo webhooks and
+  historical pull-request backfill.
+- [Proxy setup](docs/proxy-setup.md): live LLM tracing with LiteLLM.
+
+Keep live deployment settings, identities, credentials, and captured data outside
+Git. The public repository contains code and examples, not deployment history or
+private session archives.
+
+## Export and analyze
+
+`dal claude-session-logs-to-markdown` exports readable Claude transcripts, including
+linked subagents and compaction context. See the
+[session export guide](docs/quickstart_session_export.md),
+[query cookbook](docs/query-cookbook.md), and
+[schema resiliency guide](docs/schema-resiliency.md).
+
+## Development
+
+```sh
+uv sync --extra dev --extra s3 --extra otlp
+uv run pytest -q
+uv run dal run testbed --prompt minimal.txt
 ```
 
-```python
-import duckdb
-
-conn = duckdb.connect()
-result = conn.execute("""
-    SELECT session_id, COUNT(*) as subagent_calls
-    FROM '~/claude-sessions.parquet'
-    WHERE event_type = 'subagent'
-    GROUP BY session_id
-    ORDER BY subagent_calls DESC
-    LIMIT 5
-""").fetchall()
-
-for session_id, count in result:
-    print(f"{session_id}: {count} subagents")
-```
-
-Find sessions related to a Linear or Jira ticket:
-
-```python
-result = conn.execute("""
-    SELECT DISTINCT session_id
-    FROM '~/claude-sessions.parquet'
-    WHERE text ILIKE '%ENG-123%' OR text ILIKE '%PROJ-456%'
-""").fetchall()
-```
-
-Write other queries to fit your needs—find sessions by tool usage, error patterns, compaction events, or time range.
-
-### 2. Export to Markdown
-
-```bash
-dal claude-session-logs-to-markdown <session-file> -o ./exports/
-```
-
-The export preserves the full conversation structure including subagents (as linked files) and compactions (inline with context summaries). See [docs/unified_markdown_format.md](docs/unified_markdown_format.md) for the format specification—it can help guide your agent in analyzing sessions that exceed context windows.
-
-### 3. Analyze
-
-Read the markdown into your Claude Code session, or attach to any AI chat:
-
-```
-Analyze this session export. Summarize what was accomplished,
-identify any errors, and suggest improvements.
-```
-
-*More tooling to accelerate markdown analysis is coming soon.*
-
-See [docs/quickstart_session_export.md](docs/quickstart_session_export.md) for CLI options and advanced usage.
-
----
-
-## Team Collaboration
-
-Share Claude session data with your team for aggregate analysis. This integrates with the existing [Oxen](https://oxen.ai) data version control already used by the DAL toolkit.
-
-### Export with Your Name
-
-Use a unique source name so team members' data doesn't conflict:
-
-```bash
-dal export-events --source claude-local-alex    # Use your name/handle
-```
-
-This creates `~/.dal/data/parquet/claude-local-alex_events.parquet`.
-
-### Push to Your Team's Repo
-
-```bash
-dal push -s claude-local-alex --parquet-only -m "Weekly sync"
-```
-
-The `--parquet-only` flag skips large intermediate files, keeping pushes fast.
-
-### Pull Team Data
-
-```bash
-dal pull
-```
-
-Now you have everyone's session data locally.
-
-### Query Across the Team
-
-```python
-import duckdb
-
-conn = duckdb.connect()
-
-# Compare tool usage across teammates
-conn.execute("""
-    SELECT
-        regexp_extract(source, 'claude-local-(\w+)', 1) as teammate,
-        tool_name,
-        COUNT(*) as uses
-    FROM '~/.dal/data/parquet/claude-local-*_events.parquet'
-    WHERE event_type = 'tool_use'
-    GROUP BY 1, 2
-    ORDER BY teammate, uses DESC
-""").fetchdf()
-
-# Find how teammates approached a specific ticket
-conn.execute("""
-    SELECT source, session_id, MIN(timestamp) as started
-    FROM '~/.dal/data/parquet/claude-local-*_events.parquet'
-    WHERE text ILIKE '%ENG-456%'
-    GROUP BY 1, 2
-""").fetchdf()
-```
-
-> **Note**: Raw session files in `~/.claude/projects/` stay local. Only processed Parquet exports are shared.
-
----
-
-## What's Here
-
-**1. DAL Toolkit** - A Python package (`dev_agent_lens`) and CLI (`dal`) for exporting, syncing, and querying Claude Code trace data.
-
-**2. LiteLLM Proxy** - Routes Claude Code through a local proxy to capture all API calls with OpenTelemetry, sending traces to Phoenix (local) or Arize (cloud).
-
----
-
-## Advanced: Full Tracing Pipeline
-
-For comprehensive observability, set up the LiteLLM proxy to capture all API calls with full token counts, timing, and model metadata.
-
-### Proxy Setup
-
-```bash
-# 1. Configure
-cp .env.example .env
-# Edit .env: add ANTHROPIC_API_KEY (and ARIZE keys if using cloud)
-
-# 2. Start (pick one)
-docker compose --profile phoenix up -d   # Local Phoenix UI at :6006
-docker compose --profile arize up -d     # Cloud Arize
-
-# 3. Use Claude Code through the proxy
-./claude-lens
-```
-
-See [docs/proxy-setup.md](docs/proxy-setup.md) for OAuth, project switching, and configuration details.
-
-### Syncing Data
-
-Pull traces from Phoenix or Arize into local Parquet files for fast querying:
-
-```bash
-# Configure a source
-dal config add-source my-phoenix --type phoenix \
-    --url http://localhost:6006 --project default
-
-# Sync data (incremental by default, or use --start-date for historical)
-dal sync --source my-phoenix
-
-# Export to Parquet
-dal export-parquet --source my-phoenix
-```
-
-Data is stored in `~/.dal/data/parquet/`. Run `dal sync --help` for all options.
-
-#### Phoenix on Postgres (recommended for shared backends)
-
-When Phoenix is configured to use external Postgres (e.g. Supabase) instead of
-in-process SQLite, DAL can read straight from the database — bypassing
-Phoenix's REST API entirely. This is faster and avoids Phoenix's GraphQL
-timeout on large pulls.
-
-```bash
-# Add the source. --connection-url and --schema fall back to
-# PHOENIX_SQL_DATABASE_URL / PHOENIX_SQL_DATABASE_SCHEMA env vars,
-# so you don't need to paste the password on the command line.
-dal config add-source phoenix-supabase --type phoenix-postgres \
-    --project dev-agent-lens --shared
-
-# Or pass them explicitly:
-dal config add-source phoenix-supabase --type phoenix-postgres \
-    --connection-url "postgresql://user:pass@host.pooler.supabase.com:5432/postgres" \
-    --schema phoenix --project dev-agent-lens --shared
-
-# Sync — same UX as the REST source
-dal sync --source phoenix-supabase
-```
-
-Use Supabase's **Session pooler** connection string (port 5432 on
-`*.pooler.supabase.com`). The Direct connection is IPv6-only and the
-Transaction pooler breaks Phoenix's prepared-statement use.
-
-### Querying Data
-
-The fastest path is to query the shared Supabase backend directly with DuckDB — no
-sync, no export:
-
-```sql
-INSTALL postgres; LOAD postgres;
-ATTACH getenv('PHOENIX_SQL_DATABASE_URL') AS pg (TYPE postgres, READ_ONLY);
--- push aggregates down with postgres_query() so Postgres does the work
-SELECT * FROM postgres_query('pg', $$
-  SELECT CASE WHEN attributes->'metadata'->>'user_api_key_end_user_id' LIKE '{%' THEN ((attributes->'metadata'->>'user_api_key_end_user_id')::jsonb)->>'account_uuid' END AS who,
-         count(*) AS spans FROM phoenix.spans
-  WHERE start_time > now() - INTERVAL '14 days' GROUP BY 1 ORDER BY 2 DESC
-$$);
-```
-
-Or, for repeated heavy queries, sync a source to local Parquet first:
-
-```bash
-dal sync --source team && dal export-parquet --source team
-dal query-spans --source team --stats
-```
-
-See [docs/querying.md](docs/querying.md) — the direct-DuckDB recipe, identity resolution
-(`account_uuid → person`), and why `session_id` is not a working session.
-
----
-
-## Architecture
-
-```
-Claude Code ──► ~/.claude/projects/     (native sessions)
-     │                │
-     │                └──► dal claude-session-logs-to-markdown ──► Markdown
-     │
-     └──► LiteLLM Proxy ──► Phoenix/Arize
-                                  │
-                              dal sync
-                                  ▼
-                          ~/.dal/data/
-                         (Parquet files)
-                                  │
-              DuckDB / dal query-spans
-                                  ▼
-                       Analysis & Reports
-```
-
-> **Note:** This codebase is under active development. Some AI-powered commands
-> (`summarize`, `cluster`, `suggest`) may be incomplete. Session export, sync, and the
-> query paths documented above are stable.
-
-## Documentation
-
-- [Session Export Quickstart](docs/quickstart_session_export.md) - Full guide with CLI options and automation
-- [Markdown Format](docs/unified_markdown_format.md) - Unified markdown export specification
-- [Proxy Setup](docs/proxy-setup.md) - LiteLLM, Phoenix, Arize configuration
-- [Syncing Data](docs/sync-historical.md) - Sync from observability backends
-- [Querying Data](docs/querying.md) - Direct DuckDB, local Parquet, identity, sessionization
-- [SDK Examples](examples/README.md) - TypeScript and Python SDK integration
+The testbed requires the configured external capture services and a valid model
+credential. Tests marked `integration` require their named live services or
+fixtures. See [CLAUDE.md](CLAUDE.md) for development and end-to-end testing details.

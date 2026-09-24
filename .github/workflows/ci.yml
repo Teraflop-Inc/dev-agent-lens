@@ -1,0 +1,59 @@
+# Tests on every PR and push to main, lint on the files a PR changes (ENG2-1644).
+#
+# Lint is a ratchet: a changed file may not gain ruff findings versus the base branch.
+# The repo carries ~700 existing findings (110 in cli/main.py alone), which the cleanup
+# ticket (ENG2-1646) removes. Linting everything would fail every PR until then; linting
+# nothing lets new debt in.
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      # 3.12: the otlp extra's harbor-atif2otel needs >= 3.12, and the span tests use it.
+      - run: uv python install 3.12
+      - run: uv sync --python 3.12 --extra dev --extra s3 --extra otlp
+      - name: pytest
+        run: uv run --python 3.12 pytest -q
+
+  lint-changed:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@v6
+      - name: ruff on changed Python files (no new findings vs base)
+        run: |
+          set -euo pipefail
+          base="${{ github.event.pull_request.base.sha }}"
+          files=$(git diff --name-only --diff-filter=ACMR "$base"...HEAD -- '*.py')
+          if [ -z "$files" ]; then echo "no Python files changed"; exit 0; fi
+          ruff="uvx ruff@0.14.9"
+          failed=0
+          for f in $files; do
+            after=$($ruff check --output-format concise "$f" 2>/dev/null | grep -c ':[0-9]*:[0-9]*:' || true)
+            if git cat-file -e "$base:$f" 2>/dev/null; then
+              before=$(git show "$base:$f" | $ruff check --output-format concise --stdin-filename "$f" - 2>/dev/null | grep -c ':[0-9]*:[0-9]*:' || true)
+            else
+              before=0
+            fi
+            echo "$f: before=$before after=$after"
+            if [ "$after" -gt "$before" ]; then
+              failed=1
+              $ruff check --output-format concise "$f" || true
+            fi
+          done
+          exit $failed

@@ -14,17 +14,21 @@ Commands:
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import time
 from datetime import datetime
-from typing import Any
+from pathlib import Path
 
 import click
 
 # Set up logging for the CLI module
 logger = logging.getLogger(__name__)
 
+from dev_agent_lens.analysis.chains import (
+    build_conversation_chains,
+)
 from dev_agent_lens.clients.arize import ArizeClient
 from dev_agent_lens.clients.phoenix import PhoenixClient
 from dev_agent_lens.clients.phoenix_postgres import PhoenixPostgresClient
@@ -32,16 +36,9 @@ from dev_agent_lens.clients.phoenix_sqlite import PhoenixSQLiteClient
 from dev_agent_lens.core.schema import (
     normalize_arize,
     normalize_phoenix,
-    normalize_phoenix_annotations,
 )
 from dev_agent_lens.core.state import SyncState
-from dev_agent_lens.core.unify import unify_sessions
 from dev_agent_lens.storage.oxen_store import OxenStore
-from dev_agent_lens.analysis.chains import (
-    build_conversation_chains,
-    ConversationChain,
-)
-
 
 # Available backends
 BACKENDS = {
@@ -298,15 +295,17 @@ def sync(
         dal sync --sqlite               # Use direct SQLite access (Phoenix only)
     """
     from datetime import timedelta
+
     import pandas as pd
-    from dev_agent_lens.core.sources import SourceConfig, SourceManager, SourceType
+
     from dev_agent_lens.core.historical_sync import (
         HistoricalSyncState,
         SyncConfig,
         SyncStatus,
-        list_historical_syncs,
         clear_historical_sync,
+        list_historical_syncs,
     )
+    from dev_agent_lens.core.sources import SourceConfig, SourceManager, SourceType
     from dev_agent_lens.query.query import _group_by_session
 
     # Configure logging based on --verbose flag
@@ -540,8 +539,8 @@ def sync(
         resolved_sqlite_container = sqlite_container or source.sqlite_container
         if not resolved_sqlite_container:
             click.echo(click.style(
-                f"Error: --sqlite requires a Docker container name.\n"
-                f"  Use --sqlite-container <name> or add sqlite_container to source config.",
+                "Error: --sqlite requires a Docker container name.\n"
+                "  Use --sqlite-container <name> or add sqlite_container to source config.",
                 fg="red",
             ))
             raise SystemExit(1)
@@ -585,6 +584,7 @@ def sync(
     total_batches_failed = 0
     total_subdivisions = 0
     all_errors: list[str] = []
+    _span_store_ctx: dict = {}     # lazily-opened store + DuckDB connection, shared by all batches
     synced_sources: list[str] = []  # Track successfully synced sources for unification
 
     def pre_subdivide_ranges(
@@ -632,6 +632,32 @@ def sync(
         # Attempt fetch with retries
         batch_df = None
         last_error = None
+        window_size = batch_end - batch_start
+
+        def _subdivide(reason: str) -> tuple[list, int, int]:
+            nonlocal total_subdivisions
+            midpoint = batch_start + window_size / 2
+            total_subdivisions += 1
+            if depth == 0:
+                click.echo(click.style(f" {reason}, subdividing...", fg="yellow"))
+            else:
+                click.echo(f"{indent}→ {batch_start.strftime('%H:%M')}-{batch_end.strftime('%H:%M')}: " +
+                          click.style(f"{reason}, subdividing...", fg="yellow"))
+            left_dfs, left_subs, left_saved = fetch_with_subdivision(
+                client, batch_start, midpoint, depth + 1, is_first_request=False,
+                store=store, checkpoint_state=checkpoint_state, normalizer_fn=normalizer_fn,
+                backend_name=backend_name, batch_key=batch_key,
+            )
+            right_dfs, right_subs, right_saved = fetch_with_subdivision(
+                client, midpoint, batch_end, depth + 1, is_first_request=False,
+                store=store, checkpoint_state=checkpoint_state, normalizer_fn=normalizer_fn,
+                backend_name=backend_name, batch_key=batch_key,
+            )
+            return left_dfs + right_dfs, left_subs + right_subs + 1, left_saved + right_saved
+
+        def _is_statement_timeout(err: BaseException) -> bool:
+            return "statement timeout" in str(err).lower()
+
         for attempt in range(1, retries + 1):
             try:
                 batch_df = client.get_spans_dataframe(
@@ -642,11 +668,22 @@ def sync(
                 break
             except Exception as e:
                 last_error = e
+                # A window that hit the producer's statement timeout will hit it again
+                # unchanged; retrying only burns the timeout three times over. Halve it.
+                if _is_statement_timeout(e):
+                    break
                 if attempt < retries:
                     backoff = max(effective_delay, 2 ** attempt)
                     time.sleep(backoff)
 
         if batch_df is None:
+            # Found on the ENG2-1609 sf-workspaces import: one day held 48k spans and
+            # 1.3 GB of attributes, the pooler cancelled the statement, and the sync
+            # moved on with that day silently absent from the store. Subdividing on the
+            # row limit alone never fires for a day that is too BIG rather than too MANY.
+            if (last_error is not None and _is_statement_timeout(last_error)
+                    and not no_auto_subdivide and window_size > MIN_SUBDIVISION):
+                return _subdivide("statement timeout")
             if last_error:
                 raise last_error
             return [], 0, 0
@@ -656,31 +693,36 @@ def sync(
 
         batch_count = len(batch_df)
 
-        # Check if we hit the limit and should subdivide
-        if effective_limit is not None and batch_count >= effective_limit and not no_auto_subdivide:
-            window_size = batch_end - batch_start
-            if window_size > MIN_SUBDIVISION:
-                midpoint = batch_start + window_size / 2
-                total_subdivisions += 1
+        # Hit the row limit: this frame is TRUNCATED. Subdivide before landing anything,
+        # or the truncated rows reach the store and then arrive again inside the halves.
+        if (effective_limit is not None and batch_count >= effective_limit
+                and not no_auto_subdivide and window_size > MIN_SUBDIVISION):
+            return _subdivide(f"hit limit ({batch_count:,})")
 
-                if depth == 0:
-                    click.echo(click.style(f" hit limit ({batch_count:,}), subdividing...", fg="yellow"))
-                else:
-                    click.echo(f"{indent}→ {batch_start.strftime('%H:%M')}-{batch_end.strftime('%H:%M')}: " +
-                              click.style(f"hit limit, subdividing...", fg="yellow"))
+        # Land the raw batch in the span store, if one was chosen explicitly. This is the
+        # only path by which `dal sync` output reaches the store; the legacy per-source
+        # Oxen files below are untouched. A failed store write is counted and fails the
+        # sync's exit code at the end, but never silently drops a batch.
+        from dev_agent_lens.config import get_zstd_level, span_store_configured
+        if span_store_configured():
+            try:
+                if "con" not in _span_store_ctx:
+                    import duckdb as _duckdb
 
-                left_dfs, left_subs, left_saved = fetch_with_subdivision(
-                    client, batch_start, midpoint, depth + 1, is_first_request=False,
-                    store=store, checkpoint_state=checkpoint_state, normalizer_fn=normalizer_fn,
-                    backend_name=backend_name, batch_key=batch_key,
-                )
-                right_dfs, right_subs, right_saved = fetch_with_subdivision(
-                    client, midpoint, batch_end, depth + 1, is_first_request=False,
-                    store=store, checkpoint_state=checkpoint_state, normalizer_fn=normalizer_fn,
-                    backend_name=backend_name, batch_key=batch_key,
-                )
-
-                return left_dfs + right_dfs, left_subs + right_subs + 1, left_saved + right_saved
+                    from dev_agent_lens.storage.spanstore import open_store as _open_store
+                    _span_store_ctx["store"] = _open_store()
+                    _span_store_ctx["store"].ensure()
+                    _span_store_ctx["con"] = _duckdb.connect()
+                    _span_store_ctx["con"].execute("SET TimeZone='UTC'")
+                n = _span_store_ctx["store"].append_frame(
+                    _span_store_ctx["con"], batch_df, "spans_raw",
+                    compression_level=get_zstd_level(),
+                    source=_span_store_ctx.get("source"))
+                _span_store_ctx["rows"] = _span_store_ctx.get("rows", 0) + n
+                click.echo(f"      -> span store: +{n:,} rows ({_span_store_ctx['store'].uri})")
+            except Exception as e:  # noqa: BLE001 - reported, counted, never swallowed
+                _span_store_ctx["failures"] = _span_store_ctx.get("failures", 0) + 1
+                click.echo(click.style(f"      -> span store ingest FAILED: {type(e).__name__}: {e}", fg="red"))
 
         # Normal case: didn't hit limit
         if depth > 0:
@@ -721,11 +763,11 @@ def sync(
         direct_client = None
 
         if source.source_type == SourceType.PHOENIX:
-            if source.url:
-                os.environ["DAL_PHOENIX_URL"] = source.url
-            if source.project:
-                os.environ["DAL_PHOENIX_PROJECT"] = source.project
-
+            # The source's url/project are passed to the client explicitly below. An
+            # earlier version wrote them into os.environ so a bare PhoenixClient() would
+            # pick them up, which meant source B silently inherited source A's URL under
+            # --all-sources whenever B had none, and one test's source leaked into the
+            # next test's client default. Found 2026-09-04.
             if use_sqlite and resolved_sqlite_container:
                 db_path = f"docker://{resolved_sqlite_container}:/root/.phoenix/phoenix.db"
                 direct_client = PhoenixSQLiteClient(
@@ -735,7 +777,7 @@ def sync(
                 try:
                     if not direct_client.test_connection():
                         click.echo(click.style(
-                            f"Error: Could not connect to Phoenix SQLite database",
+                            "Error: Could not connect to Phoenix SQLite database",
                             fg="red",
                         ))
                         return 0, 0, 1
@@ -753,6 +795,19 @@ def sync(
                 schema=source.schema or os.getenv("PHOENIX_SQL_DATABASE_SCHEMA", "phoenix"),
                 timeout=int(timeout),
             )
+            # A project name that does not exist in this database filters EVERY span out and
+            # reports "no spans" as if that were normal. Found 2026-09-04: the client's default
+            # project name was not one the database had, so the first live sync silently
+            # landed nothing.
+            try:
+                known = direct_client.list_projects()
+                if known and direct_client.project not in known:
+                    click.echo(click.style(
+                        f"Warning: project '{direct_client.project}' does not exist in this "
+                        f"database; it has: {', '.join(known)}. Every batch will be empty. "
+                        f"Re-add the source with --project <name>.", fg="yellow"))
+            except Exception as _e:  # noqa: BLE001 - advisory only
+                click.echo(f"  (could not list projects: {type(_e).__name__})")
             try:
                 if not direct_client.test_connection():
                     click.echo(click.style(
@@ -770,10 +825,9 @@ def sync(
             normalizer_fn = normalize_phoenix
             is_phoenix = True
         else:  # ARIZE
-            if source.space_key:
-                os.environ["ARIZE_SPACE_KEY"] = source.space_key
-            if source.model_id:
-                os.environ["ARIZE_MODEL_ID"] = source.model_id
+            # space_key/model_id are passed to ArizeClient explicitly below, for the same
+            # reason the Phoenix branch stopped writing to os.environ: under --all-sources
+            # source B otherwise inherits source A's values whenever B has none.
             client_class = ArizeClient
             normalizer_fn = normalize_arize
             is_phoenix = False
@@ -807,9 +861,10 @@ def sync(
         if direct_client:
             client = direct_client
         elif is_phoenix:
-            client = client_class(timeout=float(timeout))
+            client = client_class(base_url=source.url, project_name=source.project,
+                                  timeout=float(timeout))
         else:
-            client = client_class()
+            client = client_class(space_key=source.space_key, model_id=source.model_id)
 
         # Generate batches
         batches = []
@@ -909,15 +964,16 @@ def sync(
         if direct_client:
             client = direct_client
         elif is_phoenix:
-            client = client_class(timeout=float(timeout))
+            client = client_class(base_url=source.url, project_name=source.project,
+                                  timeout=float(timeout))
         else:
-            client = client_class()
+            client = client_class(space_key=source.space_key, model_id=source.model_id)
 
         # Get remaining ranges to process
         if is_resuming and resume:
             remaining_ranges = checkpoint_state.get_remaining_ranges()
             if not remaining_ranges:
-                click.echo(click.style(f"  Already complete!", fg="green"))
+                click.echo(click.style("  Already complete!", fg="green"))
                 return checkpoint_state.stats.total_spans, checkpoint_state.stats.batches_completed, 0
         else:
             remaining_ranges = [(source_start, source_end)]
@@ -937,7 +993,7 @@ def sync(
         persisted_failed_ranges = [(r.start, r.end) for r in checkpoint_state.failed_ranges]
 
         if not batches and not persisted_failed_ranges:
-            click.echo(click.style(f"  No batches to process.", fg="yellow"))
+            click.echo(click.style("  No batches to process.", fg="yellow"))
             return checkpoint_state.stats.total_spans, checkpoint_state.stats.batches_completed, 0
 
         if batches:
@@ -1068,6 +1124,7 @@ def sync(
 
     # Process each source
     for source in sources_to_sync:
+        _span_store_ctx["source"] = source.name   # stamps every batch this source lands
         try:
             spans, completed, failed = process_source_sync(source, sync_start_time, sync_end_time)
             total_spans += spans
@@ -1092,9 +1149,10 @@ def sync(
                 click.echo(f"  Unifying sessions for {source_name_to_unify}...", nl=False)
 
                 # Get storage paths
-                from dev_agent_lens.storage import get_storage_path
-                from pathlib import Path
                 import json
+                from pathlib import Path
+
+                from dev_agent_lens.storage import get_storage_path
 
                 storage_path = get_storage_path()
                 sessions_dir = Path(storage_path) / "sessions" / source_name_to_unify
@@ -1186,6 +1244,21 @@ def sync(
         click.echo(f"Auto-subdivisions: {total_subdivisions}")
     click.echo(f"Time elapsed: {elapsed:.1f}s")
 
+    if "store" in _span_store_ctx:
+        # Always, even at +0: a re-pull of an overlapping window lands nothing new, and
+        # the operator reading the loop's log should see that it ran and wrote nothing.
+        click.echo(f"Span store: +{_span_store_ctx.get('rows', 0):,} rows, "
+                   f"{_span_store_ctx.get('failures', 0)} failed batch write(s)")
+    if _span_store_ctx.get("failures"):
+        click.echo(click.style("span store ingest failed; see batch lines above", fg="red"))
+        raise SystemExit(1)
+
+    if total_batches_failed and not all_errors:
+        # batch failures were counted and reported but never changed the exit code, so a
+        # sync where every batch failed exited 0 and a caller could not tell
+        click.echo(click.style(f"{total_batches_failed} batch(es) failed", fg="red"))
+        raise SystemExit(1)
+
     if all_errors:
         click.echo()
         click.echo(click.style("Errors:", fg="red"))
@@ -1225,6 +1298,14 @@ def config_show() -> None:
     from dev_agent_lens.core.sources import SourceManager
 
     click.echo(click.style("DAL Configuration", bold=True))
+    click.echo()
+    from dev_agent_lens.config import get_span_layout, get_span_store, get_zstd_level
+    try:
+        click.echo(click.style("Span store:", underline=True)
+                   + f" {get_span_store()} (layout={get_span_layout()}, zstd={get_zstd_level()})"
+                   "  — see 'dal store show'")
+    except ValueError as e:
+        click.echo(click.style("Span store:", underline=True) + f" invalid: {e}")
     click.echo()
 
     # Show legacy backends (env-based)
@@ -1672,7 +1753,6 @@ def stats(file: str | None, source_name: str | None, by_session: bool, output: s
         get_classification_summary,
         get_failure_summary,
         get_top_tools,
-        session_metrics,
     )
     from dev_agent_lens.query import query
 
@@ -1848,6 +1928,507 @@ def stats(file: str | None, source_name: str | None, by_session: bool, output: s
         click.echo(click.style("=" * 60, bold=True))
 
 
+
+@main.group()
+def store() -> None:
+    """Manage the span store: where the Parquet trace data lives, and how it is shaped.
+
+    The store is a URI, so switching between a local directory, MinIO, an on-prem S3
+    gateway or AWS is a config change rather than a code change:
+
+        dal store show                      What is configured
+
+        dal store use <uri>                 Point DAL at a different store
+
+        dal store layout raw|typed          Which physical shape to read and write
+
+        dal store level <n>                 zstd compression level (1-22)
+
+        dal store verify                    Probe the store; --from-parquet also round-trips
+
+        dal store status                    Rows, files and bytes in each dataset
+
+        dal store query <sql>               Run SQL against the store via DuckDB
+
+    Once a store has been chosen with `dal store use`, every `dal sync` batch is also
+    appended to it as the raw layout (`spans_raw`), `dal export-parquet` reads it
+    (--from-store) and lands its output in it (`export/<source>/...`), and
+    `dal query-spans --from-store` reads it. `dal store status` shows what is there.
+    docs/span-store-formats.md says what each dataset is and how to rebuild it.
+    """
+    pass
+
+
+def _describe_store():
+    from dev_agent_lens.config import get_span_layout, get_span_store, get_zstd_level
+    from dev_agent_lens.storage.spanstore import open_store
+    uri = get_span_store()
+    return open_store(uri), uri, get_span_layout(), get_zstd_level()
+
+
+@store.command("show")
+def store_show() -> None:
+    """Show the configured span store, layout and compression level."""
+    s, uri, layout, level = _describe_store()
+    click.echo(click.style("Span store", bold=True))
+    click.echo(f"  uri     {uri}")
+    click.echo(f"  driver  {type(s).__name__}")
+    click.echo(f"  layout  {layout}"
+               + ("   (producer shape, attributes as JSON text)" if layout == "raw"
+                  else "   (typed columns + overflow + blob store)"))
+    click.echo(f"  zstd    level {level}")
+    click.echo()
+    caps = s.capabilities()
+    click.echo(click.style("Capabilities", underline=True))
+    click.echo(f"  {caps.name}")
+    for k in ("endpoint", "tls", "url_style", "region"):
+        if k in caps.extras:
+            click.echo(f"  {k:<18} {caps.extras[k]}")
+    click.echo(f"  needs network      {'yes' if caps.needs_network else 'no'}")
+    click.echo(f"  duckdb extension   {caps.needs_duckdb_extension or 'none'}")
+    airgap = click.style("yes", fg="green") if caps.airgap_ready else click.style("no", fg="yellow")
+    click.echo(f"  air-gap ready      {airgap}")
+    if caps.notes:
+        click.echo(f"  {caps.notes}")
+    click.echo()
+    click.echo(click.style("Overrides", underline=True))
+    for var in ("DAL_SPAN_STORE", "DAL_SPAN_LAYOUT", "DAL_ZSTD_LEVEL",
+                "DAL_DUCKDB_HTTPFS_PATH", "DAL_S3_ENDPOINT", "AWS_ENDPOINT_URL_S3",
+                "AWS_ENDPOINT_URL"):
+        v = os.getenv(var)
+        click.echo(f"  {var:<24} {v if v else '(unset)'}")
+
+
+@store.command("use")
+@click.argument("uri")
+@click.option("--check/--no-check", default=True, help="Probe the store before saving")
+def store_use(uri: str, check: bool) -> None:
+    """Point DAL at a different span store.
+
+    \b
+    dal store use file:///var/lib/dal/spans
+    dal store use 's3://dal/spans?endpoint=127.0.0.1:9100&tls=0'
+    dal store use s3://my-bucket/dal
+
+    Credentials come from the environment (AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY),
+    never from the URI.
+    """
+    from dev_agent_lens.config import set_span_store
+    from dev_agent_lens.storage.spanstore import LocalSpanStore, open_store
+    try:
+        s = open_store(uri)
+    except ValueError as e:
+        raise click.ClickException(str(e)) from e
+    if isinstance(s, LocalSpanStore):
+        # persist the resolved absolute path: a relative one would be re-resolved against
+        # whatever cwd each later `dal` invocation happens to have
+        uri = f"file://{s.root}"
+    if check:
+        try:
+            h = s.probe()
+        except ModuleNotFoundError as e:
+            raise click.ClickException(str(e)) from e
+        if not h.ok:
+            try:
+                s.ensure()
+                h = s.probe()
+            except Exception as e:  # noqa: BLE001
+                raise click.ClickException(
+                    f"cannot reach {uri}: {type(e).__name__}: {e}\n"
+                    f"Use --no-check to save it anyway.") from e
+        if not h.ok:
+            raise click.ClickException(
+                f"cannot reach {uri}: {h.detail}\nUse --no-check to save it anyway.")
+        click.echo(click.style(f"reachable ({h.detail}, {h.elapsed_ms:.0f}ms)", fg="green"))
+    set_span_store(uri)
+    click.echo(f"span store set to {uri}")
+
+
+@store.command("layout")
+@click.argument("name", type=click.Choice(["raw", "typed"]))
+def store_layout(name: str) -> None:
+    """Choose the physical shape DAL reads and writes.
+
+    \b
+    raw    spans as the producer emits them; `attributes` stays JSON text.
+    typed  ~30 typed columns, verbatim overflow, payload in a blob store.
+
+    The trade-offs are measured in docker/spanstore/README.md.
+    """
+    from dev_agent_lens.config import set_span_layout
+    set_span_layout(name)
+    click.echo(f"layout set to {name}")
+
+
+@store.command("level")
+@click.argument("level", type=click.IntRange(1, 22))
+def store_level(level: int) -> None:
+    """Set the zstd compression level for span-store writes (1-22).
+
+    Pinned rather than left to the writer, because different writers default differently
+    and a size figure is meaningless unless the level is known. See docker/spanstore/README.md.
+    """
+    from dev_agent_lens.config import set_zstd_level
+    set_zstd_level(level)
+    click.echo(f"zstd level set to {level}")
+
+
+
+# Local stacks in docker/spanstore/. Each is one compose file that starts on its own.
+# "remote" is the same driver with the endpoint pointed elsewhere: nothing about a store
+# is local-only, so a URI that works against a container works against a real deployment.
+STORE_PRESETS = {
+    "local": {
+        "uri": "file://{home}/.dal/spans",
+        "compose": None,
+        "needs": "nothing",
+        "about": "A directory. Tier 0, air-gap safe, no extension or credentials.",
+    },
+    "minio": {
+        "uri": "s3://dal/spans?endpoint=127.0.0.1:9100&tls=0",
+        "compose": "docker/spanstore/minio.yml",
+        "needs": "AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY (dalminio / dalminio123)",
+        "about": "S3-compatible object store. The common self-hosted choice.",
+    },
+    "seaweedfs": {
+        "uri": "s3://dal/spans?endpoint=127.0.0.1:8333&tls=0",
+        "compose": "docker/spanstore/seaweedfs.yml",
+        "needs": "AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY (any values)",
+        "about": "A second, independent S3 implementation. Proves the protocol, not one vendor.",
+    },
+    "aws": {
+        "uri": "s3://<your-bucket>/dal/spans",
+        "compose": None,
+        "needs": "AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY / AWS_REGION",
+        "about": "Real S3. Same driver, no endpoint override, virtual-host URLs and TLS.",
+    },
+    "onprem": {
+        "uri": "s3://<bucket>/dal/spans?endpoint=<host>:<port>&tls=1",
+        "compose": None,
+        "needs": "AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY; "
+                 "DAL_DUCKDB_HTTPFS_PATH if air-gapped",
+        "about": "Any S3 gateway reachable over the network: Ceph RGW, a customer's "
+                 "appliance, MinIO on another host. Identical to the local presets with "
+                 "the endpoint moved.",
+    },
+}
+
+
+@store.command("status")
+def store_status() -> None:
+    """What the configured store holds: rows, files and bytes for every dataset."""
+    import duckdb
+
+    from dev_agent_lens.storage.spanstore import quote_literal
+    s, uri, layout, level = _describe_store()
+    con = duckdb.connect()
+    con.execute("SET TimeZone='UTC'")     # unpinned, the range printed in local time
+    try:
+        s.attach_duckdb(con)
+        found = s.list_datasets()
+    except ModuleNotFoundError as e:
+        raise click.ClickException(str(e)) from e
+    click.echo(click.style("Span store", bold=True) + f"  {uri}  (times UTC)")
+    # the three the layouts write always print, so an empty store still shows its shape;
+    # anything else (export-parquet output, a hand-loaded dataset) follows in name order
+    fixed = ["spans_raw", "spans_typed", "blobs_typed"]
+    order = fixed + [d for d in found if d not in fixed]
+    w = max(12, *(len(d) for d in order))
+    for ds in order:
+        size = s.size_bytes(ds)
+        if size == 0:
+            click.echo(f"  {ds:<{w}} empty")
+            continue
+        glob = quote_literal(s.read_glob(ds))
+        src = f"read_parquet({glob}, hive_partitioning=true, union_by_name=true, filename=true)"
+        cols = {r[0] for r in con.execute(f"DESCRIBE SELECT * FROM {src}").fetchall()}
+        for when in ("start_time", "first_span_time"):   # spans, then export-parquet sessions
+            if when in cols:
+                break
+        else:
+            when = None
+        rng = f"min({when}), max({when})" if when else "NULL, NULL"
+        rows, parts, lo, hi = con.execute(
+            f"SELECT count(*), count(DISTINCT filename), {rng} FROM {src}"
+        ).fetchone()
+        span = f"  {str(lo)[:16]} .. {str(hi)[:16]}" if lo else ""
+        click.echo(f"  {ds:<{w}} {rows:>10,} rows  {parts:>4} files  {size / 1e6:>8.1f} MB{span}")
+
+
+@store.command("query")
+@click.argument("sql", required=False)
+@click.option("--file", "-f", "sql_file", type=click.Path(dir_okay=False, allow_dash=True),
+              help="Read the SQL from a file, or '-' for stdin")
+@click.option("--layout", "layout_override", type=click.Choice(["raw", "typed"]), default=None,
+              help="Query the other layout without changing the configured one")
+@click.option("--format", "output_format", type=click.Choice(["table", "json", "csv"]),
+              default="table", help="Output format (default: table)")
+@click.option("--limit", type=int, default=200, show_default=True,
+              help="Rows to print in table format; 0 prints every row")
+def store_query(sql: str | None, sql_file: str | None, layout_override: str | None,
+                output_format: str, limit: int) -> None:
+    """Run SQL against the store, through DuckDB, with the layout's views attached.
+
+    Every layout exposes a `spans` view; the typed layout adds `blobs`. Nothing is
+    copied: the query reads the Parquet where it lives, so this works the same against a
+    directory, MinIO on a laptop, or a bucket in a customer's data centre.
+
+    Examples:
+
+        dal store query "SELECT day, count(*) AS n FROM spans GROUP BY 1 ORDER BY 1"
+
+        dal store query "SELECT name, count(*) FROM spans GROUP BY 1 ORDER BY 2 DESC" --limit 20
+
+        dal store query --layout typed "SELECT model_name, sum(tokens_prompt) FROM spans GROUP BY 1"
+
+        echo "SELECT count(*) FROM spans" | dal store query -f - --format json
+    """
+    import duckdb
+
+    from dev_agent_lens.storage.layouts import get_layout as _get_layout
+    if (sql is None) == (sql_file is None):
+        raise click.UsageError("give the SQL as an argument or with --file (one of them)")
+    if sql_file is not None:
+        sql = click.open_file(sql_file).read()
+    sql = sql.strip().rstrip(";")
+    if not sql:
+        raise click.UsageError("the SQL is empty")
+    s, uri, layout, level = _describe_store()
+    # Nobody sets a layout on a fresh install (the runbook does not), and the raw
+    # layout has none of the columns the cookbook uses. So when no layout was chosen
+    # anywhere and the typed layout exists, query that. Found on the 2026-09-15
+    # customer deployment rehearsal, where the first question failed with "model_name not found".
+    from dev_agent_lens.config import load_config as _load_config
+    chosen = layout_override or os.getenv("DAL_SPAN_LAYOUT") \
+        or _load_config().get("span_store", {}).get("layout")
+    if not chosen and s.size_bytes("spans_typed") > 0:
+        logger.info("[store:query] no layout chosen; typed layout exists, using it")
+        layout = "typed"
+    layout = layout_override or layout
+    primary = {"raw": "spans_raw", "typed": "spans_typed"}[layout]
+    t0 = time.perf_counter()
+    con = duckdb.connect()
+    con.execute("SET TimeZone='UTC'")
+    try:
+        if s.size_bytes(primary) == 0:
+            raise click.ClickException(
+                f"the store at {uri} holds no {primary} data yet"
+                + (" (run `dal sync` with a store chosen)" if layout == "raw"
+                   else " (build it with `dal store verify --from-parquet <glob>`)"))
+        _get_layout(layout).attach(con, s)
+    except ModuleNotFoundError as e:
+        raise click.ClickException(str(e)) from e
+    logger.info("[store:query] layout=%s store=%s sql_len=%d", layout, uri, len(sql))
+    try:
+        rel = con.execute(sql)
+        cols = [d[0] for d in rel.description] if rel.description else []
+        rows = rel.fetchall() if cols else []
+    except duckdb.Error as e:
+        raise click.ClickException(f"{type(e).__name__}: {e}") from e
+    elapsed = (time.perf_counter() - t0) * 1000
+    logger.info("[store:query] done rows=%d cols=%d in %.1fms", len(rows), len(cols), elapsed)
+    _print_rows(cols, rows, output_format, limit)
+    if output_format == "table":
+        click.echo(click.style(f"{len(rows):,} row(s) in {elapsed:.0f}ms  [{layout} layout, {uri}]",
+                               fg="bright_black"), err=True)
+
+
+def _print_rows(cols: list[str], rows: list, output_format: str, limit: int = 0) -> None:
+    """Print a result set as a fixed-width table, JSON records, or CSV."""
+    import csv
+    import json as _json
+    import sys
+
+    if output_format == "json":
+        click.echo(_json.dumps([dict(zip(cols, r)) for r in rows], indent=2, default=str))
+        return
+    if output_format == "csv":
+        w = csv.writer(sys.stdout)
+        w.writerow(cols)
+        w.writerows(rows)
+        return
+    if not cols:
+        click.echo("(no columns)")
+        return
+    shown = rows[:limit] if limit > 0 else rows
+    cells = [["" if v is None else str(v).replace("\n", " ") for v in r] for r in shown]
+    width = [min(max([len(c)] + [len(row[i]) for row in cells]), 60) for i, c in enumerate(cols)]
+    fmt = lambda row: "  ".join(v[:width[i]].ljust(width[i]) for i, v in enumerate(row))  # noqa: E731
+    click.echo(click.style(fmt(cols), bold=True))
+    click.echo("  ".join("-" * w for w in width))
+    for row in cells:
+        click.echo(fmt(row))
+    if limit > 0 and len(rows) > limit:
+        click.echo(f"... {len(rows) - limit:,} more row(s); raise --limit or use --format json")
+
+
+@store.command("presets")
+def store_presets() -> None:
+    """Show known span-store targets and how to bring each one up.
+
+    A preset is only a reminder of the URI. There is no difference in DAL between a
+    container on this laptop and a store in a customer's data centre: same driver, same
+    URI shape, endpoint moved.
+    """
+    home = os.path.expanduser("~")
+    for name, p in STORE_PRESETS.items():
+        click.echo(click.style(name, bold=True) + f"   {p['about']}")
+        click.echo(f"  dal store use '{p['uri'].format(home=home)}'")
+        if p["compose"]:
+            click.echo(f"  docker compose -f {p['compose']} up -d")
+        click.echo(f"  needs: {p['needs']}")
+        click.echo()
+    click.echo("Both S3 servers at once, for the cross-backend parity run:")
+    click.echo("  docker compose -f docker/spanstore/all.yml up -d")
+    click.echo("  uv run python scripts/verify_spanstore.py --from-parquet '<parquet glob>'")
+    click.echo("Pick ONE start method per machine: the single files and all.yml are different")
+    click.echo("compose projects with different volumes, so switching yields an empty store.")
+
+@store.command("verify")
+@click.option("--from-parquet", "source", help="Parquet glob to ingest and check round-trip; "
+              "may be a local path or a glob inside the store, e.g. its own spans_raw "
+              "(--source means a named trace source everywhere else in dal)")
+def store_verify(source: str | None) -> None:
+    """Probe the configured store; with --from-parquet, ingest it and read it back."""
+    s, uri, layout, level = _describe_store()
+    try:
+        h = s.probe()
+    except ModuleNotFoundError as e:
+        raise click.ClickException(str(e)) from e
+    mark = click.style("OK", fg="green") if h.ok else click.style("FAILED", fg="red")
+    click.echo(f"probe {mark}  {uri}  {h.detail}  ({h.elapsed_ms:.0f}ms)")
+    if not h.ok:
+        raise click.ClickException("store unreachable")
+    if not source:
+        click.echo("pass --from-parquet '<glob>' to also check an ingest round-trip")
+        return
+    import duckdb
+
+    from dev_agent_lens.storage.layouts import get_layout as _get_layout
+    s.ensure()
+    con = duckdb.connect()
+    con.execute("SET TimeZone='UTC'")
+    lay = _get_layout(layout)
+    from dev_agent_lens.storage.spanstore import quote_literal
+    # Attach BEFORE counting the source: the glob may live in the store itself (rebuilding
+    # typed from spans_raw), and read_parquet on s3:// needs the store's endpoint, region
+    # and credentials on this connection or it fails with an unhelpful HTTP 400.
+    s.attach_duckdb(con)
+    # the source count is the reference; comparing the store to itself proved nothing
+    src_rows = con.execute(f"SELECT count(*) FROM read_parquet({quote_literal(source)}, "
+                           "hive_partitioning=true, union_by_name=true)").fetchone()[0]
+    res = lay.build(con, source, s, zstd_level=level, deterministic=True)
+    lay.attach(con, s)
+    back = con.execute("SELECT count(*) FROM spans").fetchone()[0]
+    ok = back == src_rows
+    click.echo(f"source  rows={src_rows:,}")
+    click.echo(f"ingest  rows={res.rows:,} hot={res.bytes_hot / 1e6:.1f}MB "
+               f"cold={res.bytes_cold / 1e6:.1f}MB in {res.elapsed_ms / 1000:.1f}s")
+    click.echo(f"readback rows={back:,}  "
+               + (click.style("MATCH", fg="green") if ok else click.style("MISMATCH", fg="red")))
+    if not ok:
+        raise click.ClickException("round-trip row count mismatch")
+
+
+@main.group()
+def drift() -> None:
+    """Measure and detect producer drift in the span store.
+
+    \b
+    dal drift sweep      fingerprint phoenix.spans day by day into a JSONL file
+    dal drift classify   APPEAR/GAP/VANISH/TYPEFLIP/POLYMORPH + coverage classes
+    dal drift contract   build a detector contract from a clean baseline window
+    dal drift check      run the detector over days after the baseline
+    """
+    pass
+
+
+@drift.command("sweep")
+@click.option("--out", required=True, type=click.Path(dir_okay=False))
+@click.option("--start-date", "lo", required=True, help="YYYY-MM-DD inclusive")
+@click.option("--end-date", "hi", required=True, help="YYYY-MM-DD inclusive")
+@click.option("--cap", default=5000, show_default=True)
+def drift_sweep(out: str, lo: str, hi: str, cap: int) -> None:
+    """Fingerprint the spans table, one JSON line per day. Resumable."""
+    import datetime as _dt
+    from pathlib import Path as _P
+
+    from dev_agent_lens.drift.sweep import NoDsn, sweep
+    try:
+        n = sweep(_P(out), _dt.date.fromisoformat(lo),
+                  _dt.date.fromisoformat(hi) + _dt.timedelta(days=1), cap=cap)
+    except NoDsn as e:
+        raise click.ClickException(str(e)) from e
+    click.echo(f"wrote {n} day(s) to {out}")
+
+
+@drift.command("classify")
+@click.argument("fingerprints", type=click.Path(exists=True, dir_okay=False))
+def drift_classify(fingerprints: str) -> None:
+    """Classify structural change and report the blast radius on typed columns."""
+    from collections import Counter
+
+    from dev_agent_lens.drift.classify import classify, coverage_classes
+    from dev_agent_lens.drift.fingerprints import load
+    days = load(fingerprints)
+    events = classify(days)
+    click.echo(click.style("Events", bold=True) + f"  {dict(Counter(e.kind for e in events))}")
+    for kind in ("TYPEFLIP", "POLYMORPH", "NULLED"):
+        rows = [e for e in events if e.kind == kind]
+        click.echo(click.style(f"{kind} ({len(rows)})", bold=True))
+        for e in rows:
+            click.echo(f"  {e.day}  {e.path}  {e.note}")
+    typed_ev = [e for e in events if e.typed and e.kind in ("GAP", "VANISH")]
+    click.echo(click.style(f"GAP/VANISH on typed columns ({len(typed_ev)})", bold=True)
+               + "   (silent NULL if the column is populated from this path)")
+    for e in typed_ev:
+        click.echo(f"  {e.kind:<7} {e.day}  {e.path}  {e.note}")
+    cc = coverage_classes(days)
+    click.echo(click.style("Typed-path coverage classes", bold=True)
+               + f"  {dict(Counter(v[0] for v in cc.values()))}")
+    for path, (k, n, med, mx) in sorted(cc.items()):
+        if k != "STABLE":
+            click.echo(f"  {k:<7} {path:<52} days={n:<4} med={med:6.1%} max={mx:6.1%}")
+
+
+@drift.command("contract")
+@click.argument("fingerprints", type=click.Path(exists=True, dir_okay=False))
+@click.option("--start-date", "lo", required=True, help="YYYY-MM-DD inclusive")
+@click.option("--end-date", "hi", required=True, help="YYYY-MM-DD inclusive")
+@click.option("--out", required=True, type=click.Path(dir_okay=False))
+def drift_contract(fingerprints: str, lo: str, hi: str, out: str) -> None:
+    """Build a detector contract from a baseline window the classifier has called clean."""
+    from dev_agent_lens.drift.detector import build_contract, save
+    from dev_agent_lens.drift.fingerprints import load
+    c = build_contract(load(fingerprints), lo, hi)
+    save(c, out)
+    b = c["baseline"]
+    click.echo(f"contract {b['from']}..{b['to']} ({b['days']} days), {len(c['paths'])} paths -> {out}")
+
+
+@drift.command("check")
+@click.argument("fingerprints", type=click.Path(exists=True, dir_okay=False))
+@click.option("--contract", "contract_path", required=True, type=click.Path(exists=True))
+def drift_check(fingerprints: str, contract_path: str) -> None:
+    """Replay every day after the baseline against the contract. Exit 1 on any ERROR."""
+    from dev_agent_lens.drift.detector import backtest
+    from dev_agent_lens.drift.detector import load as load_contract
+    from dev_agent_lens.drift.fingerprints import load
+    findings = backtest(load(fingerprints), load_contract(contract_path))
+    errors, flagged = 0, 0
+    for day, fs in findings.items():
+        real = [x for x in fs if x[0] != "INFO"]
+        if not real:
+            continue
+        flagged += 1
+        click.echo(click.style(day, bold=True))
+        for sev, kind, path, note in real:
+            errors += sev == "ERROR"
+            click.echo(f"  {sev:<5} {kind:<14} {path}  -- {note}")
+    click.echo(f"{flagged} day(s) with WARN/ERROR findings, {errors} ERROR(s)")
+    if errors:
+        raise SystemExit(1)
+
 @main.command()
 def status() -> None:
     """Show sync status for each backend."""
@@ -1957,15 +2538,14 @@ def summarize(
         dal summarize abc123 --source phoenix-local-alex  # Use specific source
     """
     import json as json_lib
-    from pathlib import Path
 
-    from dev_agent_lens.query import query_sessions
     from dev_agent_lens.llm import (
         NoLLMConfigError,
         check_llm_availability,
         get_summary_preview,
         summarize_session_sync,
     )
+    from dev_agent_lens.query import query_sessions
 
     # Query for the session using query_sessions (supports Parquet)
     sessions = query_sessions(
@@ -2143,13 +2723,13 @@ def cluster(
     import json as json_lib
     from pathlib import Path
 
-    from dev_agent_lens.query import query, query_sessions
     from dev_agent_lens.llm import (
         NoLLMConfigError,
         check_llm_availability,
         cluster_sessions_sync,
         get_cluster_preview,
     )
+    from dev_agent_lens.query import query, query_sessions
 
     # Load sessions - prefer --source with Parquet, fall back to --sessions file
     if sessions:
@@ -2345,15 +2925,14 @@ def suggest(
         dal suggest abc123 --source phoenix-local-alex  # Use specific source
     """
     import json as json_lib
-    from pathlib import Path
 
-    from dev_agent_lens.query import query_sessions
     from dev_agent_lens.llm import (
         NoLLMConfigError,
         check_llm_availability,
         get_suggestion_preview,
         suggest_improvements_sync,
     )
+    from dev_agent_lens.query import query_sessions
 
     # Query for the session using query_sessions (supports Parquet)
     sessions = query_sessions(
@@ -3517,8 +4096,8 @@ def export_sessions(source_name: str, output_path: str | None, update: bool) -> 
     import json
     from pathlib import Path
 
-    from dev_agent_lens.query.query import _group_by_session
     from dev_agent_lens.core.unify import read_sessions_file
+    from dev_agent_lens.query.query import _group_by_session
     from dev_agent_lens.storage import get_storage_path
 
     storage_path = get_storage_path()
@@ -4070,7 +4649,7 @@ def config_oxen(remote: str):
     Example:
         dal config oxen --remote https://hub.oxen.ai/myteam/sessions
     """
-    from dev_agent_lens.config import set_oxen_remote, get_config_path
+    from dev_agent_lens.config import get_config_path, set_oxen_remote
 
     # Ensure URL is fully qualified
     if not remote.startswith("http://") and not remote.startswith("https://"):
@@ -4129,6 +4708,12 @@ def config_oxen(remote: str):
     help="Read directly from raw sync files instead of unified JSONL (handles large datasets)",
 )
 @click.option(
+    "--from-store",
+    is_flag=True,
+    help="Read the span store `dal sync` lands in (chosen with `dal store use`) "
+    "instead of local files; no raw sync files are needed on this machine",
+)
+@click.option(
     "--chunk-size",
     type=int,
     default=50,
@@ -4142,6 +4727,7 @@ def export_parquet(
     no_strip_nulls: bool,
     partitioned: bool,
     from_raw: bool,
+    from_store: bool,
     chunk_size: int,
 ) -> None:
     """Export to partitioned Parquet format.
@@ -4149,7 +4735,13 @@ def export_parquet(
     By default, reads from unified JSONL and exports to a partitioned
     Hive-style layout. Use --from-raw to skip the unified JSONL step
     and read directly from raw sync files (required for large datasets
-    that don't fit in memory).
+    that don't fit in memory). Use --from-store to read the span store
+    instead, one day at a time, so a machine attached to a shared store
+    can export without ever having synced.
+
+    Once a store has been chosen with `dal store use`, the export is also
+    landed in it, as `export/<source>/spans` and `export/<source>/sessions`,
+    after the local files are written.
 
     Examples:
 
@@ -4159,12 +4751,19 @@ def export_parquet(
 
         dal export-parquet --source arize-ax-alex --from-raw --chunk-size 20
 
+        dal export-parquet --source phoenix-local-alex --from-store
+
         dal export-parquet --source phoenix-local-alex --no-partitioned
     """
     from pathlib import Path
 
     from dev_agent_lens.export.parquet import ParquetExporter
     from dev_agent_lens.storage import get_storage_path
+
+    if from_raw and from_store:
+        raise click.UsageError("--from-raw and --from-store are different inputs; pick one")
+    if from_store and not partitioned:
+        raise click.UsageError("--from-store always writes the partitioned layout")
 
     storage_path = get_storage_path()
 
@@ -4180,6 +4779,51 @@ def export_parquet(
         dedupe=not no_dedupe,
         strip_nulls=not no_strip_nulls,
     )
+
+    if from_store:
+        from dev_agent_lens.config import get_span_store
+        from dev_agent_lens.storage.spanstore import open_store
+
+        uri = get_span_store()
+        click.echo(f"Source: {source_name}")
+        click.echo(f"Input: span store {uri} (spans_raw, one day per chunk)")
+        click.echo(f"Output: {out_dir}")
+        click.echo(f"Compression: {compression}")
+        click.echo()
+
+        def store_progress(chunk_num: int, total: int) -> None:
+            click.echo(f"  Day {chunk_num}/{total}...")
+
+        click.echo("Exporting the span store to partitioned Parquet...")
+        try:
+            stats = exporter.export_store_to_partitioned(
+                source=source_name,
+                store=open_store(uri),
+                output_dir=out_dir,
+                progress_callback=store_progress,
+            )
+        except (FileNotFoundError, ModuleNotFoundError) as e:
+            raise click.ClickException(str(e)) from e
+        if stats.get("untagged_rows"):
+            click.echo(click.style(
+                f"  note: {stats['untagged_rows']:,} store row(s) carry no source tag "
+                f"(landed before sync stamped one) and were exported as '{source_name}'",
+                fg="yellow"))
+
+        click.echo()
+        click.echo(click.style("Export complete!", fg="green", bold=True))
+        click.echo(f"  Sessions: {stats['sessions']:,}")
+        click.echo(f"  Spans: {stats['spans']:,}")
+        click.echo(f"  Spans skipped (dedup): {stats['spans_skipped']:,}")
+        click.echo(f"  Input size: {stats['input_bytes'] / 1024**2:.1f} MB (store)")
+        click.echo(f"  Output size: {stats['output_bytes'] / 1024**2:.1f} MB")
+        click.echo(f"  Part files: {stats.get('part_files', 'N/A')}")
+        click.echo(f"  Weeks: {stats.get('weeks', 'N/A')}")
+        click.echo()
+        click.echo(f"  Sessions: {stats.get('sessions_path', '')}")
+        click.echo(f"  Spans: {stats.get('spans_dir', '')}/")
+        _land_export_in_store(source_name, out_dir, partitioned=True)
+        return
 
     if from_raw:
         # Direct raw-to-parquet path (no unified JSONL intermediate)
@@ -4226,6 +4870,7 @@ def export_parquet(
         click.echo()
         click.echo(f"  Sessions: {stats.get('sessions_path', '')}")
         click.echo(f"  Spans: {stats.get('spans_dir', '')}/")
+        _land_export_in_store(source_name, out_dir, partitioned=partitioned)
         return
 
     # Standard path: read from unified JSONL
@@ -4307,6 +4952,54 @@ def export_parquet(
         click.echo("Output files:")
         click.echo(f"  {stats['sessions_path']}")
         click.echo(f"  {stats['spans_path']}")
+    _land_export_in_store(source_name, out_dir, partitioned=partitioned)
+
+
+def _land_export_in_store(source_name: str, out_dir, *, partitioned: bool) -> None:
+    """Copy a finished export-parquet output into the span store, if one was chosen.
+
+    Two datasets per source: `export/<source>/spans` (partitioned by week when the local
+    layout is, else by source) and `export/<source>/sessions` (by source). The store copy
+    is replaced whole each time, because the local export is already cumulative and
+    de-duplicated, so the store never holds a stale part. With no store chosen this is a
+    no-op, exactly like `dal sync`. A failed landing fails the command.
+    """
+    from pathlib import Path
+
+    from dev_agent_lens.config import get_zstd_level, span_store_configured
+    if not span_store_configured():
+        return
+    import duckdb
+
+    from dev_agent_lens.storage.spanstore import open_store, quote_literal
+    out_dir = Path(out_dir)
+    if partitioned:
+        spans_glob = f"{out_dir}/spans/source={source_name}/**/*.parquet"
+        sessions_glob = f"{out_dir}/sessions/source={source_name}.parquet"
+    else:
+        spans_glob = f"{out_dir}/{source_name}_spans.parquet"
+        sessions_glob = f"{out_dir}/{source_name}_sessions.parquet"
+    click.echo()
+    try:
+        store = open_store()
+        store.ensure()
+        con = duckdb.connect()
+        con.execute("SET TimeZone='UTC'")
+        store.attach_duckdb(con)
+        for glob, dataset in ((spans_glob, f"export/{source_name}/spans"),
+                              (sessions_glob, f"export/{source_name}/sessions")):
+            cols = {r[0] for r in con.execute(
+                f"DESCRIBE SELECT * FROM read_parquet({quote_literal(glob)}, "
+                "hive_partitioning=true, union_by_name=true)").fetchall()}
+            by = "week" if "week" in cols else "source"
+            w = store.copy_from_glob(con, glob, dataset, partition_by=by,
+                                     compression_level=get_zstd_level(), deterministic=True)
+            click.echo(f"  -> span store: {dataset} {w.rows:,} rows, "
+                       f"{w.bytes_written / 1024**2:.1f} MB ({store.uri})")
+    except Exception as e:  # noqa: BLE001 - reported and fatal, never silent
+        click.echo(click.style(
+            f"  -> span store landing FAILED: {type(e).__name__}: {e}", fg="red"))
+        raise SystemExit(1) from e
 
 
 @main.command("export-events")
@@ -4592,6 +5285,259 @@ def push_atif(trajectories_path, endpoint, project, user_id, chunk_size, pause, 
     )
 
 
+def _git_user_email() -> str | None:
+    """`git config --global user.email`, or None. Not a credential: it is on every commit."""
+    import subprocess
+
+    try:
+        out = subprocess.run(
+            ["git", "config", "--global", "user.email"],
+            capture_output=True, text=True, timeout=5, check=False,
+        ).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return out or None
+
+
+@main.command("ingest-sessions")
+@click.option(
+    "--include",
+    "include",
+    multiple=True,
+    required=True,
+    help=(
+        "Glob matched against each session's project path. REQUIRED and "
+        "repeatable; there is no 'all'. e.g. --include '*teraflop*'"
+    ),
+)
+@click.option(
+    "--sessions-dir",
+    "sessions_dir",
+    default=None,
+    help="Sessions directory (default: $DAL_CLAUDE_DIR or ~/.claude/projects; "
+    "for --agent codex, $DAL_CODEX_DIR or ~/.codex/sessions)",
+)
+@click.option(
+    "--agent",
+    type=click.Choice(["claude-code", "codex"]),
+    default="claude-code",
+    show_default=True,
+    help="Which harness's sessions to ingest. codex reads ~/.codex/sessions (ENG2-402).",
+)
+@click.option("--since", default=None, help="Only sessions active since this date, e.g. 2026-07-01")
+@click.option(
+    "--endpoint",
+    default=None,
+    help="OTLP HTTP base URL, e.g. http://127.0.0.1:6006. Required unless --dry-run",
+)
+@click.option(
+    "--project",
+    default=None,
+    help="Destination project name. Required unless --dry-run",
+)
+@click.option("--user", "user_id", default=None, help="Stamp user.id on every span")
+@click.option("--chunk-size", type=int, default=100, help="Spans per request (default: 100)")
+@click.option("--pause", type=float, default=1.0, help="Seconds between requests (default: 1.0)")
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    help="List what would be sent, estimating from file size only. Unlike "
+    "push-atif's --dry-run, nothing is converted or validated.",
+)
+@click.option("--yes", "-y", "assume_yes", is_flag=True, help="Skip the confirmation prompt")
+@click.option("--to-store", is_flag=True, help="Land spans in the configured span store instead of pushing to an OTLP endpoint; --project becomes the source stamp")
+def ingest_sessions_cmd(
+    include, sessions_dir, agent, since, endpoint, project, user_id, chunk_size, pause,
+    dry_run, assume_yes, to_store,
+):
+    """Backfill Claude Code sessions from a folder into Phoenix.
+
+    Walks a ~/.claude/projects-shaped directory, converts each session to ATIF,
+    and pushes it. Safe to re-run: trace and span ids are derived from
+    trajectory content, so sessions that already landed are no-ops and there is
+    no cursor file to keep.
+
+    \b
+    --include IS THE SAFETY CONTROL, NOT A CONVENIENCE FLAG.
+    That folder mixes work, personal, and other clients' sessions in one flat
+    list, so it is required and has no 'all'. It is matched case-sensitively
+    against the cwd each session recorded -- not the directory name, which
+    flattens every separator to '-' and cannot be decoded back. Preview with
+    --dry-run before the first real run.
+
+    \b
+    Examples:
+        dal ingest-sessions --include '*teraflop*' --dry-run
+        dal ingest-sessions --include '*teraflop*' --since 2026-07-01 \\
+            --endpoint http://127.0.0.1:6006 --project claude-code-sessions
+    """
+    from datetime import datetime
+    from pathlib import Path
+
+    from dev_agent_lens.export import ingest
+
+    if agent == "codex":
+        root = sessions_dir or os.getenv("DAL_CODEX_DIR") or "~/.codex/sessions"
+        if not user_id:
+            # Codex session files name no account, so without this every Codex span has
+            # person NULL. The laptop's git email maps to a person through identity.yaml.
+            user_id = _git_user_email()
+            if user_id:
+                domain = user_id.split("@")[-1]
+                click.echo(f"--user not given; using this machine's git email (@{domain})")
+            else:
+                warning = "No --user and no git user.email: Codex spans will have no person."
+                click.echo(click.style(warning, fg="yellow"))
+    else:
+        root = sessions_dir or os.getenv("DAL_CLAUDE_DIR") or "~/.claude/projects"
+
+    cutoff = None
+    if since:
+        try:
+            cutoff = datetime.fromisoformat(since)
+        except ValueError:
+            click.echo(click.style(f"--since is not an ISO date: {since}", fg="red"))
+            raise SystemExit(2)
+        if cutoff.tzinfo is None:
+            # A bare date means local midnight. Reading it as UTC shifts the
+            # window earlier west of Greenwich and sweeps in sessions the user
+            # meant to exclude -- the wrong direction for a scoping filter.
+            cutoff = cutoff.astimezone()
+
+    if to_store and not project:
+        click.echo(click.style("--project is required with --to-store; it is the source stamp in the store", fg="red"))
+        raise SystemExit(2)
+    if not dry_run and not to_store and not (endpoint and project):
+        click.echo(
+            click.style(
+                "--endpoint and --project are required for a real ingest (only "
+                "--dry-run may omit them). There is no default endpoint on "
+                "purpose: a local Phoenix may be backed by a shared store.",
+                fg="red",
+            )
+        )
+        raise SystemExit(2)
+
+    if not Path(root).expanduser().is_dir():
+        click.echo(click.style(f"No such sessions directory: {root}", fg="red"))
+        raise SystemExit(2)
+
+    try:
+        discover = ingest.discover_codex_sessions if agent == "codex" else ingest.discover_sessions
+        sessions = discover(root, include=list(include), since=cutoff)
+    except ValueError as exc:
+        click.echo(click.style(str(exc), fg="red"))
+        raise SystemExit(2)
+
+    if not sessions:
+        click.echo(
+            f"No sessions in {root} match {list(include)}"
+            + (f" since {since}" if since else "")
+            + ".\nPatterns are whole-string globs matched case-sensitively against\n"
+            "the recorded cwd: use '*teraflop*', not 'teraflop'."
+        )
+        return
+
+    by_project: dict[str, list] = {}
+    for session in sessions:
+        by_project.setdefault(session.project_path, []).append(session)
+
+    total_bytes = sum(s.size_bytes for s in sessions)
+    click.echo(
+        f"{len(sessions)} sessions across {len(by_project)} projects "
+        f"({total_bytes / 1e6:,.0f} MB) in {root}"
+    )
+    click.echo(
+        "Destination: "
+        + (
+            click.style("nothing (dry run)", fg="green")
+            if dry_run
+            else click.style(f"span store, source={project}" if to_store else f"{endpoint} project={project}", fg="yellow")
+        )
+    )
+    for project_path in sorted(by_project):
+        group = by_project[project_path]
+        guessed = " (from directory name, no cwd recorded)" if any(
+            s.project_path_source == "dirname" for s in group
+        ) else ""
+        click.echo(
+            f"  {project_path}{guessed}\n"
+            f"      {len(group)} sessions  "
+            f"{sum(s.size_bytes for s in group) / 1e6:,.1f} MB  "
+            f"~{sum(s.estimated_spans for s in group):,} spans"
+        )
+    click.echo("")
+
+    if not dry_run and not assume_yes:
+        # The fast path is the irreversible one: --dry-run is opt-in and the
+        # listing above scrolls by. Name the destination and stop here. On a
+        # non-tty click.confirm aborts, so scripts must pass --yes deliberately.
+        click.confirm(
+            (f"Land {len(sessions)} sessions in the span store as source={project}?" if to_store
+             else f"Push {len(sessions)} sessions to {endpoint} (project={project})?"),
+            abort=True,
+        )
+
+    def progress(index, total, session, status):
+        colour = {"ok": "green", "failed": "red", "incomplete": "yellow"}.get(status)
+        click.echo(
+            f"  [{index}/{total}] {session.session_id}  "
+            + (click.style(status, fg=colour) if colour else status)
+        )
+
+    try:
+        report = ingest.ingest_sessions(
+            sessions,
+            endpoint=endpoint,
+            project=project,
+            user_id=user_id,
+            chunk_size=chunk_size,
+            pause=pause,
+            dry_run=dry_run,
+            on_progress=None if dry_run else progress,
+            to_store=to_store,
+        )
+    except ImportError as exc:
+        # The optional OTLP extra is missing. Report it once, like push-atif,
+        # rather than letting it surface as a failure per session.
+        click.echo(click.style(str(exc), fg="red"))
+        raise SystemExit(1)
+
+    if dry_run:
+        click.echo(
+            f"Dry run: ~{report.estimated_spans:,} spans estimated from file size. "
+            "Nothing was converted or sent."
+        )
+        return
+
+    click.echo("")
+    click.echo(f"Sessions: {report.sessions_ok}/{report.sessions_total} ok")
+    click.echo(f"Spans accepted: {report.spans_sent:,} in {report.requests:,} requests")
+    if report.clamped_spans:
+        click.echo(f"Clamped (end before start): {report.clamped_spans:,}")
+    if report.retries_503:
+        click.echo(f"Backoff waits (queue full): {report.retries_503:,}")
+    for failure in report.failures:
+        click.echo(click.style(f"  FAILED {failure.session_id}: {failure.reason}", fg="red"))
+    if report.incomplete_sessions:
+        click.echo(
+            click.style(
+                f"{report.incomplete_sessions} sessions left chunks unsent. Re-run to fill "
+                "the gaps; already-landed spans are no-ops.",
+                fg="yellow",
+            )
+        )
+    if not report.ok:
+        raise SystemExit(1)
+    click.echo(
+        click.style(
+            ("All sessions landed in the span store; `dal store status` shows the rows." if to_store
+             else "All sessions accepted. Verify persistence by counting rows in the backend."),
+            fg="green",
+        )
+    )
+
+
 @main.command("query-events")
 @click.option(
     "--source",
@@ -4785,8 +5731,21 @@ def query_events_cmd(
     "--source",
     "source_name",
     type=str,
-    required=True,
-    help="Source name (e.g., phoenix-local-alex, arize-sightline)",
+    default=None,
+    help="Source whose export-parquet files to read (e.g. phoenix-local-alex)",
+)
+@click.option(
+    "--from-store",
+    is_flag=True,
+    default=False,
+    help="Read the span store chosen with `dal store use` instead of export-parquet files",
+)
+@click.option(
+    "--layout",
+    "layout_override",
+    type=click.Choice(["raw", "typed"]),
+    default=None,
+    help="With --from-store: read the other layout without changing the configured one",
 )
 @click.option(
     "--session-id",
@@ -4820,7 +5779,7 @@ def query_events_cmd(
     "--limit",
     type=int,
     default=None,
-    help="Maximum number of spans to return",
+    help="Maximum number of spans to return (default: 50)",
 )
 @click.option(
     "--stats",
@@ -4836,7 +5795,9 @@ def query_events_cmd(
     help="Output format (default: table)",
 )
 def query_spans_cmd(
-    source_name: str,
+    source_name: str | None,
+    from_store: bool,
+    layout_override: str | None,
     session_id: str | None,
     status_code: str | None,
     model_name: str | None,
@@ -4845,94 +5806,106 @@ def query_spans_cmd(
     stats: bool,
     output_format: str,
 ) -> None:
-    """Query spans from Phoenix/Arize Parquet files.
+    """List or summarise spans, from export-parquet files or the span store.
 
-    Provides high-performance queries for LiteLLM/Phoenix pipeline spans.
-    Supports filtering by session, status, model, and span name.
+    With --source, reads what `dal export-parquet` wrote for that source. With
+    --from-store, reads the span store `dal sync` lands in, through the configured
+    layout, so no export step is needed. Filters and output are the same either way.
 
     Examples:
 
         dal query-spans --source phoenix-local-alex --stats
 
-        dal query-spans --source phoenix-local-alex --status-code ERROR
+        dal query-spans --from-store --stats
 
-        dal query-spans --source phoenix-local-alex --name Tool --limit 20
+        dal query-spans --from-store --status-code ERROR --limit 20
 
-        dal query-spans --source phoenix-local-alex --model claude --stats
+        dal query-spans --from-store --layout typed --model claude --stats
 
-        dal query-spans --source arize-sightline --session-id abc123
+        dal query-spans --source arize-sightline --session-id abc123 --format json
     """
     import json as json_module
 
-    from dev_agent_lens.query.parquet_query import (
-        find_parquet_files,
-        get_spans_stats,
-        query_spans_simple,
+    import duckdb
+
+    from dev_agent_lens.query.spans_query import (
+        open_export,
+        open_store_spans,
+        spans_list,
+        spans_stats,
     )
 
-    # Find parquet file for the source
-    parquet_files = find_parquet_files(source=source_name)
+    con = duckdb.connect()
+    con.execute("SET TimeZone='UTC'")
+    filters = {
+        "session_id": session_id,
+        "status_code": status_code,
+        "model_name": model_name,
+        "name_pattern": name_pattern,
+    }
+    if from_store:
+        from dev_agent_lens.config import get_span_layout, get_span_store
+        from dev_agent_lens.storage.spanstore import open_store
 
-    if source_name not in parquet_files:
-        click.echo(
-            click.style(
-                f"Error: No spans file found for source '{source_name}'",
-                fg="red",
+        try:
+            rel = open_store_spans(
+                con, open_store(get_span_store()), layout_override or get_span_layout()
             )
-        )
-        # List available sources
-        all_files = find_parquet_files()
-        if all_files:
-            click.echo("Available sources:")
-            for src in sorted(all_files.keys()):
-                click.echo(f"  - {src}")
-        raise SystemExit(1)
+        except (FileNotFoundError, ModuleNotFoundError) as e:
+            raise click.ClickException(str(e)) from e
+    else:
+        if not source_name:
+            raise click.UsageError("give --source <name>, or --from-store to read the span store")
+        if layout_override:
+            raise click.UsageError("--layout only applies with --from-store")
+        from dev_agent_lens.query.parquet_query import find_parquet_files
 
-    spans_path = parquet_files[source_name]["spans"]
+        parquet_files = find_parquet_files(source=source_name)
+        if source_name not in parquet_files:
+            click.echo(
+                click.style(
+                    f"Error: No spans file found for source '{source_name}'",
+                    fg="red",
+                )
+            )
+            # List available sources
+            all_files = find_parquet_files()
+            if all_files:
+                click.echo("Available sources:")
+                for src in sorted(all_files.keys()):
+                    click.echo(f"  - {src}")
+            raise SystemExit(1)
+        rel = open_export(con, parquet_files[source_name]["spans"])
 
     # Stats mode
     if stats:
-        stats_result = get_spans_stats(
-            spans_path,
-            session_id=session_id,
-            status_code=status_code,
-            model_name=model_name,
-            name_pattern=name_pattern,
-        )
+        st = spans_stats(con, rel, **filters)
         click.echo(click.style("Spans Statistics", fg="cyan", bold=True))
-        if stats_result.get("filters"):
+        if st["filters"]:
             click.echo(click.style("  Filters:", fg="yellow"))
-            for k, v in stats_result["filters"].items():
+            for k, v in st["filters"].items():
                 click.echo(f"    {k}: {v}")
-        click.echo(f"  File: {stats_result['file_path']}")
-        click.echo(f"  Size: {stats_result['file_size_bytes'] / 1024 / 1024:.1f} MB")
-        click.echo(f"  Total spans: {stats_result['total_spans']:,}")
-        click.echo(f"  Sessions: {stats_result['session_count']:,}")
+        click.echo(f"  Source: {st['label']}")
+        click.echo(f"  Size: {st['size_bytes'] / 1024 / 1024:.1f} MB")
+        click.echo(f"  Total spans: {st['total_spans']:,}")
+        click.echo(f"  Sessions: {st['session_count']:,}")
         click.echo()
         click.echo(click.style("Status Code Counts:", fg="cyan"))
-        for scode, count in stats_result["status_code_counts"].items():
+        for scode, count in st["status_code_counts"].items():
             click.echo(f"  {scode}: {count:,}")
         click.echo()
-        if stats_result["span_name_counts"]:
+        if st["span_name_counts"]:
             click.echo(click.style("Top Span Names:", fg="cyan"))
-            for sname, count in list(stats_result["span_name_counts"].items())[:15]:
+            for sname, count in st["span_name_counts"].items():
                 click.echo(f"  {sname}: {count:,}")
         click.echo()
-        if stats_result["top_models"]:
+        if st["top_models"]:
             click.echo(click.style("Top Models:", fg="cyan"))
-            for mname, count in list(stats_result["top_models"].items())[:10]:
+            for mname, count in st["top_models"].items():
                 click.echo(f"  {mname}: {count:,}")
         raise SystemExit(0)
 
-    # Query spans using the simple function for listing
-    spans = query_spans_simple(
-        spans_path=spans_path,
-        session_id=session_id,
-        status_code=status_code,
-        model_name=model_name,
-        name_pattern=name_pattern,
-        limit=limit or 50,
-    )
+    spans = spans_list(con, rel, limit=limit or 50, **filters)
 
     if not spans:
         click.echo(click.style("No spans found.", fg="yellow"))
@@ -4964,9 +5937,7 @@ def query_spans_cmd(
             span_name = span.get("name", "?")
             status = span.get("status_code", "?")
             start = span.get("start_time", "?")
-            if hasattr(start, 'isoformat'):
-                start = start.strftime("%Y-%m-%d %H:%M:%S")
-            elif hasattr(start, 'strftime'):
+            if hasattr(start, "strftime"):
                 start = start.strftime("%Y-%m-%d %H:%M:%S")
             elif isinstance(start, str) and len(start) > 19:
                 start = start[:19]
@@ -5273,9 +6244,9 @@ def clean_sessions(
 
         dal clean-sessions --source phoenix-local-alex --dry-run
     """
-    from pathlib import Path
-    import tempfile
     import shutil
+    import tempfile
+    from pathlib import Path
 
     from dev_agent_lens.export.dedupe import clean_sessions_file
     from dev_agent_lens.storage import get_storage_path
@@ -5438,9 +6409,9 @@ def purge(
 
         dal purge --all --dry-run
     """
+    import shutil
     from dataclasses import dataclass
     from pathlib import Path
-    import shutil
 
     from dev_agent_lens.storage import get_storage_path
 
@@ -5733,6 +6704,7 @@ def purge(
 def _load_sessions_from_parquet(source_name: str) -> list[dict] | None:
     """Load sessions from parquet file with raw_attributes_json for chain detection."""
     import pandas as pd
+
     from dev_agent_lens.storage import get_storage_path
 
     storage_path = get_storage_path()
@@ -6003,8 +6975,9 @@ def chain_export_cmd(
 
     # Export based on format
     if output_format == "jsonl":
-        from dev_agent_lens.analysis.chains import export_chain_to_jsonl
         import json as json_module
+
+        from dev_agent_lens.analysis.chains import export_chain_to_jsonl
 
         # Use canonical event-based JSONL format
         records = export_chain_to_jsonl(
@@ -6017,8 +6990,9 @@ def chain_export_cmd(
         event_count = sum(1 for r in records if r.get("record_type") == "event")
         click.echo(f"Exported {event_count} events as JSONL (event-based format, {len(records)} total records)")
     elif output_format == "json":
-        from dev_agent_lens.analysis.chains import export_chain_to_json
         import json as json_module
+
+        from dev_agent_lens.analysis.chains import export_chain_to_json
 
         json_data = export_chain_to_json(
             target_chain,
@@ -6411,7 +7385,7 @@ def run_cleanup(
         click.echo(click.style("Claude Sessions:", bold=True))
         click.echo(f"  Testbed sessions: {session_stats['testbed_sessions']}")
         click.echo(f"  Size: {session_stats['testbed_size_mb']} MB")
-        click.echo(f"  Pattern: *tests-e2e-testbed-runs-run-*")
+        click.echo("  Pattern: *tests-e2e-testbed-runs-run-*")
         click.echo()
 
     # List mode
@@ -6549,6 +7523,181 @@ def run_cleanup(
 
         click.echo()
         click.echo(click.style(f"Deleted {total_deleted} item(s)", fg="green"))
+
+
+@main.command("otlp-receive")
+@click.option(
+    "--host", default="127.0.0.1", show_default=True, help="bind address; 0.0.0.0 inside a container"
+)
+@click.option("--port", default=4318, show_default=True, type=int)
+@click.option(
+    "--source-default",
+    default="otlp",
+    show_default=True,
+    help="source stamp when the resource names neither openinference.project.name nor service.name",
+)
+@click.option(
+    "--flush-rows", default=500, show_default=True, type=int,
+    help="write to the store after this many buffered rows",
+)
+@click.option(
+    "--flush-seconds", default=30.0, show_default=True, type=float, help="or after this many seconds"
+)
+def otlp_receive_cmd(
+    host: str, port: int, source_default: str, flush_rows: int, flush_seconds: float
+):
+    """Receive OTLP/HTTP traces straight into the span store (no Phoenix).
+
+    Point a producer at it with OTEL_EXPORTER_OTLP_ENDPOINT=http://<host>:<port> and
+    OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf. The resource's openinference.project.name
+    (or service.name) becomes the source. Rows land in spans_raw; the typed layout is
+    rebuilt by `dal store verify --from-parquet` or the compose sync loop.
+    """
+    import signal
+
+    import duckdb as _duckdb
+
+    from dev_agent_lens.otlp_receiver import Receiver
+    from dev_agent_lens.storage.spanstore import open_store
+
+    store = open_store()
+    store.ensure()
+    con = _duckdb.connect()
+    con.execute("SET TimeZone='UTC'")
+    r = Receiver(
+        store, con, host=host, port=port, default_source=source_default,
+        flush_rows=flush_rows, flush_seconds=flush_seconds,
+    )
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        signal.signal(sig, lambda *_: r.stop())
+    click.echo(
+        f"OTLP receiver on http://{host}:{r.port}/v1/traces -> {store.uri} "
+        "(Ctrl-C flushes and stops)"
+    )
+    # Say out loud which door /v1/events is; the log line is below the default level.
+    click.echo(
+        "git events on /v1/events/<producer>: signature "
+        + ("required" if r.events_secret else "NOT required (DAL_EVENTS_SECRET unset)")
+    )
+    r.serve_forever()
+
+
+@main.command("github-backfill")
+@click.option("--repo", "repos", multiple=True, required=True, metavar="OWNER/NAME",
+              help="a repository to replay; repeat for several")
+@click.option("--receiver", default="http://127.0.0.1:4318", show_default=True,
+              help="the receiver whose /v1/events/github door to post to")
+@click.option("--until", "until_s", default=None, metavar="ISO-8601",
+              help="the moment the live hook took over; events at or after it are skipped")
+@click.option("--since", "since_s", default=None, metavar="ISO-8601",
+              help="skip pull requests created before this")
+@click.option("--secret-env", default="DAL_EVENTS_SECRET", show_default=True,
+              help="env var holding the hook secret the receiver checks (empty = unsigned)")
+@click.option("--dry-run", is_flag=True, help="read GitHub and count; post nothing")
+@click.option("--out", "out_dir", type=click.Path(file_okay=False), default=None,
+              help="also write each delivery's body to this directory")
+def github_backfill_cmd(repos: tuple[str, ...], receiver: str, until_s: str | None,
+                        since_s: str | None, secret_env: str, dry_run: bool,
+                        out_dir: str | None) -> None:
+    """Replay a repo's pull-request history into the store as signed hook deliveries.
+
+    Reads every pull request, review and inline comment through the GitHub API (token
+    from GITHUB_TOKEN, GH_TOKEN, or `gh auth token`) and posts each as the hook would
+    have, dated by its own timestamp. Idempotent: the span id is the body's hash.
+
+    Pass --until as the hook's creation time so nothing lands twice:
+
+        dal github-backfill --repo teraflop-inc/agent-forge \\
+            --receiver http://127.0.0.1:4318 --until 2026-09-17T16:38:00Z
+    """
+    from datetime import datetime, timezone
+
+    from dev_agent_lens.github_backfill import GitHub, github_token, plan_repo, post_all
+
+    def _t(v: str | None) -> datetime | None:
+        if not v:
+            return None
+        return datetime.fromisoformat(v.replace("Z", "+00:00")).astimezone(timezone.utc)
+
+    until, since = _t(until_s), _t(since_s)
+    secret = os.environ.get(secret_env) or None if secret_env else None
+    token = github_token()
+    if not token:
+        click.echo("no GitHub token (GITHUB_TOKEN, GH_TOKEN, or gh auth login); "
+                   "unauthenticated reads get 60 calls an hour", err=True)
+    if not secret and not dry_run:
+        click.echo(f"{secret_env} is unset; posting unsigned (a receiver with a secret answers 401)",
+                   err=True)
+    gh = GitHub(token)
+    total: dict[int, int] = {}
+    for repo in repos:
+        plan = plan_repo(gh, repo, until=until, since=since,
+                         progress=lambda m: click.echo(f"  {m}", err=True))
+        kinds: dict[str, int] = {}
+        for d in plan.deliveries:
+            kinds[d.name] = kinds.get(d.name, 0) + 1
+        span = ""
+        if plan.deliveries:
+            span = f"  {plan.deliveries[0].at:%Y-%m-%d} .. {plan.deliveries[-1].at:%Y-%m-%d}"
+        click.echo(f"{repo}: {plan.prs} PRs, {len(plan.deliveries)} deliveries"
+                   f" ({plan.skipped_after_until} cut by --until){span}")
+        for k, n in sorted(kinds.items()):
+            click.echo(f"    {k:<44} {n:>6}")
+        if out_dir:
+            d_out = Path(out_dir) / repo.replace("/", "__")
+            d_out.mkdir(parents=True, exist_ok=True)
+            for d in plan.deliveries:
+                (d_out / f"{d.delivery}.json").write_bytes(d.body)
+        if dry_run:
+            continue
+        got = post_all(receiver, plan.deliveries, secret,
+                       progress=lambda m: click.echo(f"  {m}", err=True))
+        for code, n in got.items():
+            total[code] = total.get(code, 0) + n
+        click.echo(f"    posted: {got}")
+    click.echo(f"GitHub API calls: {gh.calls}")
+    if not dry_run:
+        bad = sum(n for c, n in total.items() if c != 200)
+        click.echo(f"posted {sum(total.values())} deliveries, {bad} not 200: {total}")
+        if bad:
+            raise SystemExit(1)
+
+
+@main.command("linear-sync")
+@click.option("--key-env", default="LINEAR_API_KEY", show_default=True,
+              help="env var holding the Linear API key")
+@click.option("--dry-run", is_flag=True, help="read Linear and count; write nothing")
+def linear_sync_cmd(key_env: str, dry_run: bool) -> None:
+    """Pull every ticket from Linear into the store's `tickets` table (ENG2-1540).
+
+    The typed layout stamps `ticket` on each span; this table says what kind of work
+    each ticket was (Bug, Feature, Improvement, Research, from its labels) so tokens per
+    task type is one join. The whole table is rewritten each run; the key never lands
+    in the store.
+    """
+    import duckdb as _duckdb
+
+    from dev_agent_lens.linear_tickets import fetch_issues, write_tickets
+    from dev_agent_lens.storage.spanstore import open_store
+
+    key = os.environ.get(key_env)
+    if not key:
+        raise click.ClickException(f"{key_env} is unset")
+    t0 = time.perf_counter()
+    rows = list(fetch_issues(key))
+    kinds: dict[str, int] = {}
+    for r in rows:
+        kinds[r["kind"] or "untyped"] = kinds.get(r["kind"] or "untyped", 0) + 1
+    click.echo(f"read {len(rows)} tickets in {time.perf_counter() - t0:.1f}s: "
+               + ", ".join(f"{k}={n}" for k, n in sorted(kinds.items())))
+    if dry_run:
+        return
+    store = open_store()
+    store.ensure()
+    con = _duckdb.connect()
+    con.execute("SET TimeZone='UTC'")
+    n = write_tickets(store, con, rows)
+    click.echo(f"wrote {n} tickets to {store.uri} (dataset tickets)")
 
 
 if __name__ == "__main__":

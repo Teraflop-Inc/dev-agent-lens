@@ -27,19 +27,34 @@ def _assistant(text=None, tool_use=None, thinking=None, usage=None, ts="2026-08-
     message = {"role": "assistant", "content": content, "model": "claude-opus-5"}
     if usage:
         message["usage"] = usage
-    return {"type": "assistant", "timestamp": ts, "sessionId": "s1",
-            "version": "2.1.0", "message": message}
+    return {
+        "type": "assistant",
+        "timestamp": ts,
+        "sessionId": "s1",
+        "version": "2.1.0",
+        "message": message,
+    }
 
 
 def _user_text(text, ts="2026-08-04T09:59:00Z"):
-    return {"type": "user", "timestamp": ts, "sessionId": "s1",
-            "message": {"role": "user", "content": text}}
+    return {
+        "type": "user",
+        "timestamp": ts,
+        "sessionId": "s1",
+        "message": {"role": "user", "content": text},
+    }
 
 
 def _tool_result(call_id, content, ts="2026-08-04T10:00:05Z"):
-    return {"type": "user", "timestamp": ts, "sessionId": "s1",
-            "message": {"role": "user", "content": [
-                {"type": "tool_result", "tool_use_id": call_id, "content": content}]}}
+    return {
+        "type": "user",
+        "timestamp": ts,
+        "sessionId": "s1",
+        "message": {
+            "role": "user",
+            "content": [{"type": "tool_result", "tool_use_id": call_id, "content": content}],
+        },
+    }
 
 
 def test_produces_valid_atif_envelope():
@@ -77,9 +92,7 @@ def test_observation_uses_keyed_results_array():
     # Shape matters: harbor-atif2otel keys its observation map on
     # results[].source_call_id. A flat {"content": ...} is silently dropped.
     assert set(observation) == {"results"}
-    assert observation["results"] == [
-        {"source_call_id": "call_1", "content": "file_a"}
-    ]
+    assert observation["results"] == [{"source_call_id": "call_1", "content": "file_a"}]
 
 
 def test_result_attaches_to_the_step_that_issued_the_call():
@@ -97,19 +110,19 @@ def test_result_attaches_to_the_step_that_issued_the_call():
 
 
 def test_tool_calls_and_metrics_are_preserved():
-    lines = [_assistant(
-        tool_use=[("call_1", "Bash", {"command": "ls"})],
-        usage={"input_tokens": 10, "output_tokens": 5, "cache_read_input_tokens": 100},
-    )]
+    lines = [
+        _assistant(
+            tool_use=[("call_1", "Bash", {"command": "ls"})],
+            usage={"input_tokens": 10, "output_tokens": 5, "cache_read_input_tokens": 100},
+        )
+    ]
     traj, _ = session_to_atif(lines)
 
     step = traj["steps"][0]
     assert step["tool_calls"] == [
         {"tool_call_id": "call_1", "function_name": "Bash", "arguments": {"command": "ls"}}
     ]
-    assert step["metrics"] == {
-        "prompt_tokens": 10, "completion_tokens": 5, "cached_tokens": 100
-    }
+    assert step["metrics"] == {"prompt_tokens": 10, "completion_tokens": 5, "cached_tokens": 100}
     assert step["model_name"] == "claude-opus-5"
 
 
@@ -142,3 +155,18 @@ def test_bookkeeping_lines_are_dropped():
 def test_step_ids_are_sequential_from_one():
     traj, _ = session_to_atif([_user_text("a"), _assistant(text="b"), _user_text("c")])
     assert [s["step_id"] for s in traj["steps"]] == [1, 2, 3]
+
+
+def test_branch_is_read_from_the_session_and_head_means_none():
+    """ENG2-1540: the ticket comes off the branch name. Claude Code writes gitBranch on every
+    line; "HEAD" is a bare directory and carries nothing."""
+    lines = [_user_text("hi"), _assistant(text="hello")]
+    for line in lines:
+        line["gitBranch"] = "adam/eng2-1572-person"
+    traj, _ = session_to_atif(lines)
+    assert traj["git_branch"] == "adam/eng2-1572-person"
+
+    for line in lines:
+        line["gitBranch"] = "HEAD"
+    traj, _ = session_to_atif(lines)
+    assert "git_branch" not in traj

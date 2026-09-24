@@ -1,0 +1,135 @@
+# Dev Agent Lens, self-hosted: the new storage stack, nothing from Phoenix required to run.
+#
+#   cp deploy/.env.example deploy/.env   # fill in three values
+#   docker compose -f deploy/compose.yml up -d
+#
+# What runs: an S3-compatible object store (MinIO) holding the span store, a sync loop
+# that pulls from your producer(s) on a schedule and rebuilds the typed layout, and a
+# daily accuracy check. Specs and the operator notes are in deploy/README.md.
+name: dal
+services:
+  minio:
+    image: quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${DAL_STORE_USER:?set DAL_STORE_USER in deploy/.env}
+      MINIO_ROOT_PASSWORD: ${DAL_STORE_PASSWORD:?set DAL_STORE_PASSWORD in deploy/.env}
+    volumes: [ "minio:/data" ]
+    ports:
+      # Loopback only. Put a reverse proxy or a VPN in front if others must reach it.
+      - "${DAL_MINIO_BIND:-127.0.0.1}:${DAL_MINIO_PORT:-9100}:9000"
+      - "${DAL_MINIO_BIND:-127.0.0.1}:${DAL_MINIO_CONSOLE_PORT:-9101}:9001"
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+
+  dal-sync:
+    # DAL_IMAGE names a prebuilt image (a registry tag, or one loaded from a tarball
+    # with `docker load`). Without it, compose builds from this checkout.
+    build: { context: .., dockerfile: deploy/Dockerfile }
+    image: ${DAL_IMAGE:-dal:local}
+    depends_on: { minio: { condition: service_healthy } }
+    environment: &dal-env
+      DAL_SPAN_STORE: "s3://dal/spans?endpoint=minio:9000&tls=0"
+      DAL_RAW_GLOB: "s3://dal/spans/spans_raw/**/*.parquet"
+      AWS_ACCESS_KEY_ID: ${DAL_STORE_USER}
+      AWS_SECRET_ACCESS_KEY: ${DAL_STORE_PASSWORD}
+      AWS_REGION: us-east-1
+      PHOENIX_SQL_DATABASE_URL: ${PHOENIX_SQL_DATABASE_URL:-}
+      PHOENIX_SQL_DATABASE_SCHEMA: ${PHOENIX_SQL_DATABASE_SCHEMA:-phoenix}
+      DAL_SOURCES: ${DAL_SOURCES:-}
+      SYNC_INTERVAL: ${SYNC_INTERVAL:-900}
+      SYNC_DAYS: ${SYNC_DAYS:-2}
+      SYNC_OVERLAP_DAYS: ${SYNC_OVERLAP_DAYS:-1}
+      ORACLE_DAYS: ${ORACLE_DAYS:-}
+      SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL:-}
+      TYPED_REBUILD: ${TYPED_REBUILD:-1}
+      DAL_HEALTH_HOURS: ${DAL_HEALTH_HOURS:-24}
+      DAL_DUCKDB_MEMORY: ${DAL_DUCKDB_MEMORY:-}
+      DAL_DUCKDB_TMP: ${DAL_DUCKDB_TMP:-/data/duckdb-tmp}
+      DAL_BUILD_DETERMINISTIC: ${DAL_BUILD_DETERMINISTIC:-1}
+      DAL_BUILD_THREADS: ${DAL_BUILD_THREADS:-8}
+      DAL_BUILD_CHUNK_DAYS: ${DAL_BUILD_CHUNK_DAYS:-7}
+      # Names on spans: identity.yaml maps each account, device or --user id to a person.
+      DAL_IDENTITY: /data/identity.yaml
+      # Hook secret for /v1/events/<producer>. Set it when a git host outside the network
+      # (GitHub, through the public relay) posts here; unsigned deliveries are then 401.
+      DAL_EVENTS_SECRET: ${DAL_EVENTS_SECRET:-}
+      # Linear API key: the sync loop then refreshes the store's `tickets` table each
+      # pass, so a span's ticket joins to Bug / Feature / Improvement / Research.
+      LINEAR_API_KEY: ${LINEAR_API_KEY:-}
+    volumes: [ "dal-data:/data", "./identity.yaml:/data/identity.yaml:ro" ]
+    command: ["sync-loop"]
+    restart: unless-stopped
+
+  # OTLP/HTTP receiver: a producer (LiteLLM's OpenTelemetry callback, any OTel SDK)
+  # posts traces here and they land in the store with no Phoenix in the path.
+  #   OTEL_EXPORTER_OTLP_ENDPOINT=http://<this host>:4318
+  #   OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
+  #   OTEL_RESOURCE_ATTRIBUTES=openinference.project.name=<source>
+  dal-otlp:
+    image: ${DAL_IMAGE:-dal:local}
+    depends_on: { minio: { condition: service_healthy } }
+    environment: *dal-env
+    volumes: [ "dal-data:/data" ]
+    command: ["dal", "otlp-receive", "--host", "0.0.0.0", "--port", "4318", "--source-default", "${OTLP_SOURCE_DEFAULT:-litellm}"]
+    ports:
+      # Loopback only, like MinIO. Publish wider when the producer is on another host.
+      - "${DAL_OTLP_BIND:-127.0.0.1}:${DAL_OTLP_PORT:-4318}:4318"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:4318/health',timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 4
+    restart: unless-stopped
+
+  # The capture proxy. Optional: `docker compose --profile capture up -d`. Claude Code on
+  # any machine that can reach this host sets ANTHROPIC_BASE_URL=http://<host>:4000 and
+  # every call lands in the store as a span, with no Anthropic key on the server.
+  litellm:
+    image: ${LITELLM_IMAGE:-dal-proxy:0.1}
+    profiles: ["capture"]
+    depends_on: { dal-otlp: { condition: service_healthy } }
+    environment:
+      # Required when the profile is on. Checked at start, below, because compose
+      # interpolates every service's variables even for profiles that are off.
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:-}
+      LITELLM_LOG: INFO
+      # The callback picks its wire protocol from which name is set: this one is HTTP.
+      # (PHOENIX_COLLECTOR_ENDPOINT would mean gRPC; neither set means Arize's hosted
+      # service and a demand for an API key.) The OTEL_* pair covers the SDK side.
+      PHOENIX_COLLECTOR_HTTP_ENDPOINT: http://dal-otlp:4318/v1/traces
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://dal-otlp:4318
+      OTEL_EXPORTER_OTLP_PROTOCOL: http/protobuf
+      OTEL_SERVICE_NAME: ${CAPTURE_SOURCE:-claude-code}
+      OTEL_RESOURCE_ATTRIBUTES: service.name=${CAPTURE_SOURCE:-claude-code},openinference.project.name=${CAPTURE_SOURCE:-claude-code}
+      # Keep one span's attributes under the receiver's batch limits.
+      OTEL_SPAN_ATTRIBUTE_VALUE_LENGTH_LIMIT: "262144"
+      OTEL_BSP_MAX_EXPORT_BATCH_SIZE: "4"
+    volumes: [ "./litellm.yaml:/app/config.yaml:ro" ]
+    entrypoint: ["sh", "-c", "[ -n \"$$LITELLM_MASTER_KEY\" ] || { echo 'set LITELLM_MASTER_KEY in deploy/.env' >&2; exit 1; }; exec litellm \"$$@\"", "--"]
+    command: ["--config", "/app/config.yaml", "--port", "4000", "--host", "0.0.0.0"]
+    ports:
+      - "${DAL_LITELLM_BIND:-0.0.0.0}:${DAL_LITELLM_PORT:-4000}:4000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:4000/health/liveliness',timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 8
+    restart: unless-stopped
+
+  dal-oracle:
+    image: ${DAL_IMAGE:-dal:local}
+    depends_on: { dal-sync: { condition: service_started } }
+    environment: *dal-env
+    volumes: [ "dal-data:/data" ]
+    # Once a day. Compose has no cron; this sleeps between runs and restarts on failure.
+    entrypoint: ["/bin/bash", "-c", "while true; do /entrypoint.sh oracle; sleep ${ORACLE_INTERVAL:-86400}; done"]
+    restart: unless-stopped
+
+volumes:
+  minio: {}
+  dal-data: {}

@@ -32,14 +32,21 @@ class TestOxenStoreLocalMode:
         assert store.sessions_dir.exists()
 
     def test_no_oxen_configured(self, tmp_path):
-        """Given no OXEN_REMOTE_URL, oxen_enabled is False."""
-        with patch.dict("os.environ", {}, clear=True):
+        """Given neither OXEN_REMOTE_URL nor a configured remote, oxen_enabled is False.
+
+        The env var is only half of it: get_oxen_remote() falls back to ~/.dal/config.json,
+        so clearing os.environ alone made this read the developer's real config and fail on
+        any machine with a remote configured. Clearing the environment is exactly what
+        removes the isolation the conftest installs, so the config path is pinned here too.
+        """
+        with patch.dict("os.environ", {"DAL_CONFIG_PATH": str(tmp_path / "cfg.json")},
+                        clear=True):
             store = OxenStore(data_path=tmp_path)
             assert store.oxen_enabled is False
 
     def test_local_mode_no_errors(self, tmp_path):
         """Given local mode, operations complete without errors."""
-        with patch.dict("os.environ", {}, clear=True):
+        with patch.dict("os.environ", {"DAL_CONFIG_PATH": str(tmp_path / "cfg.json")}, clear=True):
             store = OxenStore(data_path=tmp_path)
 
             df = pd.DataFrame({"span_id": ["span1"], "name": ["test"]})
