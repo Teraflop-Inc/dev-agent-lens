@@ -4,6 +4,10 @@
 It can run on a Linux host with Docker Compose. It does **not** provision an AWS
 account, Cloudflare subscription, public query API, or authentication gateway.
 
+For a private Fly Machine with Cloudflare R2, see [the Fly setup guide](../fly/STORE.md)
+and `fly/store.fly.toml`. That configuration starts only the receiver; typed builds
+and production query serving remain separate rollout steps.
+
 ## Storage configuration
 
 Copy `.env.hosted.example` to `.env.hosted`, fill in the destination and credentials,
