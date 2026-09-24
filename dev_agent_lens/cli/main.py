@@ -2211,9 +2211,14 @@ def store_query(sql: str | None, sql_file: str | None, layout_override: str | No
     # anywhere and the typed layout exists, query that. Found on the 2026-09-15
     # customer deployment rehearsal, where the first question failed with "model_name not found".
     from dev_agent_lens.config import load_config as _load_config
+    from dev_agent_lens.storage.snapshots import SnapshotIO
+
     chosen = layout_override or os.getenv("DAL_SPAN_LAYOUT") \
         or _load_config().get("span_store", {}).get("layout")
-    if not chosen and s.size_bytes("spans_typed") > 0:
+    manifest = None
+    if not chosen or chosen == "typed":
+        manifest, _ = SnapshotIO(s).read_current()
+    if not chosen and (manifest is not None or s.size_bytes("spans_typed") > 0):
         logger.info("[store:query] no layout chosen; typed layout exists, using it")
         layout = "typed"
     layout = layout_override or layout
@@ -2222,11 +2227,11 @@ def store_query(sql: str | None, sql_file: str | None, layout_override: str | No
     con = duckdb.connect()
     con.execute("SET TimeZone='UTC'")
     try:
-        if s.size_bytes(primary) == 0:
+        if not (layout == "typed" and manifest is not None) and s.size_bytes(primary) == 0:
             raise click.ClickException(
                 f"the store at {uri} holds no {primary} data yet"
                 + (" (run `dal sync` with a store chosen)" if layout == "raw"
-                   else " (build it with `dal store verify --from-parquet <glob>`)"))
+                   else " (build it with `dal store rebuild`)"))
         _get_layout(layout).attach(con, s)
     except ModuleNotFoundError as e:
         raise click.ClickException(str(e)) from e
