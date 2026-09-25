@@ -18,9 +18,9 @@ def ensure_secondary_exporter():
     if not endpoint:
         return False
     from opentelemetry import trace
+    from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
     from opentelemetry.sdk.trace import TracerProvider
     from opentelemetry.sdk.trace.export import BatchSpanProcessor
-    from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
 
     provider = trace.get_tracer_provider()
     if not isinstance(provider, TracerProvider):
