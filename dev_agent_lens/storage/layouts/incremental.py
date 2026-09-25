@@ -159,8 +159,7 @@ def dependency_days(con, raw, previous, changed, generation, force):
         con.execute("""CREATE OR REPLACE TEMP TABLE _trace_sessions AS
             SELECT DISTINCT trace_key, session FROM (
                 SELECT trace_key, unnest([session_alt,session_rx,
-                    CASE WHEN euid LIKE '{%'
-                         THEN json_extract_string(euid,'$.session_id') END]) AS session
+                    json_extract_string(TRY_CAST(euid AS JSON),'$.session_id')]) AS session
                 FROM _facts) WHERE session IS NOT NULL""")
         con.execute("CREATE OR REPLACE TEMP TABLE _changed_days(day VARCHAR PRIMARY KEY)")
         con.executemany("INSERT INTO _changed_days VALUES (?)", [(day,) for day in sorted(changed)])
