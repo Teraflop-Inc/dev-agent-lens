@@ -121,12 +121,24 @@ done
 # receiver on the tailnet. Userspace tailscaled has no TUN, so this proxy hop is the
 # only way a container process reaches a tailnet peer. The receiver requires the
 # hook signature (DAL_EVENTS_SECRET), so the relay itself holds no secret.
-DAL_EVENTS_UPSTREAM="${DAL_EVENTS_UPSTREAM:-100.80.24.126:4318}"
-echo "[router] events relay 127.0.0.1:4318 -> socks5 localhost:1055 -> ${DAL_EVENTS_UPSTREAM}"
-socat --experimental \
-    "TCP4-LISTEN:4318,bind=127.0.0.1,reuseaddr,fork,max-children=32" \
-    "SOCKS5-CONNECT:127.0.0.1:1055:${DAL_EVENTS_UPSTREAM%:*}:${DAL_EVENTS_UPSTREAM##*:}" \
-    >>/var/log/socat.log 2>&1 &
+# DAL_EVENTS_6PN (host:port on the Fly private network, e.g. sf-dal.flycast:80) sends
+# the events to a receiver inside Fly directly, with no tailnet hop; it wins over the
+# tailnet upstream when set. The hosted receiver on sf-dal took over from lambda1 on
+# 2026-09-25 (ENG2-1650).
+if [ -n "${DAL_EVENTS_6PN:-}" ]; then
+    echo "[router] events relay 127.0.0.1:4318 -> ${DAL_EVENTS_6PN} (Fly private network)"
+    socat \
+        "TCP4-LISTEN:4318,bind=127.0.0.1,reuseaddr,fork,max-children=32" \
+        "TCP6:${DAL_EVENTS_6PN%:*}:${DAL_EVENTS_6PN##*:},nodelay" \
+        >>/var/log/socat.log 2>&1 &
+else
+    DAL_EVENTS_UPSTREAM="${DAL_EVENTS_UPSTREAM:-100.80.24.126:4318}"
+    echo "[router] events relay 127.0.0.1:4318 -> socks5 localhost:1055 -> ${DAL_EVENTS_UPSTREAM}"
+    socat --experimental \
+        "TCP4-LISTEN:4318,bind=127.0.0.1,reuseaddr,fork,max-children=32" \
+        "SOCKS5-CONNECT:127.0.0.1:1055:${DAL_EVENTS_UPSTREAM%:*}:${DAL_EVENTS_UPSTREAM##*:}" \
+        >>/var/log/socat.log 2>&1 &
+fi
 caddy run --config /etc/caddy/Caddyfile --adapter caddyfile >/var/log/caddy.log 2>&1 &
 
 echo "[router] up. Approve the subnet route in admin if not already:"
