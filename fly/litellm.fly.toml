@@ -104,6 +104,13 @@ primary_region = "iad"
   guest_path = "/app/thinking_display_hook.py"
   local_path = "thinking_display_hook.py"
 
+# Second OTLP exporter on LiteLLM's own tracer provider: the same spans, same ids, to the
+# hosted DAL receiver (ENG2-1650). Set on the machines by hand on 2026-09-24 (release 15)
+# and missing here until 2026-09-25, when a plain deploy would have dropped it.
+[[files]]
+  guest_path = "/app/dal_secondary_otel_hook.py"
+  local_path = "dal_secondary_otel_hook.py"
+
 [processes]
   # Mirrors the docker-compose command for litellm-proxy-phoenix.
   # --host :: makes uvicorn bind dual-stack instead of IPv4-only; without
