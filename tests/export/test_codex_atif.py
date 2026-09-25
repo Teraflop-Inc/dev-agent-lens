@@ -270,6 +270,40 @@ class TestEnvelopeFormat:
         assert all(s.get("timestamp") for s in trajectory["steps"])
 
 
+    def test_two_calls_on_one_step_add_up_and_step_totals_equal_the_session_total(self):
+        """A reasoning-only call then the answer land on one agent step. Replacing the
+        first call's usage undercounted output by ~6% on a real session."""
+        records = envelope_session()
+        at = next(i for i, r in enumerate(records)
+                  if r["payload"].get("type") == "token_count")
+        extra_call = _env(
+            "2026-09-23T10:00:02Z",
+            "event_msg",
+            {"type": "token_count",
+             "info": {"total_token_usage": _usage(130, 27),
+                      "last_token_usage": _usage(30, 7, 10, 2)}},
+        )
+        records.insert(at + 1, extra_call)
+        # every later running total now includes the extra call; the re-emit stays a re-emit
+        for r in records[at + 2:]:
+            info = r["payload"].get("info") if r["payload"].get("type") == "token_count" else None
+            if info and info["total_token_usage"]["input_tokens"] == 100:
+                info["total_token_usage"] = _usage(130, 27)
+            elif info and info["total_token_usage"]["input_tokens"] == 250:
+                info["total_token_usage"] = _usage(280, 42)
+        trajectory, _ = codex_session_to_atif(records)
+        first = trajectory["steps"][2]
+        assert first["metrics"] == {
+            "prompt_tokens": 130,
+            "completion_tokens": 27,
+            "cached_tokens": 50,
+            "extra": {"reasoning_output_tokens": 7},
+        }
+        steps_total = sum((st.get("metrics") or {}).get("prompt_tokens") or 0
+                          for st in trajectory["steps"])
+        assert steps_total == trajectory["final_metrics"]["total_prompt_tokens"] == 280
+
+
 class TestFlatFormat:
     def test_older_sessions_convert_with_the_header_id_and_start_time(self):
         trajectory, stats = codex_session_to_atif(flat_session())
