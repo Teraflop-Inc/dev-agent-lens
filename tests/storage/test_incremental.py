@@ -345,3 +345,23 @@ def test_object_store_snapshot_publication(monkeypatch):
         SnapshotIO(store).publish(old, token)
     assert error.value.response["ResponseMetadata"]["HTTPStatusCode"] == 412
     assert SnapshotIO(store).read_current()[0]["snapshot"] == latest.detail["snapshot"]
+
+
+@pytest.mark.parametrize("legacy_id", ["user_fixture_account_legacy", "{not-json"])
+def test_dependency_scan_tolerates_opaque_user_ids(tmp_path, legacy_id):
+    """Cached producer IDs need not be JSON; valid session links still propagate."""
+    from dev_agent_lens.storage.layouts.incremental import dependency_days
+
+    con = duckdb.connect()
+    con.execute("CREATE TABLE facts(day VARCHAR, trace_key VARCHAR, euid VARCHAR, "
+                "session_alt VARCHAR, session_rx VARCHAR)")
+    con.executemany("INSERT INTO facts VALUES (?,?,?,?,?)", [
+        ("2026-09-01", "json-parent", '{"session_id":"linked"}', None, None),
+        ("2026-09-02", "changed", None, "linked", None),
+        ("2026-09-03", "opaque", legacy_id, None, None),
+    ])
+    path = str(tmp_path / "dependencies.parquet")
+    con.table("facts").write_parquet(path)
+    previous = {"dependencies": {"2026-09-01": [path]}}
+    _, affected = dependency_days(con, {}, previous, {"2026-09-02"}, None, False)
+    assert affected == {"2026-09-01", "2026-09-02"}
