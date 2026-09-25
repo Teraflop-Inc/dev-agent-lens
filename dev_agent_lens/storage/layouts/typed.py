@@ -43,7 +43,7 @@ CREATE OR REPLACE TEMP TABLE _ident_trace AS
 SELECT trace_key,
         COALESCE(
           max(CASE WHEN euid LIKE '{%' THEN json_extract_string(euid,'$.account_uuid') END),
-          max(account_alt), max(account_rx)) AS account_uuid,
+          max(account_alt), max(account_rx), max(end_user_email)) AS account_uuid,
         COALESCE(
           max(CASE WHEN euid LIKE '{%' THEN json_extract_string(euid,'$.device_id') END),
           max(device_rx)) AS device_id,
@@ -108,12 +108,50 @@ _ROOTISH = "(parent_id IS NULL OR name IN ('litellm_request','raw_gen_ai_request
 # first 4,000 characters of the input count.
 _RX_TICKET = "(ENG2-[0-9]{3,5})"
 _RX_BRANCH_TICKET = r"Current branch: [^\n\"]{0,120}?(eng2-[0-9]{3,5})"
+# Every attribute path the typed layout reads. `_prepare_raw` parses them once per row into
+# the list `_j`. One json_extract per path parsed each ~262 KB `raw_gen_ai_request` attribute
+# string about twenty times, and 12k live spans exhausted a 12 GB cap (2026-09-25,
+# ENG2-1650). Append new paths at the end.
+_PATHS = (
+    "$.metadata.user_api_key_end_user_id",
+    "$.claude.session_id",
+    "$.session.id",
+    "$.user.id",
+    "$.agent.name",
+    "$.git.branch",
+    "$.input.value",
+    "$.llm.model_name",
+    "$.llm.provider",
+    "$.llm.system",
+    "$.llm.is_streaming",
+    "$.llm.invocation_parameters",
+    "$.metadata.usage_object.cache_read_input_tokens",
+    "$.llm.token_count.prompt_details.cache_read",
+    "$.metadata.usage_object.cache_creation_input_tokens",
+    "$.llm.token_count.prompt_details.cache_write",
+    "$.claude_code_tool_name",
+    "$.tool.name",
+    "$.metadata.requester_metadata.sandbox_id",
+    "$.output.value",
+    "$.llm.anthropic.messages",
+    "$.llm.anthropic.tools",
+    "$.llm.anthropic.system",
+    # LiteLLM writes `metadata` as a JSON string, so paths through it return NULL on live
+    # proxy spans; the whole value is kept to decode the one field that needs it.
+    "$.metadata",
+)
+
+
+def _attr(path: str, row: str = "r.") -> str:
+    """The value of one attribute path, read from `_j` (1-based) as `_raw` provides it."""
+    return f"{row}_j[{_PATHS.index(path) + 1}]"
+
+
 _TICKET_EXPR = (
     "upper(COALESCE("
-    "nullif(regexp_extract(json_extract_string(attributes,'$.git.branch'), "
-    f"'(?i){_RX_TICKET}', 1), ''), "
+    f"nullif(regexp_extract({_attr('$.git.branch', '')}, '(?i){_RX_TICKET}', 1), ''), "
     f"nullif(regexp_extract(attributes, '{_RX_BRANCH_TICKET}', 1), ''), "
-    "nullif(regexp_extract(substr(json_extract_string(attributes,'$.input.value'), 1, 4000), "
+    f"nullif(regexp_extract(substr({_attr('$.input.value', '')}, 1, 4000), "
     f"'{_RX_TICKET}', 1), '')))"
 )
 
@@ -122,15 +160,14 @@ _TICKET_EXPR = (
 # malformed input even inside a CASE branch that is not taken, so the guard has to hand the
 # parser NULL rather than skip it. Found by the ENG2-1609 rehearsal on the dev-agent-lens
 # project: 2 of 36,052 spans, enough to fail the whole build.
-_INV_RAW = "json_extract_string(r.attributes,'$.llm.invocation_parameters')"
+_INV_RAW = _attr("$.llm.invocation_parameters")
 _INV = f"(CASE WHEN {_INV_RAW} LIKE '{{%' THEN {_INV_RAW} END)"
 
 # What a tool call DID, the same word for every harness (ENG2-402), so "how often does the
 # agent run shell commands" means the same thing for Claude Code (`Bash`) and Codex
 # (`exec_command`). Names not listed keep their own name, lowercased; MCP tools collapse to
 # `mcp`. Add a harness by adding its names here.
-_TOOL_NAME = """COALESCE(json_extract_string(r.attributes,'$.claude_code_tool_name'),
-                         json_extract_string(r.attributes,'$.tool.name'))"""
+_TOOL_NAME = f"COALESCE({_attr('$.claude_code_tool_name')}, {_attr('$.tool.name')})"
 _TOOL_KIND = f"""CASE
     WHEN nullif({_TOOL_NAME}, '') IS NULL THEN NULL
     WHEN {_TOOL_NAME} IN ('Bash', 'bash', 'BashOutput', 'KillShell', 'TaskOutput', 'TaskStop',
@@ -164,45 +201,44 @@ SELECT
   -- span's agent.name (ENG2-402). NULL for proxy-captured traffic, which has no root
   -- agent span; that traffic is Claude Code today.
   i.agent,
-  json_extract_string(r.attributes,'$.llm.model_name')  AS model_name,
-  json_extract_string(r.attributes,'$.llm.provider')    AS provider,
-  json_extract_string(r.attributes,'$.llm.system')      AS llm_system,
-  (lower(json_extract_string(r.attributes,'$.llm.is_streaming'))='true') AS is_streaming,
+  {_attr('$.llm.model_name')}  AS model_name,
+  {_attr('$.llm.provider')}    AS provider,
+  {_attr('$.llm.system')}      AS llm_system,
+  (lower({_attr('$.llm.is_streaming')})='true') AS is_streaming,
   json_extract_string({_INV},'$.thinking.type')                        AS thinking_type,
    TRY_CAST(json_extract_string({_INV},'$.thinking.budget_tokens') AS INTEGER)
        AS thinking_budget_tokens,
   json_extract_string({_INV},'$.thinking.display')                     AS thinking_display,
   TRY_CAST(json_extract_string({_INV},'$.max_tokens') AS INTEGER)      AS max_tokens,
-  r.llm_token_count_prompt      AS tokens_prompt,
-  r.llm_token_count_completion  AS tokens_completion,
+  -- Tokens are what a span itself spent, so a sum over spans is a total. An AGENT span
+  -- is a rollup: the session ingest stamps a Codex session's own total on its root, on
+  -- top of every model call below it, which doubled Codex sums. Only the calls count.
+  CASE WHEN r.span_kind = 'AGENT' THEN NULL ELSE r.llm_token_count_prompt END
+       AS tokens_prompt,
+  CASE WHEN r.span_kind = 'AGENT' THEN NULL ELSE r.llm_token_count_completion END
+       AS tokens_completion,
    -- The proxy writes LiteLLM's usage_object; the session ingest (ATIF, Claude or Codex)
    -- writes the OpenInference key. Either counts (ENG2-402).
-   COALESCE(
-     TRY_CAST(json_extract_string(r.attributes,
-              '$.metadata.usage_object.cache_read_input_tokens') AS BIGINT),
-     TRY_CAST(json_extract_string(r.attributes,
-              '$.llm.token_count.prompt_details.cache_read') AS BIGINT)) AS tokens_cache_read,
-   COALESCE(
-     TRY_CAST(json_extract_string(r.attributes,
-              '$.metadata.usage_object.cache_creation_input_tokens') AS BIGINT),
-     TRY_CAST(json_extract_string(r.attributes,
-              '$.llm.token_count.prompt_details.cache_write') AS BIGINT)) AS tokens_cache_write,
-  COALESCE(json_extract_string(r.attributes,'$.claude_code_tool_name'),
-           json_extract_string(r.attributes,'$.tool.name'))         AS tool_name,
+   CASE WHEN r.span_kind = 'AGENT' THEN NULL ELSE COALESCE(
+     TRY_CAST({_attr('$.metadata.usage_object.cache_read_input_tokens')} AS BIGINT),
+     TRY_CAST({_attr('$.llm.token_count.prompt_details.cache_read')} AS BIGINT)) END
+       AS tokens_cache_read,
+   CASE WHEN r.span_kind = 'AGENT' THEN NULL ELSE COALESCE(
+     TRY_CAST({_attr('$.metadata.usage_object.cache_creation_input_tokens')} AS BIGINT),
+     TRY_CAST({_attr('$.llm.token_count.prompt_details.cache_write')} AS BIGINT)) END
+       AS tokens_cache_write,
+  {_TOOL_NAME}                                                AS tool_name,
   {_TOOL_KIND}                                                AS tool_kind,
-  json_extract_string(r.attributes,'$.metadata.requester_metadata.sandbox_id') AS sandbox_id,
-  json_extract_string(r.attributes,'$.input.value')  AS input_value,
-  json_extract_string(r.attributes,'$.output.value') AS output_value,
-  CASE WHEN json_extract(r.attributes,'$.llm.anthropic') IS NOT NULL
-        THEN md5(json_extract_string(r.attributes,'$.llm.anthropic.messages')) END
-       AS payload_messages_ref,
-  CASE WHEN json_extract(r.attributes,'$.llm.anthropic') IS NOT NULL
-        THEN md5(json_extract_string(r.attributes,'$.llm.anthropic.tools')) END
-       AS payload_tools_ref,
-  CASE WHEN json_extract(r.attributes,'$.llm.anthropic') IS NOT NULL
-        THEN md5(json_extract_string(r.attributes,'$.llm.anthropic.system')) END
-       AS payload_system_ref,
-  json_merge_patch(r.attributes, '{{"llm":{{"anthropic":null}}}}') AS attributes_rest,
+  {_attr('$.metadata.requester_metadata.sandbox_id')} AS sandbox_id,
+  {_attr('$.input.value')}  AS input_value,
+  {_attr('$.output.value')} AS output_value,
+  -- md5(NULL) is NULL, so a span without `llm.anthropic` gets no refs. The former
+  -- `CASE WHEN json_extract(..., '$.llm.anthropic') IS NOT NULL` guard added nothing but a
+  -- fourth parse of each payload.
+  md5({_attr('$.llm.anthropic.messages')}) AS payload_messages_ref,
+  md5({_attr('$.llm.anthropic.tools')})    AS payload_tools_ref,
+  md5({_attr('$.llm.anthropic.system')})   AS payload_system_ref,
+  dal_attributes_rest(r.attributes) AS attributes_rest,
   r.events,
   __SOURCE__ AS source,
   r.day
@@ -215,19 +251,16 @@ FROM _raw r LEFT JOIN _ident i USING (trace_key)
 # documents that blending those two flips the autonomy headline. Rows landed before the
 # stamp existed, and fixtures that never had one, get NULL rather than a failed build.
 
-_BLOB_ROWS = """
-  SELECT day, md5(json_extract_string(attributes,'$.llm.anthropic.messages')) AS ref,
-         'messages' AS kind,
-         json_extract_string(attributes,'$.llm.anthropic.messages') AS body FROM _raw
-   WHERE json_extract_string(attributes,'$.llm.anthropic.messages') IS NOT NULL
-  UNION ALL
-  SELECT day, md5(json_extract_string(attributes,'$.llm.anthropic.tools')),'tools',
-         json_extract_string(attributes,'$.llm.anthropic.tools') FROM _raw
-   WHERE json_extract_string(attributes,'$.llm.anthropic.tools') IS NOT NULL
-  UNION ALL
-  SELECT day, md5(json_extract_string(attributes,'$.llm.anthropic.system')),'system',
-         json_extract_string(attributes,'$.llm.anthropic.system') FROM _raw
-   WHERE json_extract_string(attributes,'$.llm.anthropic.system') IS NOT NULL
+# One scan of `_raw`: the three payloads come from the attributes parsed once into `_j`.
+_BLOB_ROWS = f"""
+  SELECT day, md5(body) AS ref, kind, body FROM (
+    SELECT day,
+           unnest(['messages', 'tools', 'system']) AS kind,
+           unnest([{_attr('$.llm.anthropic.messages', '')},
+                   {_attr('$.llm.anthropic.tools', '')},
+                   {_attr('$.llm.anthropic.system', '')}]) AS body
+    FROM _raw)
+  WHERE body IS NOT NULL
 """
 
 # One row per ref, written in the month it first appears. `_refs` is (ref, first day):
@@ -259,6 +292,56 @@ def _windows(lo: Any, hi: Any, days: int) -> list[tuple[Any, Any]]:
     return out
 
 
+_REST_PATCH = '{"llm":{"anthropic":null}}'
+
+
+def attributes_rest(attributes: str | None) -> str | None:
+    """A span's attributes without `llm.anthropic`, whose payloads go to the blobs table.
+
+    Same result as DuckDB's `json_merge_patch(attributes, '{"llm":{"anthropic":null}}')`:
+    `llm` becomes `{}` when it is missing or not an object, and a non-object document
+    returns the patch itself. Numbers keep their value, but Python may write a float in a
+    different form (`1.5e-05` rather than `0.000015`). Malformed JSON raises, as the
+    DuckDB function does.
+
+    This runs in Python because json_merge_patch builds two mutable trees for every row
+    of a 2,048-row vector. With ~262 KB `raw_gen_ai_request` attributes, that exhausted a
+    12 GB cap on 12k live spans even on one thread (2026-09-25, ENG2-1650). Here each
+    row's tree is freed before the next one is parsed.
+    """
+    import json
+
+    if attributes is None:
+        return None
+    doc = json.loads(attributes)
+    if not isinstance(doc, dict):
+        return _REST_PATCH
+    llm = doc.get("llm")
+    if isinstance(llm, dict):
+        llm.pop("anthropic", None)
+    else:
+        doc["llm"] = {}
+    return json.dumps(doc, separators=(",", ":"), ensure_ascii=False)
+
+
+def _register_functions(con: Any) -> None:
+    """Register `dal_attributes_rest` on a connection, once."""
+    import duckdb
+    import pyarrow as pa
+
+    def rest(values: Any) -> Any:
+        return pa.array((attributes_rest(v.as_py()) for v in values), type=pa.string())
+
+    try:
+        con.remove_function("dal_attributes_rest")
+    except Exception:  # noqa: BLE001 - not registered yet
+        pass
+    con.create_function(
+        "dal_attributes_rest", rest, [duckdb.sqltype("VARCHAR")], duckdb.sqltype("VARCHAR"),
+        type="arrow", null_handling="special", side_effects=False,
+    )
+
+
 def _bound_memory(con: Any) -> None:
     """Cap DuckDB at DAL_DUCKDB_MEMORY (default: half of RAM) and give it a spill
     directory, so a large build slows down instead of eating the machine."""
@@ -275,7 +358,10 @@ def _bound_memory(con: Any) -> None:
     tmp = os.environ.get("DAL_DUCKDB_TMP") or os.path.join(tempfile.gettempdir(), "dal-duckdb")
     os.makedirs(tmp, exist_ok=True)
     con.execute(f"SET memory_limit='{limit}'")
-    con.execute(f"SET temp_directory='{tmp}'")
+    # Incremental dependency scans may already have spilled on this connection.
+    # DuckDB cannot relocate an active spill directory; keep the configured one.
+    if con.execute("SELECT current_setting('temp_directory')").fetchone()[0] != tmp:
+        con.execute(f"SET temp_directory={quote_literal(tmp)}")
     con.execute("SET preserve_insertion_order=false")
     log.info("[layout:typed] duckdb memory_limit=%s temp=%s", limit, tmp)
 
@@ -345,29 +431,82 @@ def _load_people(path: str | None = None) -> list[tuple[str, str, str]]:
     return rows
 
 
+def _prepare_raw(con: Any, source_glob: str | list[str]) -> tuple[str, set[str]]:
+    """Shared producer parsing for typed identity and incremental dependency tracking."""
+    src = (
+        "[" + ",".join(quote_literal(p) for p in source_glob) + "]"
+        if isinstance(source_glob, list) else quote_literal(source_glob)
+    )
+    source_sql = f"read_parquet({src}, hive_partitioning=true, union_by_name=true)"
+    cols = {r[0] for r in con.execute(f"DESCRIBE SELECT * FROM {source_sql}").fetchall()}
+    day_expr = "" if "day" in cols else ", CAST(start_time AS DATE) AS day"
+    # The fixture (a phoenix.spans dump) carries the integer trace_rowid; the direct
+    # clients carry the string trace_id and no rowid. Identity is keyed on whichever
+    # exists, as text, so both shapes stamp the same way.
+    if {"trace_rowid", "trace_id"} <= cols:
+        trace_key = "COALESCE(CAST(trace_rowid AS VARCHAR), trace_id)"
+    elif "trace_rowid" in cols:
+        trace_key = "CAST(trace_rowid AS VARCHAR)"
+    elif "trace_id" in cols:
+        trace_key = "trace_id"
+    else:
+        raise ValueError("source has neither trace_rowid nor trace_id")
+    # Memory is bounded per 2,048-row vector, and live spans carry attributes of up to
+    # ~262 KB (`raw_gen_ai_request`). Two things made that exhaust a 12 GB cap on 12k live
+    # spans (2026-09-25, ENG2-1650): seven separate json_extract calls each parsed every
+    # attribute string, and `CASE WHEN rootish` around the ticket expression narrowed
+    # vectors to exactly those large root rows while extracting `input.value`. Parsing
+    # the paths once into `_j`, and gating only the small ticket result, keeps the same
+    # output within 2.5 GB.
+    paths = ", ".join(quote_literal(p) for p in _PATHS)
+    con.execute(f"""CREATE OR REPLACE TEMP VIEW _raw AS
+        SELECT * EXCLUDE (_rootish, _ticket_any),
+               CASE WHEN _rootish THEN _ticket_any END AS ticket_rx
+        FROM (
+        SELECT *,
+               {_attr('$.metadata.user_api_key_end_user_id', '')} AS euid,
+               COALESCE({_attr('$.claude.session_id', '')},
+                        {_attr('$.session.id', '')}) AS session_alt,
+               {_attr('$.user.id', '')} AS account_alt,
+               CASE WHEN {_ROOTISH}
+                    THEN nullif(regexp_extract(attributes, '{_RX_ACCOUNT}', 1), '')
+               END AS account_rx,
+               CASE WHEN {_ROOTISH}
+                    THEN nullif(regexp_extract(attributes, '{_RX_DEVICE}', 1), '')
+               END AS device_rx,
+               CASE WHEN {_ROOTISH}
+                    THEN nullif(regexp_extract(attributes, '{_RX_SESSION}', 1), '')
+               END AS session_rx,
+               {_ROOTISH} AS _rootish,
+               {_TICKET_EXPR} AS _ticket_any,
+               CASE WHEN parent_id IS NULL THEN {_attr('$.agent.name', '')} END AS agent_rx,
+               -- Codex through the ChatGPT pass-through carries no account id. codex-lens
+               -- sends the caller's git email, which the proxy records as the end user
+               -- (ENG2-402): the key the Codex session ingest stamps as user.id.
+               CASE WHEN {_ROOTISH} THEN lower(nullif(regexp_extract(
+                    json_extract_string({_attr('$.metadata', '')},
+                                        '$.user_api_key_end_user_id'),
+                    '^[^@{{\\s]+@[^@\\s]+$'), '')) END AS end_user_email
+        FROM (
+        SELECT *{day_expr}, {trace_key} AS trace_key,
+               json_extract_string(attributes, [{paths}]) AS _j
+        FROM {source_sql}))""")
+    return source_sql, cols
+
+
 class TypedLayout(Layout):
     name = "typed"
 
     def build(
-        self, con: Any, source_glob: str, store: Any, *, zstd_level: int, deterministic: bool = True
+        self, con: Any, source_glob: str | list[str], store: Any, *,
+        zstd_level: int, deterministic: bool = True,
+        identity_files: list[str] | None = None,
     ) -> BuildResult:
+        from dev_agent_lens.storage.snapshots import SnapshotIO
+        if SnapshotIO(store).read_current()[0] is not None:
+            raise ValueError("published typed snapshot exists; use dal store rebuild --full")
         t0 = time.perf_counter()
         store.attach_duckdb(con)
-        src = quote_literal(source_glob)
-        source_sql = f"read_parquet({src}, hive_partitioning=true, union_by_name=true)"
-        cols = {r[0] for r in con.execute(f"DESCRIBE SELECT * FROM {source_sql}").fetchall()}
-        day_expr = "" if "day" in cols else ", CAST(start_time AS DATE) AS day"
-        # The fixture (a phoenix.spans dump) carries the integer trace_rowid; the direct
-        # clients carry the string trace_id and no rowid. Identity is keyed on whichever
-        # exists, as text, so both shapes stamp the same way.
-        if {"trace_rowid", "trace_id"} <= cols:
-            trace_key = "COALESCE(CAST(trace_rowid AS VARCHAR), trace_id)"
-        elif "trace_rowid" in cols:
-            trace_key = "CAST(trace_rowid AS VARCHAR)"
-        elif "trace_id" in cols:
-            trace_key = "trace_id"
-        else:
-            raise ValueError("source has neither trace_rowid nor trace_id")
         prior = None
         try:
             # DAL_BUILD_DETERMINISTIC=0 keeps every core busy at the cost of a
@@ -381,40 +520,24 @@ class TypedLayout(Layout):
                 # blew a 120 GB cap on one month. Eight is plenty for a scan-bound job.
                 con.execute(f"SET threads={int(os.environ.get('DAL_BUILD_THREADS', '8'))}")
             _bound_memory(con)
+            _register_functions(con)
 
             # `_raw` is a VIEW, not a table. Materializing the raw set held every
             # attribute string in memory: 16.5M spans on lambda1 grew past 190 GB and
             # would have been killed (2026-09-11). Each pass now streams from Parquet;
             # only the small identity columns are materialized, in `_keys`.
             ts = time.perf_counter()
-            con.execute(f"""CREATE OR REPLACE TEMP VIEW _raw AS
-                SELECT *{day_expr}, {trace_key} AS trace_key,
-                       json_extract_string(attributes,
-                                           '$.metadata.user_api_key_end_user_id') AS euid,
-                       COALESCE(json_extract_string(attributes,'$.claude.session_id'),
-                                json_extract_string(attributes,'$.session.id')) AS session_alt,
-                       json_extract_string(attributes,'$.user.id') AS account_alt,
-                       CASE WHEN {_ROOTISH}
-                            THEN nullif(regexp_extract(attributes, '{_RX_ACCOUNT}', 1), '')
-                       END AS account_rx,
-                       CASE WHEN {_ROOTISH}
-                            THEN nullif(regexp_extract(attributes, '{_RX_DEVICE}', 1), '')
-                       END AS device_rx,
-                       CASE WHEN {_ROOTISH}
-                            THEN nullif(regexp_extract(attributes, '{_RX_SESSION}', 1), '')
-                       END AS session_rx,
-                       CASE WHEN {_ROOTISH} THEN {_TICKET_EXPR} END AS ticket_rx,
-                       CASE WHEN parent_id IS NULL
-                            THEN json_extract_string(attributes, '$.agent.name')
-                       END AS agent_rx
-                FROM {source_sql}""")
-            con.execute("""CREATE OR REPLACE TEMP TABLE _keys AS
+            source_sql, cols = _prepare_raw(con, source_glob)
+            from .incremental import parquet_sql
+            identity_source = parquet_sql(identity_files) if identity_files else "_raw"
+            con.execute(f"""CREATE OR REPLACE TEMP TABLE _keys AS
                 SELECT trace_key, euid, session_alt, account_alt, account_rx, device_rx,
-                       session_rx, ticket_rx, agent_rx
-                FROM _raw
+                       session_rx, ticket_rx, agent_rx, end_user_email
+                FROM {identity_source}
                 WHERE euid IS NOT NULL OR session_alt IS NOT NULL OR account_alt IS NOT NULL
                    OR account_rx IS NOT NULL OR device_rx IS NOT NULL OR session_rx IS NOT NULL
-                   OR ticket_rx IS NOT NULL OR agent_rx IS NOT NULL""")
+                   OR ticket_rx IS NOT NULL OR agent_rx IS NOT NULL
+                   OR end_user_email IS NOT NULL""")
             rows = con.execute(f"SELECT count(*) FROM {source_sql}").fetchone()[0]
             log.info(
                 "[layout:typed] scanned %d rows for identity in %.1fs",
@@ -510,8 +633,12 @@ class TypedLayout(Layout):
                 con.execute("SELECT count(*) FROM _refs").fetchone()[0],
                 time.perf_counter() - ts,
             )
+            # Rows carry whole prompts and payloads. The default 122,880-row group buffers a
+            # day of them per partition before the first flush; a byte-sized group keeps the
+            # writer's buffer bounded (ENG2-1650). Row grouping is layout, not content.
             opts = (
                 f"FORMAT PARQUET, COMPRESSION ZSTD, COMPRESSION_LEVEL {int(zstd_level)}, "
+                f"ROW_GROUP_SIZE_BYTES '{os.environ.get('DAL_ROW_GROUP_BYTES', '64MB')}', "
                 "OVERWRITE_OR_IGNORE"
             )
             t_hot = t_cold = 0.0
@@ -566,6 +693,10 @@ class TypedLayout(Layout):
         )
         return r
 
+    def update(self, con: Any, store: Any, *, zstd_level: int, full: bool = False) -> BuildResult:
+        from .incremental import update
+        return update(self, con, store, zstd_level=zstd_level, full=full)
+
     def attach(self, con: Any, store: Any) -> None:
         from dev_agent_lens.linear_tickets import attach_tickets
 
@@ -575,6 +706,14 @@ class TypedLayout(Layout):
         # The tracker's tickets (dal linear-sync), joinable on spans.ticket; an empty
         # view with the same columns when nobody has synced them (ENG2-1540).
         attach_tickets(con, store)
+        from dev_agent_lens.storage.snapshots import SnapshotIO
+
+        from .incremental import attach
+
+        manifest, _ = SnapshotIO(store).read_current()
+        if manifest is not None:
+            attach(con, manifest)
+            return
         con.execute(f"""CREATE VIEW spans AS SELECT * FROM read_parquet(
             {quote_literal(store.read_glob("spans_typed"))},
             hive_partitioning=true, union_by_name=true)""")

@@ -1,6 +1,7 @@
 # External object storage. No local MinIO and no dependency on a previous deployment.
 # docker compose --env-file deploy/.env.hosted -f deploy/compose.hosted.yml up -d
-# Keep one raw writer. Stop dal-otlp before running maintenance imports/rebuilds.
+# Keep one raw writer. Stop dal-otlp before maintenance raw imports.
+# The typed generation updater can run alongside the receiver.
 name: dal-hosted
 x-dal-env: &dal-env
   DAL_SPAN_STORE: ${DAL_SPAN_STORE:?set the S3 or R2 store URI}
@@ -39,6 +40,13 @@ services:
     # with `run --rm dal-sync dal sync ...` while dal-otlp is stopped.
     profiles: [maintenance]
     command: ['dal', 'store', 'status']
+  dal-typed:
+    image: ${DAL_IMAGE:-dal:local}
+    environment: *dal-env
+    volumes: [ 'dal-data:/data', './identity.yaml:/data/identity.yaml:ro' ]
+    profiles: [typed]
+    command: ['typed-loop']
+    restart: unless-stopped
   dal-oracle:
     image: ${DAL_IMAGE:-dal:local}
     environment: *dal-env

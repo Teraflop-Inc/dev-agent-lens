@@ -164,7 +164,7 @@ class TestStoreQuery:
     def test_typed_layout_override_without_typed_data(self, runner, chosen_store):
         r = runner.invoke(main, ["store", "query", "--layout", "typed", "SELECT 1"])
         assert r.exit_code == 1
-        assert "holds no spans_typed data yet" in r.output and "verify --from-parquet" in r.output
+        assert "holds no spans_typed data yet" in r.output and "store rebuild" in r.output
 
 
 class TestQuerySpans:
