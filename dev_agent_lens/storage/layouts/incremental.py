@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import datetime as dt
 import hashlib
+import logging
+import os
 import time
 import uuid
 from pathlib import Path
@@ -11,6 +13,8 @@ from pathlib import Path
 from dev_agent_lens.storage.layouts.base import BuildResult
 from dev_agent_lens.storage.snapshots import SnapshotIO
 from dev_agent_lens.storage.spanstore.base import quote_literal
+
+log = logging.getLogger(__name__)
 
 
 def parquet_sql(files):
@@ -43,6 +47,14 @@ def update(layout, con, store, *, zstd_level, full=False):
     started = time.perf_counter()
     con.execute("SET TimeZone='UTC'")
     _bound_memory(con)
+    # The dependency scan parses every changed row's attributes before the build sets
+    # its own thread count. DuckDB's default is one thread per core, and each thread
+    # holds a 2,048-row vector of parsed JSON, so large attribute strings exhaust a
+    # small updater's memory cap. Use the configured build thread count here too.
+    threads = os.environ.get("DAL_BUILD_THREADS", "").strip()
+    if threads:
+        con.execute(f"SET threads={int(threads)}")
+        log.info("[layout:incremental] duckdb threads=%s for the dependency scan", threads)
     io = SnapshotIO(store)
     previous, token = io.read_current()
     raw = io.files("spans_raw")
