@@ -65,7 +65,7 @@ model_list:
       custom_llm_provider: "anthropic"
 
 litellm_settings:
-  callbacks: ["arize_phoenix", "thinking_display_hook.proxy_handler_instance"]
+  callbacks: ["arize_phoenix", "thinking_display_hook.proxy_handler_instance", "dal_secondary_otel_hook.proxy_handler_instance"]
   drop_params: false
   set_verbose: false
   pass_through_params: true
@@ -119,6 +119,10 @@ general_settings:
   # for sk-ant-oat... bearers BEFORE this check, so OAuth pass-through
   # continues to work; anything else must match this key or get 401.
   master_key: os.environ/LITELLM_MASTER_KEY
+  # Names the caller on Codex pass-through spans (ENG2-402): codex-lens sends the
+  # developer's git email in this header; the fork records it as the end user and
+  # strips it before the request goes upstream.
+  user_header_name: x-dal-user
   # Codex signed in with ChatGPT (ENG2-402, path B). Point Codex's provider at
   # http://<router>:4000/teraflop-codex; each call is proxied to chatgpt.com and
   # logged like any other LLM call (fork: ChatGPTCodexPassthroughLoggingHandler).

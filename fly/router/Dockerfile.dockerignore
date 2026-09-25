@@ -1,0 +1,4 @@
+# The root .dockerignore drops fly/ for the DAL image. The router image needs exactly
+# its own directory, so this file (BuildKit reads <Dockerfile>.dockerignore) wins.
+*
+!fly/router/

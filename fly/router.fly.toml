@@ -29,6 +29,12 @@ primary_region = "iad"
   # this will need updating.
   TS_ROUTES = "fdaa:58:460c::/48"
   TS_HOSTNAME = "sf-tailscale-router"
+  # Tailnet ports -> Fly private services. This was set on the machine by hand and missing
+  # here, so a plain `fly deploy` would have dropped every tailnet door, including :4000
+  # (the proxy everyone's Claude Code uses). Keep it in sync with the machine.
+  TS_SERVE = "6006=tcp://sf-phoenix.internal:6006;4000=tcp://sf-litellm.internal:4000;14318=tcp://sf-dal.flycast:80"
+  # Git-host webhooks go to the hosted DAL receiver (ENG2-1650), not lambda1.
+  DAL_EVENTS_6PN = "sf-dal.flycast:80"
 
 # Persist tailscaled's node identity across redeploys. Without this each
 # new container generates a fresh node key, accumulating ghost nodes in
