@@ -108,12 +108,47 @@ _ROOTISH = "(parent_id IS NULL OR name IN ('litellm_request','raw_gen_ai_request
 # first 4,000 characters of the input count.
 _RX_TICKET = "(ENG2-[0-9]{3,5})"
 _RX_BRANCH_TICKET = r"Current branch: [^\n\"]{0,120}?(eng2-[0-9]{3,5})"
+# Every attribute path the typed layout reads. `_prepare_raw` parses them once per row into
+# the list `_j`. One json_extract per path parsed each ~262 KB `raw_gen_ai_request` attribute
+# string about twenty times, and 12k live spans exhausted a 12 GB cap (2026-09-25,
+# ENG2-1650). Append new paths at the end.
+_PATHS = (
+    "$.metadata.user_api_key_end_user_id",
+    "$.claude.session_id",
+    "$.session.id",
+    "$.user.id",
+    "$.agent.name",
+    "$.git.branch",
+    "$.input.value",
+    "$.llm.model_name",
+    "$.llm.provider",
+    "$.llm.system",
+    "$.llm.is_streaming",
+    "$.llm.invocation_parameters",
+    "$.metadata.usage_object.cache_read_input_tokens",
+    "$.llm.token_count.prompt_details.cache_read",
+    "$.metadata.usage_object.cache_creation_input_tokens",
+    "$.llm.token_count.prompt_details.cache_write",
+    "$.claude_code_tool_name",
+    "$.tool.name",
+    "$.metadata.requester_metadata.sandbox_id",
+    "$.output.value",
+    "$.llm.anthropic.messages",
+    "$.llm.anthropic.tools",
+    "$.llm.anthropic.system",
+)
+
+
+def _attr(path: str, row: str = "r.") -> str:
+    """The value of one attribute path, read from `_j` (1-based) as `_raw` provides it."""
+    return f"{row}_j[{_PATHS.index(path) + 1}]"
+
+
 _TICKET_EXPR = (
     "upper(COALESCE("
-    "nullif(regexp_extract(json_extract_string(attributes,'$.git.branch'), "
-    f"'(?i){_RX_TICKET}', 1), ''), "
+    f"nullif(regexp_extract({_attr('$.git.branch', '')}, '(?i){_RX_TICKET}', 1), ''), "
     f"nullif(regexp_extract(attributes, '{_RX_BRANCH_TICKET}', 1), ''), "
-    "nullif(regexp_extract(substr(json_extract_string(attributes,'$.input.value'), 1, 4000), "
+    f"nullif(regexp_extract(substr({_attr('$.input.value', '')}, 1, 4000), "
     f"'{_RX_TICKET}', 1), '')))"
 )
 
@@ -122,15 +157,14 @@ _TICKET_EXPR = (
 # malformed input even inside a CASE branch that is not taken, so the guard has to hand the
 # parser NULL rather than skip it. Found by the ENG2-1609 rehearsal on the dev-agent-lens
 # project: 2 of 36,052 spans, enough to fail the whole build.
-_INV_RAW = "json_extract_string(r.attributes,'$.llm.invocation_parameters')"
+_INV_RAW = _attr("$.llm.invocation_parameters")
 _INV = f"(CASE WHEN {_INV_RAW} LIKE '{{%' THEN {_INV_RAW} END)"
 
 # What a tool call DID, the same word for every harness (ENG2-402), so "how often does the
 # agent run shell commands" means the same thing for Claude Code (`Bash`) and Codex
 # (`exec_command`). Names not listed keep their own name, lowercased; MCP tools collapse to
 # `mcp`. Add a harness by adding its names here.
-_TOOL_NAME = """COALESCE(json_extract_string(r.attributes,'$.claude_code_tool_name'),
-                         json_extract_string(r.attributes,'$.tool.name'))"""
+_TOOL_NAME = f"COALESCE({_attr('$.claude_code_tool_name')}, {_attr('$.tool.name')})"
 _TOOL_KIND = f"""CASE
     WHEN nullif({_TOOL_NAME}, '') IS NULL THEN NULL
     WHEN {_TOOL_NAME} IN ('Bash', 'bash', 'BashOutput', 'KillShell', 'TaskOutput', 'TaskStop',
@@ -164,10 +198,10 @@ SELECT
   -- span's agent.name (ENG2-402). NULL for proxy-captured traffic, which has no root
   -- agent span; that traffic is Claude Code today.
   i.agent,
-  json_extract_string(r.attributes,'$.llm.model_name')  AS model_name,
-  json_extract_string(r.attributes,'$.llm.provider')    AS provider,
-  json_extract_string(r.attributes,'$.llm.system')      AS llm_system,
-  (lower(json_extract_string(r.attributes,'$.llm.is_streaming'))='true') AS is_streaming,
+  {_attr('$.llm.model_name')}  AS model_name,
+  {_attr('$.llm.provider')}    AS provider,
+  {_attr('$.llm.system')}      AS llm_system,
+  (lower({_attr('$.llm.is_streaming')})='true') AS is_streaming,
   json_extract_string({_INV},'$.thinking.type')                        AS thinking_type,
    TRY_CAST(json_extract_string({_INV},'$.thinking.budget_tokens') AS INTEGER)
        AS thinking_budget_tokens,
@@ -178,31 +212,25 @@ SELECT
    -- The proxy writes LiteLLM's usage_object; the session ingest (ATIF, Claude or Codex)
    -- writes the OpenInference key. Either counts (ENG2-402).
    COALESCE(
-     TRY_CAST(json_extract_string(r.attributes,
-              '$.metadata.usage_object.cache_read_input_tokens') AS BIGINT),
-     TRY_CAST(json_extract_string(r.attributes,
-              '$.llm.token_count.prompt_details.cache_read') AS BIGINT)) AS tokens_cache_read,
+     TRY_CAST({_attr('$.metadata.usage_object.cache_read_input_tokens')} AS BIGINT),
+     TRY_CAST({_attr('$.llm.token_count.prompt_details.cache_read')} AS BIGINT))
+       AS tokens_cache_read,
    COALESCE(
-     TRY_CAST(json_extract_string(r.attributes,
-              '$.metadata.usage_object.cache_creation_input_tokens') AS BIGINT),
-     TRY_CAST(json_extract_string(r.attributes,
-              '$.llm.token_count.prompt_details.cache_write') AS BIGINT)) AS tokens_cache_write,
-  COALESCE(json_extract_string(r.attributes,'$.claude_code_tool_name'),
-           json_extract_string(r.attributes,'$.tool.name'))         AS tool_name,
+     TRY_CAST({_attr('$.metadata.usage_object.cache_creation_input_tokens')} AS BIGINT),
+     TRY_CAST({_attr('$.llm.token_count.prompt_details.cache_write')} AS BIGINT))
+       AS tokens_cache_write,
+  {_TOOL_NAME}                                                AS tool_name,
   {_TOOL_KIND}                                                AS tool_kind,
-  json_extract_string(r.attributes,'$.metadata.requester_metadata.sandbox_id') AS sandbox_id,
-  json_extract_string(r.attributes,'$.input.value')  AS input_value,
-  json_extract_string(r.attributes,'$.output.value') AS output_value,
-  CASE WHEN json_extract(r.attributes,'$.llm.anthropic') IS NOT NULL
-        THEN md5(json_extract_string(r.attributes,'$.llm.anthropic.messages')) END
-       AS payload_messages_ref,
-  CASE WHEN json_extract(r.attributes,'$.llm.anthropic') IS NOT NULL
-        THEN md5(json_extract_string(r.attributes,'$.llm.anthropic.tools')) END
-       AS payload_tools_ref,
-  CASE WHEN json_extract(r.attributes,'$.llm.anthropic') IS NOT NULL
-        THEN md5(json_extract_string(r.attributes,'$.llm.anthropic.system')) END
-       AS payload_system_ref,
-  json_merge_patch(r.attributes, '{{"llm":{{"anthropic":null}}}}') AS attributes_rest,
+  {_attr('$.metadata.requester_metadata.sandbox_id')} AS sandbox_id,
+  {_attr('$.input.value')}  AS input_value,
+  {_attr('$.output.value')} AS output_value,
+  -- md5(NULL) is NULL, so a span without `llm.anthropic` gets no refs. The former
+  -- `CASE WHEN json_extract(..., '$.llm.anthropic') IS NOT NULL` guard added nothing but a
+  -- fourth parse of each payload.
+  md5({_attr('$.llm.anthropic.messages')}) AS payload_messages_ref,
+  md5({_attr('$.llm.anthropic.tools')})    AS payload_tools_ref,
+  md5({_attr('$.llm.anthropic.system')})   AS payload_system_ref,
+  dal_attributes_rest(r.attributes) AS attributes_rest,
   r.events,
   __SOURCE__ AS source,
   r.day
@@ -215,19 +243,16 @@ FROM _raw r LEFT JOIN _ident i USING (trace_key)
 # documents that blending those two flips the autonomy headline. Rows landed before the
 # stamp existed, and fixtures that never had one, get NULL rather than a failed build.
 
-_BLOB_ROWS = """
-  SELECT day, md5(json_extract_string(attributes,'$.llm.anthropic.messages')) AS ref,
-         'messages' AS kind,
-         json_extract_string(attributes,'$.llm.anthropic.messages') AS body FROM _raw
-   WHERE json_extract_string(attributes,'$.llm.anthropic.messages') IS NOT NULL
-  UNION ALL
-  SELECT day, md5(json_extract_string(attributes,'$.llm.anthropic.tools')),'tools',
-         json_extract_string(attributes,'$.llm.anthropic.tools') FROM _raw
-   WHERE json_extract_string(attributes,'$.llm.anthropic.tools') IS NOT NULL
-  UNION ALL
-  SELECT day, md5(json_extract_string(attributes,'$.llm.anthropic.system')),'system',
-         json_extract_string(attributes,'$.llm.anthropic.system') FROM _raw
-   WHERE json_extract_string(attributes,'$.llm.anthropic.system') IS NOT NULL
+# One scan of `_raw`: the three payloads come from the attributes parsed once into `_j`.
+_BLOB_ROWS = f"""
+  SELECT day, md5(body) AS ref, kind, body FROM (
+    SELECT day,
+           unnest(['messages', 'tools', 'system']) AS kind,
+           unnest([{_attr('$.llm.anthropic.messages', '')},
+                   {_attr('$.llm.anthropic.tools', '')},
+                   {_attr('$.llm.anthropic.system', '')}]) AS body
+    FROM _raw)
+  WHERE body IS NOT NULL
 """
 
 # One row per ref, written in the month it first appears. `_refs` is (ref, first day):
@@ -257,6 +282,56 @@ def _windows(lo: Any, hi: Any, days: int) -> list[tuple[Any, Any]]:
         out.append((cur, cur + step))
         cur = cur + step
     return out
+
+
+_REST_PATCH = '{"llm":{"anthropic":null}}'
+
+
+def attributes_rest(attributes: str | None) -> str | None:
+    """A span's attributes without `llm.anthropic`, whose payloads go to the blobs table.
+
+    Same result as DuckDB's `json_merge_patch(attributes, '{"llm":{"anthropic":null}}')`:
+    `llm` becomes `{}` when it is missing or not an object, and a non-object document
+    returns the patch itself. Numbers keep their value, but Python may write a float in a
+    different form (`1.5e-05` rather than `0.000015`). Malformed JSON raises, as the
+    DuckDB function does.
+
+    This runs in Python because json_merge_patch builds two mutable trees for every row
+    of a 2,048-row vector. With ~262 KB `raw_gen_ai_request` attributes, that exhausted a
+    12 GB cap on 12k live spans even on one thread (2026-09-25, ENG2-1650). Here each
+    row's tree is freed before the next one is parsed.
+    """
+    import json
+
+    if attributes is None:
+        return None
+    doc = json.loads(attributes)
+    if not isinstance(doc, dict):
+        return _REST_PATCH
+    llm = doc.get("llm")
+    if isinstance(llm, dict):
+        llm.pop("anthropic", None)
+    else:
+        doc["llm"] = {}
+    return json.dumps(doc, separators=(",", ":"), ensure_ascii=False)
+
+
+def _register_functions(con: Any) -> None:
+    """Register `dal_attributes_rest` on a connection, once."""
+    import duckdb
+    import pyarrow as pa
+
+    def rest(values: Any) -> Any:
+        return pa.array((attributes_rest(v.as_py()) for v in values), type=pa.string())
+
+    try:
+        con.remove_function("dal_attributes_rest")
+    except Exception:  # noqa: BLE001 - not registered yet
+        pass
+    con.create_function(
+        "dal_attributes_rest", rest, [duckdb.sqltype("VARCHAR")], duckdb.sqltype("VARCHAR"),
+        type="arrow", null_handling="special", side_effects=False,
+    )
 
 
 def _bound_memory(con: Any) -> None:
@@ -368,13 +443,23 @@ def _prepare_raw(con: Any, source_glob: str | list[str]) -> tuple[str, set[str]]
         trace_key = "trace_id"
     else:
         raise ValueError("source has neither trace_rowid nor trace_id")
+    # Memory is bounded per 2,048-row vector, and live spans carry attributes of up to
+    # ~262 KB (`raw_gen_ai_request`). Two things made that exhaust a 12 GB cap on 12k live
+    # spans (2026-09-25, ENG2-1650): seven separate json_extract calls each parsed every
+    # attribute string, and `CASE WHEN rootish` around the ticket expression narrowed
+    # vectors to exactly those large root rows while extracting `input.value`. Parsing
+    # the paths once into `_j`, and gating only the small ticket result, keeps the same
+    # output within 2.5 GB.
+    paths = ", ".join(quote_literal(p) for p in _PATHS)
     con.execute(f"""CREATE OR REPLACE TEMP VIEW _raw AS
-        SELECT *{day_expr}, {trace_key} AS trace_key,
-               json_extract_string(attributes,
-                                   '$.metadata.user_api_key_end_user_id') AS euid,
-               COALESCE(json_extract_string(attributes,'$.claude.session_id'),
-                        json_extract_string(attributes,'$.session.id')) AS session_alt,
-               json_extract_string(attributes,'$.user.id') AS account_alt,
+        SELECT * EXCLUDE (_rootish, _ticket_any),
+               CASE WHEN _rootish THEN _ticket_any END AS ticket_rx
+        FROM (
+        SELECT *,
+               {_attr('$.metadata.user_api_key_end_user_id', '')} AS euid,
+               COALESCE({_attr('$.claude.session_id', '')},
+                        {_attr('$.session.id', '')}) AS session_alt,
+               {_attr('$.user.id', '')} AS account_alt,
                CASE WHEN {_ROOTISH}
                     THEN nullif(regexp_extract(attributes, '{_RX_ACCOUNT}', 1), '')
                END AS account_rx,
@@ -384,11 +469,13 @@ def _prepare_raw(con: Any, source_glob: str | list[str]) -> tuple[str, set[str]]
                CASE WHEN {_ROOTISH}
                     THEN nullif(regexp_extract(attributes, '{_RX_SESSION}', 1), '')
                END AS session_rx,
-               CASE WHEN {_ROOTISH} THEN {_TICKET_EXPR} END AS ticket_rx,
-               CASE WHEN parent_id IS NULL
-                    THEN json_extract_string(attributes, '$.agent.name')
-               END AS agent_rx
-        FROM {source_sql}""")
+               {_ROOTISH} AS _rootish,
+               {_TICKET_EXPR} AS _ticket_any,
+               CASE WHEN parent_id IS NULL THEN {_attr('$.agent.name', '')} END AS agent_rx
+        FROM (
+        SELECT *{day_expr}, {trace_key} AS trace_key,
+               json_extract_string(attributes, [{paths}]) AS _j
+        FROM {source_sql}))""")
     return source_sql, cols
 
 
@@ -418,6 +505,7 @@ class TypedLayout(Layout):
                 # blew a 120 GB cap on one month. Eight is plenty for a scan-bound job.
                 con.execute(f"SET threads={int(os.environ.get('DAL_BUILD_THREADS', '8'))}")
             _bound_memory(con)
+            _register_functions(con)
 
             # `_raw` is a VIEW, not a table. Materializing the raw set held every
             # attribute string in memory: 16.5M spans on lambda1 grew past 190 GB and
@@ -529,8 +617,12 @@ class TypedLayout(Layout):
                 con.execute("SELECT count(*) FROM _refs").fetchone()[0],
                 time.perf_counter() - ts,
             )
+            # Rows carry whole prompts and payloads. The default 122,880-row group buffers a
+            # day of them per partition before the first flush; a byte-sized group keeps the
+            # writer's buffer bounded (ENG2-1650). Row grouping is layout, not content.
             opts = (
                 f"FORMAT PARQUET, COMPRESSION ZSTD, COMPRESSION_LEVEL {int(zstd_level)}, "
+                f"ROW_GROUP_SIZE_BYTES '{os.environ.get('DAL_ROW_GROUP_BYTES', '64MB')}', "
                 "OVERWRITE_OR_IGNORE"
             )
             t_hot = t_cold = 0.0
