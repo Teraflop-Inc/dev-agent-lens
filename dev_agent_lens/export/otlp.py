@@ -126,6 +126,66 @@ def clamp_times(spans: Iterable[Any]) -> int:
     return clamped
 
 
+CACHE_WRITE_ATTRIBUTE = "llm.token_count.prompt_details.cache_write"
+
+
+def _cache_writes_by_span(
+    trajectory: dict[str, Any], trace_seed: str | None = None
+) -> dict[bytes, int]:
+    """Cache-write tokens keyed by the LLM span id harbor-atif2otel gives each step.
+
+    harbor maps a step's prompt, completion and cache-read tokens but has no field for
+    Anthropic's cache writes, so `session_to_atif` keeps them in the step's
+    `metrics.extra` and they are stamped on the matching span here. The ids follow
+    harbor's scheme: `<span seed>:llm:<index among non-copied steps>`, and an embedded
+    subagent is converted under the seed `<trace seed>:subagent:<tool span>:<ref>:<id>`.
+    """
+    from harbor_atif2otel.ids import (
+        sha256_span_id,
+        sha256_trace_id,
+        trajectory_span_seed,
+        trajectory_trace_seed,
+    )
+
+    seed = trace_seed or trajectory_trace_seed(trajectory)
+    base = trajectory_span_seed(trajectory, sha256_trace_id(seed).hex())
+    steps = trajectory.get("steps") or []
+    active = [s for s in steps if not s.get("is_copied_context")] or steps
+    subagents = {
+        sub.get("trajectory_id"): sub
+        for sub in trajectory.get("subagent_trajectories") or []
+        if sub.get("trajectory_id")
+    }
+    results: dict[str, dict[str, Any]] = {}
+    for step in active:
+        observation = step.get("observation")
+        if isinstance(observation, dict):
+            for result in observation.get("results") or []:
+                if isinstance(result, dict) and result.get("source_call_id"):
+                    results[result["source_call_id"]] = result
+    writes: dict[bytes, int] = {}
+    for i, step in enumerate(active):
+        written = ((step.get("metrics") or {}).get("extra") or {}).get(
+            "cache_creation_input_tokens"
+        )
+        if written:
+            writes[sha256_span_id(f"{base}:llm:{i}")] = int(written)
+        for j, call in enumerate(step.get("tool_calls") or []):
+            refs = results.get(call.get("tool_call_id", ""), {}).get("subagent_trajectory_ref", [])
+            if not isinstance(refs, list):
+                refs = [refs]
+            tool_span = sha256_span_id(f"{base}:tool:{i}:{j}").hex()
+            for k, ref in enumerate(refs):
+                ref_id = ref.get("trajectory_id") if isinstance(ref, dict) else None
+                if ref_id in subagents:
+                    writes.update(
+                        _cache_writes_by_span(
+                            subagents[ref_id], f"{seed}:subagent:{tool_span}:{k}:{ref_id}"
+                        )
+                    )
+    return writes
+
+
 def build_spans(
     trajectories: list[dict[str, Any]],
     project: str,
@@ -157,6 +217,7 @@ def build_spans(
             resource.resource.CopyFrom(resource_spans.resource)
             resource.resource.attributes.append(kv(PROJECT_ATTRIBUTE, project))
         before = len(spans)
+        cache_writes = _cache_writes_by_span(trajectory)
         for scope_span in resource_spans.scope_spans:
             for span in scope_span.spans:
                 if user_id:
@@ -166,7 +227,20 @@ def build_spans(
                     span.attributes.append(kv(USER_ATTRIBUTE, user_id))
                 if trajectory.get("git_branch"):
                     span.attributes.append(kv(BRANCH_ATTRIBUTE, trajectory["git_branch"]))
+                written = cache_writes.pop(bytes(span.span_id), None)
+                if written:
+                    span.attributes.append(
+                        KeyValue(key=CACHE_WRITE_ATTRIBUTE, value=AnyValue(int_value=written))
+                    )
                 spans.append((scope_span.scope, span))
+        if cache_writes:
+            # The span ids below are recomputed from harbor-atif2otel's own seeds. A
+            # harbor release that changes them would drop cache writes silently; say so.
+            logger.warning(
+                "[otlp] session=%s: %d cache-write counts matched no LLM span",
+                trajectory.get("session_id"),
+                len(cache_writes),
+            )
         logger.info(
             "[otlp] converted session=%s spans=%d in %.0fms",
             trajectory.get("session_id"),

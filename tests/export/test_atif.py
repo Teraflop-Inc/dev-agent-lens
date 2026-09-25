@@ -122,7 +122,8 @@ def test_tool_calls_and_metrics_are_preserved():
     assert step["tool_calls"] == [
         {"tool_call_id": "call_1", "function_name": "Bash", "arguments": {"command": "ls"}}
     ]
-    assert step["metrics"] == {"prompt_tokens": 10, "completion_tokens": 5, "cached_tokens": 100}
+    # prompt counts cache reads, as the proxy's LiteLLM spans and Codex's input_tokens do
+    assert step["metrics"] == {"prompt_tokens": 110, "completion_tokens": 5, "cached_tokens": 100}
     assert step["model_name"] == "claude-opus-5"
 
 
@@ -170,3 +171,53 @@ def test_branch_is_read_from_the_session_and_head_means_none():
         line["gitBranch"] = "HEAD"
     traj, _ = session_to_atif(lines)
     assert "git_branch" not in traj
+
+
+def _block(msg_id, usage, **kw):
+    line = _assistant(usage=usage, **kw)
+    line["message"]["id"] = msg_id
+    return line
+
+
+def test_a_message_split_over_lines_counts_its_usage_once():
+    """Claude Code writes one line per content block and repeats the message's usage on
+    each. Summing lines counted about 3x the output tokens on real sessions."""
+    usage = {"input_tokens": 2, "output_tokens": 40, "cache_read_input_tokens": 1000,
+             "cache_creation_input_tokens": 300}
+    lines = [
+        _block("msg_1", usage, thinking="plan"),
+        _block("msg_1", usage, text="doing it"),
+        _block("msg_1", usage, tool_use=[("call_1", "Bash", {"command": "ls"})]),
+        _block("msg_2", {"input_tokens": 1, "output_tokens": 7, "cache_read_input_tokens": 1300},
+               text="done"),
+    ]
+    traj, stats = session_to_atif(lines)
+
+    metrics = [s.get("metrics") for s in traj["steps"]]
+    assert metrics == [
+        {"prompt_tokens": 1002, "completion_tokens": 40, "cached_tokens": 1000,
+         "extra": {"cache_creation_input_tokens": 300}},
+        None,
+        None,
+        {"prompt_tokens": 1301, "completion_tokens": 7, "cached_tokens": 1300},
+    ]
+    assert stats["metrics_repeated_line"] == 2
+    assert sum((m or {}).get("completion_tokens", 0) for m in metrics) == 47
+
+
+def test_a_later_usage_snapshot_of_the_same_message_wins():
+    """While a response streams, an earlier block can carry a partial output count."""
+    lines = [
+        _block("msg_1", {"input_tokens": 3, "output_tokens": 1}, thinking="..."),
+        _block("msg_1", {"input_tokens": 3, "output_tokens": 90}, text="final"),
+    ]
+    traj, _ = session_to_atif(lines)
+    assert traj["steps"][0]["metrics"]["completion_tokens"] == 90
+    assert "metrics" not in traj["steps"][1]
+
+
+def test_lines_without_a_message_id_each_keep_their_usage():
+    lines = [_assistant(text="a", usage={"input_tokens": 1, "output_tokens": 2}),
+             _assistant(text="b", usage={"input_tokens": 1, "output_tokens": 3})]
+    traj, _ = session_to_atif(lines)
+    assert [s["metrics"]["completion_tokens"] for s in traj["steps"]] == [2, 3]

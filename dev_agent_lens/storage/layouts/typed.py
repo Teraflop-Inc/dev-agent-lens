@@ -210,17 +210,22 @@ SELECT
        AS thinking_budget_tokens,
   json_extract_string({_INV},'$.thinking.display')                     AS thinking_display,
   TRY_CAST(json_extract_string({_INV},'$.max_tokens') AS INTEGER)      AS max_tokens,
-  r.llm_token_count_prompt      AS tokens_prompt,
-  r.llm_token_count_completion  AS tokens_completion,
+  -- Tokens are what a span itself spent, so a sum over spans is a total. An AGENT span
+  -- is a rollup: the session ingest stamps a Codex session's own total on its root, on
+  -- top of every model call below it, which doubled Codex sums. Only the calls count.
+  CASE WHEN r.span_kind = 'AGENT' THEN NULL ELSE r.llm_token_count_prompt END
+       AS tokens_prompt,
+  CASE WHEN r.span_kind = 'AGENT' THEN NULL ELSE r.llm_token_count_completion END
+       AS tokens_completion,
    -- The proxy writes LiteLLM's usage_object; the session ingest (ATIF, Claude or Codex)
    -- writes the OpenInference key. Either counts (ENG2-402).
-   COALESCE(
+   CASE WHEN r.span_kind = 'AGENT' THEN NULL ELSE COALESCE(
      TRY_CAST({_attr('$.metadata.usage_object.cache_read_input_tokens')} AS BIGINT),
-     TRY_CAST({_attr('$.llm.token_count.prompt_details.cache_read')} AS BIGINT))
+     TRY_CAST({_attr('$.llm.token_count.prompt_details.cache_read')} AS BIGINT)) END
        AS tokens_cache_read,
-   COALESCE(
+   CASE WHEN r.span_kind = 'AGENT' THEN NULL ELSE COALESCE(
      TRY_CAST({_attr('$.metadata.usage_object.cache_creation_input_tokens')} AS BIGINT),
-     TRY_CAST({_attr('$.llm.token_count.prompt_details.cache_write')} AS BIGINT))
+     TRY_CAST({_attr('$.llm.token_count.prompt_details.cache_write')} AS BIGINT)) END
        AS tokens_cache_write,
   {_TOOL_NAME}                                                AS tool_name,
   {_TOOL_KIND}                                                AS tool_kind,

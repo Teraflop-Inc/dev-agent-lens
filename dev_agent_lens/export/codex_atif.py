@@ -140,6 +140,33 @@ def read_codex_cwd(path: Path, max_lines: int = 200) -> str | None:
     return None
 
 
+def _usage_metrics(usage: dict[str, Any]) -> dict[str, Any]:
+    """One model call's `last_token_usage` as step metrics. OpenAI's input_tokens already
+    includes the cached part, the convention the proxy's LiteLLM spans use."""
+    return {
+        "prompt_tokens": usage.get("input_tokens"),
+        "completion_tokens": usage.get("output_tokens"),
+        "cached_tokens": usage.get("cached_input_tokens"),
+        "extra": {"reasoning_output_tokens": usage.get("reasoning_output_tokens")},
+    }
+
+
+def _add_usage(step: dict[str, Any], call: dict[str, Any]) -> dict[str, Any]:
+    """Add one call's metrics to a step's, field by field; returns the step."""
+    held = step.get("metrics")
+    if not held:
+        step["metrics"] = {**call, "extra": dict(call.get("extra") or {})}
+        return step
+    for key in ("prompt_tokens", "completion_tokens", "cached_tokens"):
+        if call.get(key) is not None:
+            held[key] = (held.get(key) or 0) + call[key]
+    extra = held.setdefault("extra", {})
+    for key, value in (call.get("extra") or {}).items():
+        if value is not None:
+            extra[key] = (extra.get(key) or 0) + value
+    return step
+
+
 def codex_session_to_atif(
     records: Iterable[dict[str, Any]],
 ) -> tuple[dict[str, Any], Counter[str]]:
@@ -161,6 +188,9 @@ def codex_session_to_atif(
 
     current: dict[str, Any] | None = None  # the agent step being assembled
     call_to_step: dict[str, int] = {}
+    # A model call whose count arrives before any agent step (the first call of a
+    # session, a reasoning-only call) waits here for the next agent step.
+    pending: dict[str, Any] | None = None
 
     def flush() -> None:
         nonlocal current
@@ -173,13 +203,16 @@ def codex_session_to_atif(
             current = None
 
     def agent_step(timestamp: str | None) -> dict[str, Any]:
-        nonlocal current
+        nonlocal current, pending
         if current is None:
             current = {"source": "agent", "message": ""}
             if timestamp or clock:
                 current["timestamp"] = timestamp or clock
             if model:
                 current["model_name"] = model
+            if pending:
+                _add_usage(current, pending["metrics"])
+                pending = None
         return current
 
     for record in records:
@@ -218,16 +251,16 @@ def codex_session_to_atif(
                     target = current or (
                         steps[-1] if steps and steps[-1]["source"] == "agent" else None
                     )
+                    call = _usage_metrics(usage)
+                    # Two calls can land on one step (a reasoning-only call, then the
+                    # answer). Replacing lost the first: output tokens summed ~6% under
+                    # Codex's own total on a real session. Add them instead.
                     if target is not None:
-                        target["metrics"] = {
-                            "prompt_tokens": usage.get("input_tokens"),
-                            "completion_tokens": usage.get("output_tokens"),
-                            "cached_tokens": usage.get("cached_input_tokens"),
-                            "extra": {
-                                "reasoning_output_tokens": usage.get("reasoning_output_tokens")
-                            },
-                        }
-                        stats["metrics_preserved"] += 1
+                        _add_usage(target, call)
+                    else:
+                        pending = _add_usage(pending or {}, call)
+                        stats["metrics_pending"] += 1
+                    stats["metrics_preserved"] += 1
             else:
                 stats["dropped_event_msg"] += 1
             continue
@@ -304,6 +337,12 @@ def codex_session_to_atif(
         stats["dropped_item"] += 1
 
     flush()
+    if pending:
+        last_agent = next((st for st in reversed(steps) if st["source"] == "agent"), None)
+        if last_agent is not None:
+            _add_usage(last_agent, pending["metrics"])
+        else:
+            stats["metrics_dropped_no_agent_step"] += 1
 
     trajectory: dict[str, Any] = {
         "schema_version": ATIF_SCHEMA_VERSION,

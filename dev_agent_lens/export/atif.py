@@ -96,6 +96,11 @@ def session_to_atif(
     # them to the agent step that issued the call.
     pending_results: list[dict[str, Any]] = []
     call_to_step: dict[str, int] = {}
+    # Claude Code writes one line per content block (thinking, text, each tool call) and
+    # repeats the whole message's usage on every one of them. Counting each line counted
+    # a message's tokens once per block: about 3x the real output tokens on measured
+    # sessions. Usage belongs to the message id, on the first step that carries it.
+    usage_step: dict[str, int] = {}
 
     for line in lines:
         line_type = line.get("type")
@@ -136,6 +141,7 @@ def session_to_atif(
 
         if source == "agent":
             _enrich_agent_step(step, message, parts, call_to_step, len(steps), stats)
+            _place_usage(steps, step, message, usage_step, stats)
 
         steps.append(step)
         stats[f"step:{source}"] += 1
@@ -198,14 +204,57 @@ def _enrich_agent_step(
     if calls:
         step["tool_calls"] = calls
 
+
+
+def _usage_metrics(usage: dict[str, Any]) -> dict[str, Any]:
+    """Anthropic usage in the store's convention, the one the proxy's LiteLLM spans use.
+
+    prompt = fresh input + cache reads (LiteLLM's prompt_tokens, and what OpenAI's
+    input_tokens already means for Codex); cache writes are counted separately. Anthropic's
+    input_tokens alone is only the uncached remainder, a few tokens per call.
+    """
+    fresh = usage.get("input_tokens") or 0
+    read = usage.get("cache_read_input_tokens") or 0
+    write = usage.get("cache_creation_input_tokens") or 0
+    metrics: dict[str, Any] = {
+        "prompt_tokens": fresh + read,
+        "completion_tokens": usage.get("output_tokens"),
+        "cached_tokens": read,
+    }
+    if write:
+        metrics["extra"] = {"cache_creation_input_tokens": write}
+    return metrics
+
+
+def _place_usage(
+    steps: list[dict[str, Any]],
+    step: dict[str, Any],
+    message: dict[str, Any],
+    usage_step: dict[str, int],
+    stats: Counter[str],
+) -> None:
+    """Put a message's usage on the first step of that message, once.
+
+    Later lines of the same message carry the same usage, or a later snapshot of it while
+    the response streamed; the largest output count is the final one and replaces the
+    earlier figures on the owning step. A line with no message id stands alone.
+    """
     usage = message.get("usage") or {}
-    if usage:
-        step["metrics"] = {
-            "prompt_tokens": usage.get("input_tokens"),
-            "completion_tokens": usage.get("output_tokens"),
-            "cached_tokens": usage.get("cache_read_input_tokens"),
-        }
+    if not usage:
+        return
+    metrics = _usage_metrics(usage)
+    msg_id = message.get("id")
+    owner = usage_step.get(msg_id) if msg_id else None
+    if owner is None:
+        step["metrics"] = metrics
+        if msg_id:
+            usage_step[msg_id] = len(steps)  # this step's index once appended
         stats["metrics_preserved"] += 1
+        return
+    held = steps[owner].get("metrics") or {}
+    if (metrics.get("completion_tokens") or 0) >= (held.get("completion_tokens") or 0):
+        steps[owner]["metrics"] = metrics
+    stats["metrics_repeated_line"] += 1
 
 
 def _attach_results(
