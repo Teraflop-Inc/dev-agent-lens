@@ -149,7 +149,7 @@ def dependency_days(con, raw, previous, changed, generation, force):
         _prepare_raw(con, selected)
         try:
             sql = """SELECT day,trace_key,euid,session_alt,account_alt,account_rx,device_rx,
-                session_rx,ticket_rx,agent_rx FROM _raw"""
+                session_rx,ticket_rx,agent_rx,end_user_email FROM _raw"""
             con.execute(
                 f"COPY ({sql}) TO {quote_literal(generation.write_target('dependencies'))} "
                 "(FORMAT PARQUET, COMPRESSION ZSTD, PARTITION_BY(day))"

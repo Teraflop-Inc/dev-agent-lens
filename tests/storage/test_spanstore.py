@@ -580,6 +580,57 @@ class TestAppendFrame:
         rows = con.execute("SELECT trace_id, person FROM spans ORDER BY span_id").fetchall()
         assert rows == [("t-codex", "Developer"), ("t-other", None)]
 
+    def test_typed_layout_names_a_codex_person_by_the_end_user_the_proxy_records(
+        self, tmp_path, monkeypatch
+    ):
+        """ENG2-402: a Codex call through the ChatGPT pass-through carries no account id.
+        codex-lens sends the git email in a header, the proxy records it as the end user,
+        and LiteLLM writes `metadata` as a JSON string, as live proxy spans do. The email
+        names the person; a Claude end user (the JSON id string) or a bare id never does."""
+        import json
+
+        import duckdb
+
+        from dev_agent_lens.storage.layouts import get_layout
+
+        people = tmp_path / "identity.yaml"
+        people.write_text("people:\n  - name: Developer\n    email: developer@example.com\n")
+        monkeypatch.setenv("DAL_IDENTITY", str(people))
+
+        def span(end_user):
+            meta = {"user_api_key_user_id": "chatgpt-oauth-user",
+                    "user_api_key_end_user_id": end_user}
+            return json.dumps({"metadata": json.dumps(meta), "llm": {"model_name": "gpt-5"}})
+
+        batch = self._batch("2026-06-01", 5, "p")
+        batch["context.trace_id"] = ["t-codex", "t-codex", "t-claude", "t-bare", "t-none"]
+        batch["parent_id"] = [None, "p0", None, None, None]
+        batch["name"] = ["litellm_request", "raw_gen_ai_request"] + ["litellm_request"] * 3
+        batch["attributes"] = [
+            span("Developer@Example.com"),
+            json.dumps({"llm": {"model_name": "gpt-5"}}),  # the child names no one itself
+            span(json.dumps({"device_id": "d" * 64, "session_id": "s"})),
+            span("customer-42"),
+            span(None),
+        ]
+        store = open_store(f"file://{tmp_path}/s")
+        store.ensure()
+        con = duckdb.connect()
+        store.append_frame(con, batch, "spans_raw", source="proxy")
+        lay = get_layout("typed")
+        assert lay.build(con, store.read_glob("spans_raw"), store, zstd_level=3).rows == 5
+        lay.attach(con, store)
+        rows = con.execute(
+            "SELECT span_id, account_uuid, person FROM spans ORDER BY span_id"
+        ).fetchall()
+        assert rows == [
+            ("p0", "developer@example.com", "Developer"),
+            ("p1", "developer@example.com", "Developer"),
+            ("p2", None, None),
+            ("p3", None, None),
+            ("p4", None, None),
+        ]
+
     def test_typed_layout_maps_tools_to_one_vocabulary_across_harnesses(self, tmp_path):
         """ENG2-402: `Bash` and `exec_command` are both a shell command. tool_kind says so,
         so a tool question means the same thing for Claude Code and Codex."""

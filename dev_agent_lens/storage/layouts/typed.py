@@ -43,7 +43,7 @@ CREATE OR REPLACE TEMP TABLE _ident_trace AS
 SELECT trace_key,
         COALESCE(
           max(CASE WHEN euid LIKE '{%' THEN json_extract_string(euid,'$.account_uuid') END),
-          max(account_alt), max(account_rx)) AS account_uuid,
+          max(account_alt), max(account_rx), max(end_user_email)) AS account_uuid,
         COALESCE(
           max(CASE WHEN euid LIKE '{%' THEN json_extract_string(euid,'$.device_id') END),
           max(device_rx)) AS device_id,
@@ -136,6 +136,9 @@ _PATHS = (
     "$.llm.anthropic.messages",
     "$.llm.anthropic.tools",
     "$.llm.anthropic.system",
+    # LiteLLM writes `metadata` as a JSON string, so paths through it return NULL on live
+    # proxy spans; the whole value is kept to decode the one field that needs it.
+    "$.metadata",
 )
 
 
@@ -471,7 +474,14 @@ def _prepare_raw(con: Any, source_glob: str | list[str]) -> tuple[str, set[str]]
                END AS session_rx,
                {_ROOTISH} AS _rootish,
                {_TICKET_EXPR} AS _ticket_any,
-               CASE WHEN parent_id IS NULL THEN {_attr('$.agent.name', '')} END AS agent_rx
+               CASE WHEN parent_id IS NULL THEN {_attr('$.agent.name', '')} END AS agent_rx,
+               -- Codex through the ChatGPT pass-through carries no account id. codex-lens
+               -- sends the caller's git email, which the proxy records as the end user
+               -- (ENG2-402): the key the Codex session ingest stamps as user.id.
+               CASE WHEN {_ROOTISH} THEN lower(nullif(regexp_extract(
+                    json_extract_string({_attr('$.metadata', '')},
+                                        '$.user_api_key_end_user_id'),
+                    '^[^@{{\\s]+@[^@\\s]+$'), '')) END AS end_user_email
         FROM (
         SELECT *{day_expr}, {trace_key} AS trace_key,
                json_extract_string(attributes, [{paths}]) AS _j
@@ -517,11 +527,12 @@ class TypedLayout(Layout):
             identity_source = parquet_sql(identity_files) if identity_files else "_raw"
             con.execute(f"""CREATE OR REPLACE TEMP TABLE _keys AS
                 SELECT trace_key, euid, session_alt, account_alt, account_rx, device_rx,
-                       session_rx, ticket_rx, agent_rx
+                       session_rx, ticket_rx, agent_rx, end_user_email
                 FROM {identity_source}
                 WHERE euid IS NOT NULL OR session_alt IS NOT NULL OR account_alt IS NOT NULL
                    OR account_rx IS NOT NULL OR device_rx IS NOT NULL OR session_rx IS NOT NULL
-                   OR ticket_rx IS NOT NULL OR agent_rx IS NOT NULL""")
+                   OR ticket_rx IS NOT NULL OR agent_rx IS NOT NULL
+                   OR end_user_email IS NOT NULL""")
             rows = con.execute(f"SELECT count(*) FROM {source_sql}").fetchone()[0]
             log.info(
                 "[layout:typed] scanned %d rows for identity in %.1fs",
