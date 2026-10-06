@@ -64,9 +64,10 @@ click "Edit route settings", and approve `fdaa:58:460c::/48`. Without
 this the route is advertised but no peers will use it.
 
 **Disable key expiry on the node.** Same page, `sf-tailscale-router` → "Disable
-key expiry". The node key otherwise expires 180 days after it was minted (the current
-one on 2026-12-07) and the router goes dark until a restart re-authenticates with
-`TS_AUTHKEY`. Note that `TS_AUTHKEY` itself was minted with a 90-day expiry: it is
+key expiry". The node key otherwise expires 180 days after it was minted and the router
+goes dark until a restart re-authenticates with `TS_AUTHKEY`. Done for the current node
+on 2026-10-06 (`tailscale status --json` shows no `KeyExpiry` for it); redo it if the
+node is ever re-registered. Note that `TS_AUTHKEY` itself was minted with a 90-day expiry: it is
 only needed when the node has to re-register (state volume lost), but re-mint it
 before then or that path is closed too.
 
