@@ -63,8 +63,26 @@ flyctl deploy --app sf-tailscale-router --config fly/router.fly.toml
 click "Edit route settings", and approve `fdaa:58:460c::/48`. Without
 this the route is advertised but no peers will use it.
 
-That's the only manual step. No split-DNS config needed (the friendly
-URLs use the router's tailnet hostname, not `*.internal`).
+**Disable key expiry on the node.** Same page, `sf-tailscale-router` → "Disable
+key expiry". The node key otherwise expires 180 days after it was minted (the current
+one on 2026-12-07) and the router goes dark until a restart re-authenticates with
+`TS_AUTHKEY`. Note that `TS_AUTHKEY` itself was minted with a 90-day expiry: it is
+only needed when the node has to re-register (state volume lost), but re-mint it
+before then or that path is closed too.
+
+No split-DNS config needed (the friendly URLs use the router's tailnet hostname,
+not `*.internal`).
+
+## What survives a tailscaled reset
+
+The node key lives on the `tailscale_state` volume, so a tailscaled crash (the
+machine restarts, `[[restart]]` policy), a redeploy, or a replaced machine comes back
+as the same node: same MagicDNS name, same tailnet IP. Verified 2026-10-05: the node
+was created 2026-06-10 and the machine was replaced on 2026-09-25; name and IP
+(`100.113.68.73`) did not move. The one IP move (.74 → .73) was 2026-06-09, the day
+the router was first deployed. What would still re-key it: losing the volume, or
+re-registering after the node key expired (above). msb sandboxes pin the IP because
+MagicDNS does not resolve inside them; the IP rides on the same persisted key.
 
 ## Adding a new exposed service
 
