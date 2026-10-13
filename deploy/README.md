@@ -33,14 +33,18 @@ An install needs three images, one compose file, one proxy config, an identity f
 
 ```
 docker build --platform linux/amd64 -f deploy/Dockerfile -t dal:<tag> .
-docker tag aowen14/litellm-oauth-fix:latest dal-proxy:0.1     # our LiteLLM fork, neutral name for customers
-docker save dal:<tag> quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z dal-proxy:0.1 | gzip > dal-images.tgz
-# on the target: gunzip -c dal-images.tgz | docker load; DAL_IMAGE=dal:<tag> in deploy/.env
+docker pull aowen14/litellm-oauth-fix:sha-7a264c3@sha256:9187ffaaebd030e74cf91f6fd049e25466dbd82c3926699ffa12e7b4b5f2a72d
+docker tag aowen14/litellm-oauth-fix:sha-7a264c3@sha256:9187ffaaebd030e74cf91f6fd049e25466dbd82c3926699ffa12e7b4b5f2a72d dal-proxy:0.1     # our LiteLLM fork, neutral name for customers
+docker pull cgr.dev/chainguard/minio:latest@sha256:4692462f35d97d7e82c30371d82f057703c5d9489bcae726010594c812f2d285
+docker tag cgr.dev/chainguard/minio:latest@sha256:4692462f35d97d7e82c30371d82f057703c5d9489bcae726010594c812f2d285 dal-minio:0.1   # a loaded image keeps tags, not digests
+docker save dal:<tag> dal-minio:0.1 dal-proxy:0.1 | gzip > dal-images.tgz
+# on the target: gunzip -c dal-images.tgz | docker load; DAL_IMAGE=dal:<tag> and DAL_MINIO_IMAGE=dal-minio:0.1 and LITELLM_IMAGE=dal-proxy:0.1 in deploy/.env
 ```
 
 Build for the target's architecture. An image built on an Apple laptop is arm64
-and fails on an x86 server with `exec format error`; ship images for the target architecture. Ship MinIO too, and pull it from quay.io: Docker Hub no longer serves `minio/minio`
-(denied from every network tried on 2026-09-11).
+and fails on an x86 server with `exec format error`; ship images for the target architecture. Ship MinIO too. Upstream stopped publishing pullable images: Docker Hub denied `minio/minio`
+on 2026-09-11 and quay.io returned 401 for the old pinned tag on 2026-09-30, so the image is
+Chainguard's build, pinned by digest.
 
 ## Pointing a producer at the store (no Phoenix)
 
