@@ -20,8 +20,9 @@ app, IDE panels) is a separate question from how they reach it. For that, and fo
 ## 1. On your machine
 
 The self-host stack in `deploy/` includes the proxy as the optional `capture`
-profile. It needs Docker with the compose plugin and nothing else. No Anthropic API
-key lives on the proxy: a Claude Code login is passed through to Anthropic as is.
+profile. It needs Docker with the compose plugin, and Claude Code already logged in
+(`claude` starts without asking you to sign in). No Anthropic API key lives on the
+proxy: your Claude Code login is passed through to Anthropic as is.
 
 ```sh
 git clone https://github.com/Teraflop-Inc/dev-agent-lens.git
@@ -50,7 +51,11 @@ curl -s http://127.0.0.1:4000/health/liveliness   # "I'm alive!"
 curl -s http://127.0.0.1:4318/health              # ok received=0 written=0 ...
 ```
 
-The first start builds the DAL image from the checkout, which takes a few minutes.
+The first start builds the DAL image from the checkout, in under a minute to a few
+minutes depending on the machine. Before building, compose tries to pull `dal:local`
+and prints `pull access denied for dal ... may require 'docker login'`. That line is
+expected: `dal:local` is a tag the build creates, not one on a registry, and no login is
+needed.
 
 Send one prompt through the proxy:
 
@@ -68,9 +73,10 @@ docker compose -f deploy/compose.yml exec -e DAL_SPAN_LAYOUT=typed dal-sync \
   dal store query "SELECT source, model_name, count(*) AS calls FROM spans GROUP BY 1, 2"
 ```
 
-Expect a row with `source` = `claude-code` (the `CAPTURE_SOURCE` default) and the model
-Claude Code used, plus a row with no model for the proxy's own spans. Spans can take up
-to 30 seconds to land, because the receiver buffers before it writes.
+Expect two rows, both with `source` = `claude-code` (the `CAPTURE_SOURCE` default): one
+with the model Claude Code used, and one with an empty `model_name` for the proxy's own
+spans. One short prompt makes a handful of spans; eight in the last test run. Spans can
+take up to 30 seconds to land, because the receiver buffers before it writes.
 
 To route every Claude Code session on this machine, not only the ones you start with
 the variable, read the tradeoff in [Proxy setup](proxy-setup.md) first. Pointing all of
