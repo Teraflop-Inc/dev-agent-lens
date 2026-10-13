@@ -5,7 +5,7 @@
 name: dal-minio
 services:
   minio:
-    image: quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z
+    image: cgr.dev/chainguard/minio:latest@sha256:4692462f35d97d7e82c30371d82f057703c5d9489bcae726010594c812f2d285
     container_name: dal-minio
     command: server /data --console-address ":9001"
     environment:

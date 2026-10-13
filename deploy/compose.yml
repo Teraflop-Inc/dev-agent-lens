@@ -9,7 +9,9 @@
 name: dal
 services:
   minio:
-    image: quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z
+    # DAL_MINIO_IMAGE: a `docker load`ed tag for an offline install (a loaded image has no
+    # digest, so the pinned default can't be found without pulling). Unset = pull the pin.
+    image: ${DAL_MINIO_IMAGE:-cgr.dev/chainguard/minio:latest@sha256:4692462f35d97d7e82c30371d82f057703c5d9489bcae726010594c812f2d285}
     command: server /data --console-address ":9001"
     environment:
       MINIO_ROOT_USER: ${DAL_STORE_USER:?set DAL_STORE_USER in deploy/.env}
@@ -20,7 +22,7 @@ services:
       - "${DAL_MINIO_BIND:-127.0.0.1}:${DAL_MINIO_PORT:-9100}:9000"
       - "${DAL_MINIO_BIND:-127.0.0.1}:${DAL_MINIO_CONSOLE_PORT:-9101}:9001"
     healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:9000/minio/health/live"]
+      test: ["CMD", "mc", "ready", "local"]  # the image ships mc, not curl
       interval: 10s
       timeout: 5s
       retries: 12
@@ -90,7 +92,9 @@ services:
   # any machine that can reach this host sets ANTHROPIC_BASE_URL=http://<host>:4000 and
   # every call lands in the store as a span, with no Anthropic key on the server.
   litellm:
-    image: ${LITELLM_IMAGE:-dal-proxy:0.1}
+    # LITELLM_IMAGE: the loaded tag for an offline install (dal-proxy:0.1), like
+    # DAL_MINIO_IMAGE. Unset = pull the pinned fork.
+    image: ${LITELLM_IMAGE:-aowen14/litellm-oauth-fix:sha-7a264c3@sha256:9187ffaaebd030e74cf91f6fd049e25466dbd82c3926699ffa12e7b4b5f2a72d}
     profiles: ["capture"]
     depends_on: { dal-otlp: { condition: service_healthy } }
     environment:

@@ -55,6 +55,8 @@ queries you can run against them.
 - [Git events](docs/webhook-events.md): signed GitHub and Forgejo webhooks and
   historical pull-request backfill.
 - [Proxy setup](docs/proxy-setup.md): live LLM tracing with LiteLLM.
+- [Reaching the proxy](docs/reaching-the-proxy.md): run it on one machine, share it on a
+  private network by name, and what a public endpoint would need.
 
 Keep live deployment settings, identities, credentials, and captured data outside
 Git. The public repository contains code and examples, not deployment history or

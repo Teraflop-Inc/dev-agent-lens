@@ -2,6 +2,9 @@
 
 This guide covers setting up the LiteLLM proxy to capture Claude Code traces.
 
+Where to run the proxy so clients can reach it (one machine, a private network, or the
+public internet) is covered in [Reaching the proxy](reaching-the-proxy.md).
+
 ## Prerequisites
 
 - Docker and Docker Compose
