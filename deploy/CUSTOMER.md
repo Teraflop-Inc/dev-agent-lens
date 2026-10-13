@@ -26,7 +26,7 @@ You should see three lines ending in:
 
 ```
 Loaded image: dal:0.1
-Loaded image: quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z
+Loaded image: dal-minio:0.1
 Loaded image: dal-proxy:0.1
 ```
 
@@ -37,10 +37,13 @@ cp .env.example .env
 chmod 600 .env
 ```
 
-Edit `.env`. Four lines matter; leave the rest as they are.
+Edit `.env`. Six lines matter; leave the rest as they are. The three image lines
+name what you just loaded, so nothing is pulled from the internet.
 
 ```
 DAL_IMAGE=dal:0.1
+DAL_MINIO_IMAGE=dal-minio:0.1
+LITELLM_IMAGE=dal-proxy:0.1
 DAL_STORE_USER=<pick a name>
 DAL_STORE_PASSWORD=<pick a long password>
 LITELLM_MASTER_KEY=<pick another long password>
@@ -78,7 +81,9 @@ The first prints `ok received=0 written=0 flushes=0 failed=0`. The second prints
 ## 5. Point Claude Code at it
 
 On each person's machine, in `~/.claude/settings.json`, add the `env` block (merge it
-if the file already has one). `<store-host>` is this machine's address on the VPN.
+if the file already has one). `<store-host>` is this machine's name on the VPN. Use the
+name, not its IP address: a VPN address can change when the machine re-registers, and every
+copy of the old one then stops working.
 
 ```json
 {
