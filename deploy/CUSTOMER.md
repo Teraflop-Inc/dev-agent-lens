@@ -93,10 +93,12 @@ copy of the old one then stops working.
 }
 ```
 
-This works for the CLI and for the Claude Code desktop app (the **Code** tab; a plain
-chat with a folder attached does not go through it). Both read that file. To scope it to
+This works for the CLI and the VS Code extension. It does not cover the Claude Code
+desktop app, which ignores the `env` block (checked 2026-09-29, Claude Code 2.1.284), or
+Remote Control: Claude Code switches Remote Control off whenever `ANTHROPIC_BASE_URL` is
+not api.anthropic.com. Capture those two through the hooks and session files. To scope it to
 work folders instead of the whole machine, put the same block in `<folder>/.claude/settings.json`;
-only sessions opened in that folder route through the proxy. Restart the desktop app after editing. People keep logging in the way they do today;
+only sessions opened in that folder route through the proxy. People keep logging in the way they do today;
 the proxy forwards their own login to Anthropic and keeps a copy of each call.
 
 Have one person run any prompt. Then on the server:
