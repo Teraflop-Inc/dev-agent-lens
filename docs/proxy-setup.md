@@ -84,6 +84,10 @@ job, CI step, or `Task`-style worker shells out to `claude`, point it at `claude
 > It looks like a one-line way to catch every invocation, but it makes *all* Claude Code usage
 > hard-depend on the proxy being reachable — when the container is down or you're off the
 > network that hosts it, Claude stops working entirely rather than merely going untraced.
+> It also switches off Remote Control: Claude Code disables it whenever `ANTHROPIC_BASE_URL` is
+> not api.anthropic.com, so a phone can no longer drive the session. The same applies under
+> `claude-lens`; start plain `claude` for a session you will drive remotely (the hooks still
+> capture it).
 > The wrapper's health check exists precisely so that failure is explicit and scoped to runs
 > you asked to trace.
 
