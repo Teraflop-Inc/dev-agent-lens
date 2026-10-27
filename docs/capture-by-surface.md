@@ -179,19 +179,20 @@ cell that starts working.
 |---|---|---|---|---|
 | Codex CLI (`codex`, interactive) | user-level provider in `~/.codex/config.toml` | working · 0.160.0 · 2026-10-05, unverified since | working · 0.160.0 · 2026-10-05, unverified since | working · 0.160.0 · 2026-10-05, unverified since |
 | `codex exec` | same | working · 0.160.0 · 2026-10-05, unverified since | working · 0.164.0 · 2026-10-27 | working · 0.160.0 · 2026-10-05, unverified since |
-| Codex desktop app | `~/.codex/config.toml` | unverified | unverified | unverified |
+| Codex desktop app | user-level provider in `~/.codex/config.toml` | working · 26.928.40906 · 2026-10-02, unverified since | working · 26.928.40906 · 2026-10-02, unverified since | working · 26.928.40906 · 2026-10-02, unverified since |
 | Codex cloud | n/a | unverified | unverified | unverified |
 
-The canary's Codex login was revoked on 2026-10-06, so every Codex cell that needs a model
+The canary's Codex login was signed out on 2026-10-05, so every Codex cell that needs a model
 call has had no fresh proof since. The `exec` hooks cell still passes because the hook runs
-before the failed call. The pinned lane, 0.159.0, has the same results.
+before the failed call. The pinned lane, 0.159.0, has the same results. The desktop row comes
+from a one-off canary run on 2026-10-02, before the daily run covered the desktop app.
 
 ### Recommended recording method
 
 | Surface | Tokens and model from | Surface name from | Person from |
 |---|---|---|---|
 | Codex CLI and `exec` | proxy | hooks | `x-dal-user` header on the proxy call (an email in `identity.yaml`) |
-| Codex desktop app | session files | hooks, unverified | `--user` on ingest, or git `user.email` |
+| Codex desktop app | proxy | hooks | `x-dal-user` header in the provider block |
 
 ### Routing Codex through the proxy
 
@@ -214,8 +215,9 @@ proxy names the person, and it must be an email `identity.yaml` lists: a persona
 leaves every span with `person` empty, without an error. Proxy spans for Codex also carry no
 `agent` value yet.
 
-The same block in `~/.codex/config.toml` would reach the desktop app, which reads that file;
-that is unverified.
+Written as `model_provider` and `[model_providers.dal]` in the user-level
+`~/.codex/config.toml` instead of passed with `-c`, the same block also routes the desktop
+app (ChatGPT.app 26.928.40906, 2026-10-02).
 
 ### Every capture mechanism Codex documents
 
@@ -288,6 +290,5 @@ it saw that have no entry.
 - **Cloud sessions** (claude.ai/code, and Codex cloud) leave nothing DAL can reach.
 - **Claude session files are ingested by hand.** `scripts/install_codex_capture.sh`
   schedules Codex session files every minute on macOS; Claude's have no scheduled job yet.
-- **The desktop app's proxy route** (third-party inference mode) and **Codex desktop** are
-  unverified.
+- **Claude desktop's proxy route** (third-party inference mode) is unverified with DAL.
 - **DAL ships no hook script.** The contract above is what one must send.
