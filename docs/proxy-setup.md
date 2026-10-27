@@ -80,16 +80,15 @@ run succeeds, it just leaves no trace. The local transcript under `~/.claude/pro
 still written either way, so the data isn't lost; only the telemetry is. If a script, cron
 job, CI step, or `Task`-style worker shells out to `claude`, point it at `claude-lens`.
 
-> **Don't "fix" this by putting `ANTHROPIC_BASE_URL` in `~/.claude/settings.json`.**
-> It looks like a one-line way to catch every invocation, but it makes *all* Claude Code usage
-> hard-depend on the proxy being reachable — when the container is down or you're off the
-> network that hosts it, Claude stops working entirely rather than merely going untraced.
-> It also switches off Remote Control: Claude Code disables it whenever `ANTHROPIC_BASE_URL` is
-> not api.anthropic.com, so a phone can no longer drive the session. The same applies under
-> `claude-lens`; start plain `claude` for a session you will drive remotely (the hooks still
-> capture it).
-> The wrapper's health check exists precisely so that failure is explicit and scoped to runs
-> you asked to trace.
+> **Putting `ANTHROPIC_BASE_URL` in `~/.claude/settings.json` instead is a tradeoff.**
+> It catches every invocation, including headless jobs and the VS Code extension, but every
+> Claude Code session then depends on the proxy: when it is down or unreachable, Claude Code
+> stops working instead of going untraced. It also switches off Remote Control, which Claude
+> Code disables whenever `ANTHROPIC_BASE_URL` is not api.anthropic.com (the same applies under
+> `claude-lens`), and it does nothing for the desktop app, which ignores it. The wrapper's
+> health check keeps failure explicit and scoped to runs you asked to trace.
+> [Capture by surface](capture-by-surface.md) lays out each option per surface, with the
+> verification query for each.
 
 ### Custom Proxy URL
 
