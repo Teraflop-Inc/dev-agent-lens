@@ -94,11 +94,14 @@ copy of the old one then stops working.
 ```
 
 This works for the CLI and the VS Code extension. It does not cover the Claude Code
-desktop app, which ignores the `env` block (checked 2026-09-29, Claude Code 2.1.284), or
+desktop app, which sets `ANTHROPIC_BASE_URL` itself and ignores the `env` block, or
 Remote Control: Claude Code switches Remote Control off whenever `ANTHROPIC_BASE_URL` is
 not api.anthropic.com. Capture those two through the hooks and session files. To scope it to
 work folders instead of the whole machine, put the same block in `<folder>/.claude/settings.json`;
-only sessions opened in that folder route through the proxy. People keep logging in the way they do today;
+only sessions opened in that folder route through the proxy. Either way, Claude Code on
+that machine stops working while the proxy is unreachable. The per-surface tradeoffs, and
+the wrapper that avoids that dependency, are in
+[Capture by surface](https://github.com/Teraflop-Inc/dev-agent-lens/blob/main/docs/capture-by-surface.md). People keep logging in the way they do today;
 the proxy forwards their own login to Anthropic and keeps a copy of each call.
 
 Have one person run any prompt. Then on the server:

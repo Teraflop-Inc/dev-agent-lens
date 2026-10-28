@@ -55,6 +55,8 @@ queries you can run against them.
 - [Git events](docs/webhook-events.md): signed GitHub and Forgejo webhooks and
   historical pull-request backfill.
 - [Proxy setup](docs/proxy-setup.md): live LLM tracing with LiteLLM.
+- [Capture by surface](docs/capture-by-surface.md): which path (proxy, hooks, session
+  files) reaches each Claude Code and Codex surface, verified per version and date.
 - [Reaching the proxy](docs/reaching-the-proxy.md): run it on one machine, share it on a
   private network by name, and what a public endpoint would need.
 

@@ -13,9 +13,10 @@ There are three setups. Pick by who needs to reach the proxy.
 | [2. On a private network](#2-on-a-private-network) | A team on a VPN or tailnet, plus their containers and sandboxes | `http://<proxy-name>:4000`, a DNS name, never an IP | Supported |
 | [3. On the public internet](#3-on-the-public-internet) | Devices that cannot join the private network | `https://<public-host>` with a per-person key | Not shipped |
 
-Which Claude Code surfaces honour the proxy setting (terminal, headless `-p`, desktop
-app, IDE panels) is a separate question from how they reach it. For that, and for the
-`claude-lens` wrapper versus a `settings.json` entry, see [Proxy setup](proxy-setup.md).
+Which Claude Code and Codex surfaces honor the proxy setting (terminal, headless `-p`,
+desktop app, IDE panels, Remote Control) is a separate question from how they reach it.
+For that, and for the `claude-lens` wrapper versus a `settings.json` entry, see
+[Capture by surface](capture-by-surface.md).
 
 ## 1. On your machine
 
